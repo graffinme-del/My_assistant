@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 import httpx
 from pypdf import PdfReader
@@ -165,3 +166,44 @@ def match_case(db: Session, filename: str, text: str, preferred_case_id: int | N
     if best:
         return best, max(0.6, best_score)
     return cases[0], 0.45
+
+
+async def llm_document_routing(
+    *,
+    filename: str,
+    text: str,
+    available_case_numbers: list[str],
+) -> dict[str, Any] | None:
+    if not settings.openai_api_key:
+        return None
+
+    text_sample = text[:8000]
+    prompt = (
+        "Ты помощник для сортировки судебных документов.\n"
+        "Верни JSON строго в формате:\n"
+        '{"category":"...","case_number":"...","confidence":0.0,"short_note":"..."}\n'
+        "category выбирай из: court_act, power_of_attorney, claim, review, complaint, evidence, correspondence, other.\n"
+        "case_number выбери из списка доступных номеров дел, либо пустую строку если не уверен.\n"
+        "confidence от 0 до 1.\n\n"
+        f"Доступные номера дел: {available_case_numbers}\n"
+        f"Имя файла: {filename}\n"
+        f"Текст:\n{text_sample}"
+    )
+    headers = {
+        "Authorization": f"Bearer {settings.openai_api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": settings.openai_model,
+        "input": prompt,
+    }
+    async with httpx.AsyncClient(timeout=45) as client:
+        resp = await client.post("https://api.openai.com/v1/responses", headers=headers, json=payload)
+        resp.raise_for_status()
+        raw = (resp.json().get("output_text") or "").strip()
+    try:
+        import json
+
+        return json.loads(raw)
+    except Exception:
+        return None

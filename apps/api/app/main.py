@@ -13,6 +13,7 @@ from .ai_service import (
     classify_document,
     extract_document_text,
     llm_summary,
+    llm_document_routing,
     match_case,
     parse_hearing_note,
 )
@@ -203,12 +204,37 @@ async def ingest_document(
 
     extracted_text = extract_document_text(dst, safe_name)
     category, class_confidence = classify_document(safe_name, extracted_text)
-    matched_case, case_confidence = match_case(
-        db,
+
+    all_cases = db.query(Case).all()
+    llm_route = await llm_document_routing(
         filename=safe_name,
         text=extracted_text,
-        preferred_case_id=preferred_case_id,
+        available_case_numbers=[c.case_number for c in all_cases],
     )
+
+    matched_case = None
+    case_confidence = 0.0
+    llm_note = ""
+    if llm_route:
+        llm_case_number = str(llm_route.get("case_number", "")).strip()
+        llm_category = str(llm_route.get("category", "")).strip()
+        llm_confidence = float(llm_route.get("confidence", 0.0) or 0.0)
+        llm_note = str(llm_route.get("short_note", "")).strip()
+        if llm_category:
+            category = llm_category
+        if llm_case_number:
+            matched_case = db.query(Case).filter(Case.case_number == llm_case_number).first()
+        if matched_case:
+            case_confidence = max(0.7, llm_confidence)
+        class_confidence = max(class_confidence, llm_confidence)
+
+    if not matched_case:
+        matched_case, case_confidence = match_case(
+            db,
+            filename=safe_name,
+            text=extracted_text,
+            preferred_case_id=preferred_case_id,
+        )
     if not matched_case:
         raise HTTPException(status_code=400, detail="Сначала создайте хотя бы одно дело.")
 
@@ -224,7 +250,10 @@ async def ingest_document(
         CaseEvent(
             case_id=matched_case.id,
             event_type="document_ingested",
-            body=f"Добавлен документ: {safe_name} (категория: {category})",
+            body=(
+                f"Добавлен документ: {safe_name} (категория: {category}). "
+                f"{llm_note}".strip()
+            ),
         )
     )
     db.commit()
