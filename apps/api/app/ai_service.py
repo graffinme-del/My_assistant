@@ -168,6 +168,46 @@ def match_case(db: Session, filename: str, text: str, preferred_case_id: int | N
     return cases[0], 0.45
 
 
+def extract_case_number(text: str) -> str | None:
+    # Examples:
+    # - А40-12345/2026
+    # - 2-123/2026
+    # Keep it intentionally permissive for messy Telegram copies.
+    patterns = [
+        r"([АA]\d{1,4}\s*-\s*\d{1,7}\s*/\s*\d{2,4})",
+        r"(\d{1,2}\s*-\s*\d{1,7}\s*/\s*\d{2,4})",
+        r"(\d{1,4}\s*\/\s*\d{2,4})",
+    ]
+    for p in patterns:
+        m = re.search(p, text, flags=re.IGNORECASE)
+        if m:
+            raw = m.group(1) if m.lastindex else m.group(0)
+            raw = raw.replace(" ", "").replace("\n", "")
+            raw = raw.replace("\\", "")
+            return raw
+    return None
+
+
+def looks_like_hearing_note(text: str) -> bool:
+    t = text.lower()
+    keywords = [
+        "отлож",
+        "заседан",
+        "судья",
+        "попросил",
+        "письменно",
+        "приобщ",
+        "доказательств",
+        "экземпляр",
+        "сопостав",
+        "залуч",
+    ]
+    if any(k in t for k in keywords):
+        return True
+    # Date-only hint.
+    return bool(re.search(r"\d{1,2}\.\d{1,2}", text))
+
+
 async def llm_document_routing(
     *,
     filename: str,

@@ -2,6 +2,8 @@ from datetime import datetime, time
 import shutil
 from pathlib import Path
 from uuid import uuid4
+import tempfile
+import zipfile
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,6 +18,8 @@ from .ai_service import (
     llm_document_routing,
     match_case,
     parse_hearing_note,
+    extract_case_number,
+    looks_like_hearing_note,
 )
 from .config import settings
 from .db import Base, engine, get_db
@@ -30,9 +34,14 @@ from .schemas import (
     EventCreate,
     EventOut,
     HearingNoteIn,
+    AssistantIngestIn,
+    AssistantIngestOut,
     SummaryOut,
     TaskCreate,
     TaskOut,
+    BulkIngestOut,
+    AssistantSummaryIn,
+    AssistantSummaryOut,
 )
 
 Base.metadata.create_all(bind=engine)
@@ -237,7 +246,35 @@ async def ingest_document(
             preferred_case_id=preferred_case_id,
         )
     if not matched_case:
-        raise HTTPException(status_code=400, detail="Сначала создайте хотя бы одно дело.")
+        # Hands-off: если номер дела распознался, создадим дело автоматически.
+        auto_case_number = extract_case_number(extracted_text) or extract_case_number(safe_name)
+        if auto_case_number:
+            normalized_auto = auto_case_number.replace(" ", "").replace("\n", "")
+            case = db.query(Case).filter(Case.case_number == normalized_auto).first()
+            if not case:
+                case = Case(
+                    title=f"Дело {normalized_auto}",
+                    court_name="неизвестно",
+                    case_number=normalized_auto,
+                    status="analysis",
+                    stage="analysis",
+                )
+                db.add(case)
+                db.commit()
+                db.refresh(case)
+                db.add(
+                    CaseEvent(
+                        case_id=case.id,
+                        event_type="case_auto_created",
+                        body=f"Автосоздано дело из документа: {safe_name}",
+                    )
+                )
+                db.commit()
+            matched_case = case
+            case_confidence = 0.4
+
+    if not matched_case:
+        raise HTTPException(status_code=400, detail="Не удалось привязать документ к делу.")
 
     doc = Document(
         case_id=matched_case.id,
@@ -292,6 +329,132 @@ def process_hearing_note(
     }
 
 
+@app.post("/documents/bulk-ingest", response_model=BulkIngestOut)
+async def bulk_ingest(
+    zip_file: UploadFile = File(...),
+    preferred_case_number: str | None = Form(default=None),
+    max_files: int = Form(default=25),
+    db: Session = Depends(get_db),
+    _: str = Depends(require_user),
+) -> BulkIngestOut:
+    # MVP: unzip -> for each supported file do the same auto routing as single ingest.
+    # For now, indexing is synchronous (keep ZIP sizes moderate).
+    if not zip_file.filename or not zip_file.filename.lower().endswith(".zip"):
+        raise HTTPException(status_code=400, detail="Ожидается ZIP-архив (.zip)")
+
+    preferred_case_id = None
+    if preferred_case_number:
+        normalized = preferred_case_number.replace(" ", "").replace("\n", "")
+        preferred_case_id = db.query(Case).filter(Case.case_number == normalized).first()
+        preferred_case_id = preferred_case_id.id if preferred_case_id else None
+
+    safe_name = f"{uuid4().hex}-{zip_file.filename}"
+    dst = STORAGE_ROOT / safe_name
+    with dst.open("wb") as out:
+        shutil.copyfileobj(zip_file.file, out)
+
+    total_files = 0
+    ingested_files = 0
+    skipped_files = 0
+    errors: list[str] = []
+
+    try:
+        with zipfile.ZipFile(dst) as zf, tempfile.TemporaryDirectory() as td:
+            members = [m for m in zf.infolist() if not m.is_dir()]
+            total_files = len(members)
+            if total_files == 0:
+                return BulkIngestOut(
+                    total_files=0, ingested_files=0, skipped_files=0, errors=["Архив пуст."]
+                )
+
+            for idx, m in enumerate(members):
+                if idx >= max_files:
+                    break
+                ext = (m.filename.rsplit(".", 1)[-1] if "." in m.filename else "").lower()
+                if ext not in {"pdf", "txt", "md"}:
+                    # We still store metadata, but extracted text will be empty.
+                    skipped_files += 1
+                    continue
+
+                # Extract one file
+                extracted_path = Path(td) / Path(m.filename).name
+                with zf.open(m) as src, extracted_path.open("wb") as f_out:
+                    shutil.copyfileobj(src, f_out)
+
+                original_name = Path(m.filename).name
+                extracted_text = extract_document_text(extracted_path, original_name)
+                category, class_confidence = classify_document(original_name, extracted_text)
+
+                matched_case, case_confidence = match_case(
+                    db,
+                    filename=original_name,
+                    text=extracted_text,
+                    preferred_case_id=preferred_case_id,
+                )
+                if not matched_case:
+                    auto_case_number = extract_case_number(extracted_text) or extract_case_number(original_name)
+                    if auto_case_number:
+                        normalized_auto = auto_case_number.replace(" ", "").replace("\n", "")
+                        case = db.query(Case).filter(Case.case_number == normalized_auto).first()
+                        if not case:
+                            case = Case(
+                                title=f"Дело {normalized_auto}",
+                                court_name="неизвестно",
+                                case_number=normalized_auto,
+                                status="analysis",
+                                stage="analysis",
+                            )
+                            db.add(case)
+                            db.commit()
+                            db.refresh(case)
+                            db.add(
+                                CaseEvent(
+                                    case_id=case.id,
+                                    event_type="case_auto_created",
+                                    body=f"Автосоздано дело из архива документов: {original_name}",
+                                )
+                            )
+                            db.commit()
+                        matched_case = case
+                        case_confidence = 0.4
+                    else:
+                        skipped_files += 1
+                        continue
+
+                storage_name = f"{uuid4().hex}-{original_name}"
+                final_path = STORAGE_ROOT / storage_name
+                shutil.copyfile(str(extracted_path), final_path)
+
+                doc = Document(
+                    case_id=matched_case.id,
+                    filename=original_name,
+                    category=category,
+                    s3_key=f"local://{storage_name}",
+                    extracted_text=extracted_text[:60000],
+                )
+                db.add(doc)
+                db.add(
+                    CaseEvent(
+                        case_id=matched_case.id,
+                        event_type="document_ingested",
+                        body=f"Bulk ingest: {original_name} (категория: {category})",
+                    )
+                )
+                db.commit()
+                ingested_files += 1
+    except zipfile.BadZipFile:
+        raise HTTPException(status_code=400, detail="ZIP поврежден или не распаковывается.")
+    except Exception as e:
+        errors.append(str(e))
+
+    return BulkIngestOut(
+        total_files=total_files,
+        ingested_files=ingested_files,
+        skipped_files=skipped_files,
+        errors=errors,
+    )
+
+
 @app.get("/cases/{case_id}/summary", response_model=SummaryOut)
 async def case_summary(
     case_id: int, db: Session = Depends(get_db), _: str = Depends(require_user)
@@ -337,3 +500,93 @@ def global_search(q: str, db: Session = Depends(get_db), _: str = Depends(requir
         "cases": [{"id": c.id, "title": c.title, "case_number": c.case_number} for c in cases],
         "documents": [{"id": d.id, "case_id": d.case_id, "filename": d.filename} for d in docs],
     }
+
+
+@app.post("/assistant/summary-from-text", response_model=AssistantSummaryOut)
+async def assistant_summary_from_text(
+    payload: AssistantSummaryIn,
+    db: Session = Depends(get_db),
+    _: str = Depends(require_user),
+) -> AssistantSummaryOut:
+    extracted_case_number = payload.preferred_case_number or extract_case_number(payload.text)
+    if not extracted_case_number:
+        raise HTTPException(status_code=400, detail="Не удалось найти номер дела в тексте.")
+
+    normalized_case_number = extracted_case_number.replace(" ", "").replace("\n", "")
+    case = db.query(Case).filter(Case.case_number == normalized_case_number).first()
+    if not case:
+        raise HTTPException(status_code=404, detail="Дело не найдено.")
+
+    events = db.query(CaseEvent).filter(CaseEvent.case_id == case.id).all()
+    tasks = db.query(Task).filter(Task.case_id == case.id).all()
+    local_summary = build_case_summary(case, events, tasks)
+    ai_text = await llm_summary(local_summary)
+    return AssistantSummaryOut(
+        case_id=case.id,
+        case_number=case.case_number,
+        summary=ai_text,
+        next_hearing_date=case.next_hearing_date,
+    )
+
+
+@app.post("/assistant/ingest-text", response_model=AssistantIngestOut)
+async def assistant_ingest_text(
+    payload: AssistantIngestIn,
+    db: Session = Depends(get_db),
+    _: str = Depends(require_user),
+) -> AssistantIngestOut:
+    text = payload.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Empty text")
+
+    extracted_case_number = payload.preferred_case_number or extract_case_number(text)
+    if not extracted_case_number:
+        raise HTTPException(
+            status_code=400,
+            detail="Не удалось найти номер дела в тексте. Укажи номер (или создай дело и прикрепляй сообщения).",
+        )
+
+    normalized_case_number = extracted_case_number.replace(" ", "").replace("\n", "")
+    case = db.query(Case).filter(Case.case_number == normalized_case_number).first()
+    created_case = False
+
+    if not case:
+        if not payload.allow_case_create:
+            raise HTTPException(status_code=404, detail="Дело с таким номером не найдено.")
+        case = Case(
+            title=f"Дело {normalized_case_number}",
+            court_name="неизвестно",
+            case_number=normalized_case_number,
+            status="analysis",
+            stage="analysis",
+        )
+        db.add(case)
+        db.commit()
+        db.refresh(case)
+        created_case = True
+
+    created_tasks = 0
+    next_hearing_date = None
+
+    if looks_like_hearing_note(text):
+        _, tasks, next_hearing_date = parse_hearing_note(db, case, text)
+        created_tasks = len(tasks)
+        return AssistantIngestOut(
+            case_id=case.id,
+            case_number=case.case_number,
+            created_case=created_case,
+            mode="hearing-parser",
+            created_tasks=created_tasks,
+            next_hearing_date=next_hearing_date,
+        )
+
+    db.add(CaseEvent(case_id=case.id, event_type="assistant_message", body=text))
+    db.commit()
+    return AssistantIngestOut(
+        case_id=case.id,
+        case_number=case.case_number,
+        created_case=created_case,
+        mode="message",
+        created_tasks=0,
+        next_hearing_date=case.next_hearing_date,
+    )

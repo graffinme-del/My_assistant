@@ -114,3 +114,37 @@ class SummaryOut(BaseModel):
     case_id: int
     summary: str
     next_hearing_date: date | None
+
+
+class AssistantIngestIn(BaseModel):
+    text: str
+    preferred_case_number: str | None = None
+    allow_case_create: bool = True
+
+
+class AssistantIngestOut(BaseModel):
+    case_id: int
+    case_number: str
+    created_case: bool
+    mode: str  # hearing-parser | message
+    created_tasks: int = 0
+    next_hearing_date: date | None = None
+
+
+class BulkIngestOut(BaseModel):
+    total_files: int
+    ingested_files: int
+    skipped_files: int
+    errors: list[str] = []
+
+
+class AssistantSummaryIn(BaseModel):
+    text: str
+    preferred_case_number: str | None = None
+
+
+class AssistantSummaryOut(BaseModel):
+    case_id: int
+    case_number: str
+    summary: str
+    next_hearing_date: date | None

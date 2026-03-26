@@ -83,6 +83,24 @@
       .error {
         color: #bf1d1d;
       }
+
+      .msg {
+        border: 1px solid #e2e5e9;
+        border-radius: 10px;
+        padding: 10px;
+        margin-bottom: 10px;
+      }
+      .userMsg {
+        background: #eef4ff;
+      }
+      .assistantMsg {
+        background: #fff;
+      }
+      #chatLog pre {
+        white-space: pre-wrap;
+        margin: 0;
+        font-family: Arial, sans-serif;
+      }
     </style>
   </head>
   <body>
@@ -98,7 +116,7 @@
           <div id="healthStatus" class="muted">Проверка API...</div>
         </div>
 
-        <div class="card">
+        <div class="card" style="display:none;">
           <h3>Новое дело</h3>
           <input id="newTitle" placeholder="Название дела" />
           <input id="newCourt" placeholder="Суд" />
@@ -110,7 +128,7 @@
           <button id="createCaseBtn">Создать дело</button>
         </div>
 
-        <div class="card">
+        <div class="card" style="display:none;">
           <h3>Дела</h3>
           <button id="refreshCasesBtn">Обновить список</button>
           <div id="casesList" class="list"></div>
@@ -119,8 +137,24 @@
 
       <main class="main">
         <div id="emptyState" class="card">
-          <h3>Выберите дело слева</h3>
-          <p class="muted">После выбора откроется карточка: таймлайн, задачи, документы, заметка после заседания и сводка.</p>
+          <h3>Диалог с помощником</h3>
+          <div id="chatLog" class="list" style="max-height: 360px;"></div>
+          <textarea id="chatText" rows="6" placeholder="Напиши сообщение юристов (или вопрос). В тексте должен быть номер дела, например А40-12345/2026"></textarea>
+          <div class="row">
+            <button id="micBtn" class="secondary" type="button" style="width:auto;">Микрофон</button>
+            <button id="sendChatBtn" type="button" style="width:auto;">Отправить</button>
+          </div>
+          <div class="muted" style="margin-top:6px;">
+            Для сводки напиши: "сводка А40-12345/2026" или "что происходит А40-12345/2026".
+          </div>
+
+          <div style="margin-top: 14px;">
+            <h3 style="margin-bottom:8px;">Архив документов (ZIP)</h3>
+            <input id="zipFile" type="file" accept=".zip" />
+            <input id="preferredCaseNumber" type="text" placeholder="Подсказка: номер дела (необязательно)" />
+            <button id="bulkBtn" type="button">Загрузить ZIP и разобрать</button>
+            <div id="bulkResult" class="muted"></div>
+          </div>
         </div>
 
         <div id="caseWorkspace" style="display:none;">
@@ -335,6 +369,90 @@
         el("summaryText").textContent = s.summary;
       }
 
+      function appendChat(role, text) {
+        const log = el("chatLog");
+        const box = document.createElement("div");
+        box.className = role === "user" ? "msg userMsg" : "msg assistantMsg";
+        const pre = document.createElement("pre");
+        pre.textContent = text;
+        box.appendChild(pre);
+        log.appendChild(box);
+        log.scrollTop = log.scrollHeight;
+      }
+
+      function chatLooksLikeSummaryRequest(text) {
+        const t = (text || "").toLowerCase();
+        return t.includes("сводка") || t.includes("/summary") || t.includes("что происходит");
+      }
+
+      async function sendChat() {
+        const text = el("chatText").value.trim();
+        if (!text) return;
+        el("chatText").value = "";
+        appendChat("user", text);
+        try {
+          let result;
+          if (chatLooksLikeSummaryRequest(text)) {
+            result = await api("/assistant/summary-from-text", {
+              method: "POST",
+              body: JSON.stringify({ text })
+            });
+            appendChat(
+              "assistant",
+              "Сводка по делу " +
+                result.case_number +
+                ":\n\n" +
+                result.summary +
+                (result.next_hearing_date ? "\n\nСледующее заседание: " + result.next_hearing_date : "")
+            );
+          } else {
+            result = await api("/assistant/ingest-text", {
+              method: "POST",
+              body: JSON.stringify({ text })
+            });
+            let msg =
+              "Зафиксировал для дела " +
+              result.case_number +
+              (result.created_case ? " (дело создано)" : "") +
+              "\nРежим: " +
+              result.mode +
+              "\nСоздано задач: " +
+              result.created_tasks;
+            if (result.next_hearing_date) msg += "\nСледующее заседание: " + result.next_hearing_date;
+            appendChat("assistant", msg);
+          }
+        } catch (e) {
+          appendChat("assistant", "Ошибка: " + (e && e.message ? e.message : String(e)));
+        }
+      }
+
+      async function uploadBulkZip() {
+        const file = el("zipFile").files && el("zipFile").files[0];
+        if (!file) {
+          el("bulkResult").textContent = "Выбери ZIP-файл.";
+          return;
+        }
+        el("bulkResult").textContent = "Загружаю ZIP и обрабатываю...";
+        try {
+          const fd = new FormData();
+          fd.append("zip_file", file);
+          const pc = el("preferredCaseNumber").value.trim();
+          if (pc) fd.append("preferred_case_number", pc);
+          const res = await api("/documents/bulk-ingest", { method: "POST", body: fd });
+          let msg =
+            "ZIP обработан. Всего файлов: " +
+            res.total_files +
+            ", добавлено: " +
+            res.ingested_files +
+            ", пропущено: " +
+            res.skipped_files;
+          if (res.errors && res.errors.length) msg += "\nПервая ошибка: " + res.errors[0];
+          el("bulkResult").textContent = msg;
+        } catch (e) {
+          el("bulkResult").textContent = "Ошибка: " + (e && e.message ? e.message : String(e));
+        }
+      }
+
       function init() {
         el("apiBase").value = storage.apiBase;
         el("apiToken").value = storage.apiToken;
@@ -343,7 +461,6 @@
           localStorage.setItem("apiBase", el("apiBase").value.trim());
           localStorage.setItem("apiToken", el("apiToken").value.trim());
           await checkHealth();
-          await loadCases();
         };
         el("refreshCasesBtn").onclick = loadCases;
         el("createCaseBtn").onclick = createCase;
@@ -352,7 +469,34 @@
         el("ingestDocBtn").onclick = ingestDoc;
         el("processHearingBtn").onclick = processHearingNote;
         el("summaryBtn").onclick = loadSummary;
-        checkHealth().then(loadCases).catch(() => {});
+
+        // New simplified UI: chat + bulk zip
+        const mic = el("micBtn");
+        const send = el("sendChatBtn");
+        const bulk = el("bulkBtn");
+        if (send) send.onclick = sendChat;
+        if (bulk) bulk.onclick = uploadBulkZip;
+
+        // Optional voice input
+        let recognition = null;
+        if (window.SpeechRecognition || window.webkitSpeechRecognition) {
+          const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+          recognition = new SR();
+          recognition.lang = "ru-RU";
+          recognition.continuous = false;
+          recognition.interimResults = false;
+          recognition.onresult = (event) => {
+            const t = event.results[0][0].transcript;
+            el("chatText").value = t;
+          };
+        } else if (mic) {
+          mic.disabled = true;
+        }
+        if (mic && recognition) {
+          mic.onclick = () => recognition.start();
+        }
+
+        checkHealth().catch(() => {});
       }
 
       init();
