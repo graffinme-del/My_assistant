@@ -20,6 +20,8 @@ jobs:
         run: |
           rsync -az --delete \
             --exclude ".git" \
+            --exclude ".env" \
+            --exclude "backups/" \
             ./ ${{ secrets.HETZNER_USER }}@${{ secrets.HETZNER_HOST }}:${{ secrets.DEPLOY_PATH }}/
       - name: Deploy with Docker Compose
         run: |
