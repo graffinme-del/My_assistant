@@ -95,6 +95,15 @@ class DocumentOut(BaseModel):
         from_attributes = True
 
 
+class DocumentIngestOut(BaseModel):
+    document: DocumentOut
+    matched_case_id: int
+    matched_case_number: str
+    category: str
+    confidence: float
+    note: str
+
+
 class HearingNoteIn(BaseModel):
     text: str
 

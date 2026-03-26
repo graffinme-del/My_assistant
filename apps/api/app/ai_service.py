@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import re
 from datetime import date
+from pathlib import Path
 
 import httpx
+from pypdf import PdfReader
 from sqlalchemy.orm import Session
 
 from .config import settings
@@ -97,3 +99,69 @@ def parse_hearing_note(db: Session, case: Case, text: str) -> tuple[CaseEvent, l
         db.refresh(task)
 
     return event, tasks, extracted_date
+
+
+def extract_document_text(file_path: Path, filename: str) -> str:
+    suffix = filename.lower().split(".")[-1] if "." in filename else ""
+    if suffix in {"txt", "md"}:
+        return file_path.read_text(encoding="utf-8", errors="ignore")
+    if suffix == "pdf":
+        reader = PdfReader(str(file_path))
+        chunks: list[str] = []
+        for page in reader.pages[:30]:
+            chunks.append(page.extract_text() or "")
+        return "\n".join(chunks).strip()
+    return ""
+
+
+def classify_document(filename: str, text: str) -> tuple[str, float]:
+    probe = f"{filename}\n{text}".lower()
+    mapping = [
+        ("court_act", ["определение", "решение суда", "постановление"]),
+        ("power_of_attorney", ["доверенность", "power of attorney"]),
+        ("claim", ["исковое заявление", "иск", "claim"]),
+        ("review", ["отзыв", "возражения"]),
+        ("complaint", ["жалоба", "апелляция", "кассация"]),
+        ("evidence", ["cmr", "доказательств", "приложени"]),
+    ]
+    for category, keys in mapping:
+        if any(key in probe for key in keys):
+            return category, 0.85
+    return "other", 0.55
+
+
+def _normalize(value: str) -> str:
+    return re.sub(r"[^a-zа-я0-9]", "", value.lower())
+
+
+def match_case(db: Session, filename: str, text: str, preferred_case_id: int | None = None) -> tuple[Case | None, float]:
+    if preferred_case_id:
+        case = db.query(Case).filter(Case.id == preferred_case_id).first()
+        if case:
+            return case, 0.9
+
+    cases = db.query(Case).all()
+    if not cases:
+        return None, 0.0
+
+    corpus = _normalize(f"{filename}\n{text}")[:30000]
+    for case in cases:
+        if _normalize(case.case_number) in corpus and len(_normalize(case.case_number)) > 4:
+            return case, 0.95
+
+    best: Case | None = None
+    best_score = 0.0
+    for case in cases:
+        score = 0.0
+        title_token = _normalize(case.title)
+        court_token = _normalize(case.court_name)
+        if title_token and title_token[:12] in corpus:
+            score += 0.35
+        if court_token and court_token[:12] in corpus:
+            score += 0.25
+        if score > best_score:
+            best_score = score
+            best = case
+    if best:
+        return best, max(0.6, best_score)
+    return cases[0], 0.45

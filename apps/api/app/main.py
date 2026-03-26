@@ -1,17 +1,28 @@
 from datetime import datetime, time
+import shutil
+from pathlib import Path
+from uuid import uuid4
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from .ai_service import build_case_summary, llm_summary, parse_hearing_note
+from .ai_service import (
+    build_case_summary,
+    classify_document,
+    extract_document_text,
+    llm_summary,
+    match_case,
+    parse_hearing_note,
+)
 from .config import settings
 from .db import Base, engine, get_db
 from .models import Case, CaseEvent, Document, Reminder, Task
 from .schemas import (
     CaseCreate,
     CaseOut,
+    DocumentIngestOut,
     DocumentCreate,
     DocumentOut,
     ReminderOut,
@@ -33,6 +44,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+STORAGE_ROOT = Path("/app/storage")
+STORAGE_ROOT.mkdir(parents=True, exist_ok=True)
 
 
 def require_user(x_api_token: str | None = Header(default=None)) -> str:
@@ -172,6 +185,58 @@ def list_documents(
         .filter(Document.case_id == case_id)
         .order_by(Document.created_at.desc())
         .all()
+    )
+
+
+@app.post("/documents/ingest", response_model=DocumentIngestOut)
+async def ingest_document(
+    file: UploadFile = File(...),
+    preferred_case_id: int | None = Form(default=None),
+    db: Session = Depends(get_db),
+    _: str = Depends(require_user),
+) -> DocumentIngestOut:
+    safe_name = file.filename or f"file-{uuid4().hex}.bin"
+    storage_name = f"{uuid4().hex}-{safe_name}"
+    dst = STORAGE_ROOT / storage_name
+    with dst.open("wb") as out:
+        shutil.copyfileobj(file.file, out)
+
+    extracted_text = extract_document_text(dst, safe_name)
+    category, class_confidence = classify_document(safe_name, extracted_text)
+    matched_case, case_confidence = match_case(
+        db,
+        filename=safe_name,
+        text=extracted_text,
+        preferred_case_id=preferred_case_id,
+    )
+    if not matched_case:
+        raise HTTPException(status_code=400, detail="Сначала создайте хотя бы одно дело.")
+
+    doc = Document(
+        case_id=matched_case.id,
+        filename=safe_name,
+        category=category,
+        s3_key=f"local://{storage_name}",
+        extracted_text=extracted_text[:60000],
+    )
+    db.add(doc)
+    db.add(
+        CaseEvent(
+            case_id=matched_case.id,
+            event_type="document_ingested",
+            body=f"Добавлен документ: {safe_name} (категория: {category})",
+        )
+    )
+    db.commit()
+    db.refresh(doc)
+
+    return DocumentIngestOut(
+        document=doc,
+        matched_case_id=matched_case.id,
+        matched_case_number=matched_case.case_number,
+        category=category,
+        confidence=round((class_confidence + case_confidence) / 2, 2),
+        note="Документ автоматически обработан и прикреплен к делу.",
     )
 
 

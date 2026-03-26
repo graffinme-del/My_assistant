@@ -154,14 +154,10 @@
             </section>
 
             <section class="card">
-              <h3>Документы (метаданные)</h3>
-              <input id="docFilename" placeholder="Имя файла (пример: opredelenie.pdf)" />
-              <div class="row">
-                <input id="docCategory" placeholder="Категория" value="court_act" />
-                <input id="docS3Key" placeholder="S3 ключ" value="manual/local-file" />
-              </div>
-              <textarea id="docText" rows="3" placeholder="Текст документа (для поиска)"></textarea>
-              <button id="addDocBtn">Добавить документ</button>
+              <h3>Документы (авторазбор)</h3>
+              <input id="docFileInput" type="file" />
+              <button id="ingestDocBtn">Загрузить и разобрать</button>
+              <div id="docIngestResult" class="muted"></div>
               <div id="docsList" class="list"></div>
             </section>
 
@@ -192,13 +188,13 @@
       async function api(path, options = {}) {
         const base = el("apiBase").value.trim();
         const token = el("apiToken").value.trim();
+        const headers = { ...(options.headers || {}), "X-API-Token": token };
+        if (!(options.body instanceof FormData)) {
+          headers["Content-Type"] = "application/json";
+        }
         const res = await fetch(`${base}${path}`, {
           ...options,
-          headers: {
-            "Content-Type": "application/json",
-            "X-API-Token": token,
-            ...(options.headers || {})
-          }
+          headers
         });
         if (!res.ok) {
           const text = await res.text();
@@ -293,22 +289,32 @@
 
       async function loadDocs() {
         const docs = await api(`/cases/${selectedCaseId}/documents`);
-        el("docsList").innerHTML = docs.map(d => `<div><strong>${d.filename}</strong><div class="muted">${d.category}</div></div><hr/>`).join("");
+        el("docsList").innerHTML = docs
+          .map(d => `<div><strong>${d.filename}</strong><div class="muted">${d.category} | ${d.s3_key}</div></div><hr/>`)
+          .join("");
       }
 
-      async function addDoc() {
-        await api(`/cases/${selectedCaseId}/documents`, {
+      async function ingestDoc() {
+        const fileInput = el("docFileInput");
+        if (!fileInput.files || !fileInput.files[0]) {
+          el("docIngestResult").textContent = "Выбери файл перед загрузкой.";
+          return;
+        }
+        const formData = new FormData();
+        formData.append("file", fileInput.files[0]);
+        if (selectedCaseId) {
+          formData.append("preferred_case_id", String(selectedCaseId));
+        }
+        const result = await api("/documents/ingest", {
           method: "POST",
-          body: JSON.stringify({
-            filename: el("docFilename").value,
-            category: el("docCategory").value || "other",
-            s3_key: el("docS3Key").value || "manual/none",
-            extracted_text: el("docText").value || ""
-          })
+          body: formData
         });
-        el("docFilename").value = "";
-        el("docText").value = "";
+        el("docIngestResult").textContent =
+          `Готово: ${result.document.filename}. Дело: ${result.matched_case_number}. ` +
+          `Категория: ${result.category}. Уверенность: ${result.confidence}`;
+        fileInput.value = "";
         await loadDocs();
+        await loadEvents();
       }
 
       async function processHearingNote() {
@@ -342,7 +348,7 @@
         el("createCaseBtn").onclick = createCase;
         el("addEventBtn").onclick = addEvent;
         el("addTaskBtn").onclick = addTask;
-        el("addDocBtn").onclick = addDoc;
+        el("ingestDocBtn").onclick = ingestDoc;
         el("processHearingBtn").onclick = processHearingNote;
         el("summaryBtn").onclick = loadSummary;
         checkHealth().then(loadCases).catch(() => {});
