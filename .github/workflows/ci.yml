@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  api-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install API deps
+        run: pip install -r apps/api/requirements.txt
+      - name: Verify FastAPI app import
+        run: python -c "from apps.api.app.main import app; print(app.title)"
+
+  docker-build:
+    runs-on: ubuntu-latest
+    needs: api-check
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build containers
+        run: docker compose build

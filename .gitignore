@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Node/web
+node_modules/
+
+# Env and secrets
+.env
+.env.*
+!.env.example
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Docker
+*.log
+data/
