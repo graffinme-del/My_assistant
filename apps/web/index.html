@@ -5,17 +5,350 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>My Assistant</title>
     <style>
-      body { font-family: Arial, sans-serif; margin: 24px; line-height: 1.45; }
-      .card { max-width: 720px; border: 1px solid #ddd; padding: 18px; border-radius: 8px; }
-      code { background: #f3f3f3; padding: 2px 6px; border-radius: 4px; }
+      :root {
+        font-family: Arial, sans-serif;
+      }
+      body {
+        margin: 0;
+        background: #f6f7f9;
+        color: #1b1f24;
+      }
+      .layout {
+        display: grid;
+        grid-template-columns: 360px 1fr;
+        min-height: 100vh;
+      }
+      .panel {
+        background: #fff;
+        border-right: 1px solid #e2e5e9;
+        padding: 16px;
+      }
+      .main {
+        padding: 16px;
+      }
+      h1, h2, h3 {
+        margin-top: 0;
+      }
+      .card {
+        background: #fff;
+        border: 1px solid #e2e5e9;
+        border-radius: 8px;
+        padding: 14px;
+        margin-bottom: 12px;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(180px, 1fr));
+        gap: 8px;
+      }
+      input, textarea, select, button {
+        width: 100%;
+        box-sizing: border-box;
+        margin-top: 6px;
+        margin-bottom: 10px;
+        padding: 8px;
+      }
+      button {
+        cursor: pointer;
+      }
+      .case-item {
+        border: 1px solid #e2e5e9;
+        border-radius: 6px;
+        padding: 10px;
+        margin-bottom: 8px;
+        cursor: pointer;
+      }
+      .case-item.active {
+        border-color: #2463eb;
+        background: #eef4ff;
+      }
+      .muted {
+        color: #5e6773;
+        font-size: 13px;
+      }
+      .row {
+        display: flex;
+        gap: 8px;
+      }
+      .row > * {
+        flex: 1;
+      }
+      .list {
+        max-height: 220px;
+        overflow: auto;
+      }
+      .ok {
+        color: #0a7d32;
+      }
+      .error {
+        color: #bf1d1d;
+      }
     </style>
   </head>
   <body>
-    <div class="card">
-      <h1>My Assistant (MVP)</h1>
-      <p>Веб-панель запущена. Бэкенд API доступен по адресу <code>/health</code>.</p>
-      <p>Первый шаг разработки завершен: каркас, API, инфраструктура и CI/CD шаблон.</p>
-      <p>Дальше подключаем полноценный интерфейс карточек дел и задач.</p>
+    <div class="layout">
+      <aside class="panel">
+        <h2>My Assistant</h2>
+        <div class="card">
+          <label>API URL</label>
+          <input id="apiBase" placeholder="http://49.12.235.166:8000" />
+          <label>Токен</label>
+          <input id="apiToken" placeholder="OWNER_TOKEN из .env" />
+          <button id="saveConfig">Сохранить</button>
+          <div id="healthStatus" class="muted">Проверка API...</div>
+        </div>
+
+        <div class="card">
+          <h3>Новое дело</h3>
+          <input id="newTitle" placeholder="Название дела" />
+          <input id="newCourt" placeholder="Суд" />
+          <input id="newNumber" placeholder="Номер дела" />
+          <div class="row">
+            <input id="newStatus" placeholder="Статус" value="in_progress" />
+            <input id="newStage" placeholder="Стадия" value="hearing" />
+          </div>
+          <button id="createCaseBtn">Создать дело</button>
+        </div>
+
+        <div class="card">
+          <h3>Дела</h3>
+          <button id="refreshCasesBtn">Обновить список</button>
+          <div id="casesList" class="list"></div>
+        </div>
+      </aside>
+
+      <main class="main">
+        <div id="emptyState" class="card">
+          <h3>Выберите дело слева</h3>
+          <p class="muted">После выбора откроется карточка: таймлайн, задачи, документы, заметка после заседания и сводка.</p>
+        </div>
+
+        <div id="caseWorkspace" style="display:none;">
+          <div class="card">
+            <h2 id="caseHeader">Карточка дела</h2>
+            <div id="caseMeta" class="muted"></div>
+            <button id="summaryBtn">Краткая сводка по делу</button>
+            <pre id="summaryText" style="white-space: pre-wrap;"></pre>
+          </div>
+
+          <div class="grid">
+            <section class="card">
+              <h3>Таймлайн</h3>
+              <textarea id="eventText" rows="3" placeholder="Текст события"></textarea>
+              <div class="row">
+                <input id="eventType" placeholder="Тип события" value="note" />
+                <button id="addEventBtn">Добавить</button>
+              </div>
+              <div id="eventsList" class="list"></div>
+            </section>
+
+            <section class="card">
+              <h3>Задачи</h3>
+              <input id="taskTitle" placeholder="Название задачи" />
+              <div class="row">
+                <input id="taskPriority" placeholder="Приоритет" value="high" />
+                <input id="taskDueDate" type="date" />
+              </div>
+              <button id="addTaskBtn">Добавить задачу</button>
+              <div id="tasksList" class="list"></div>
+            </section>
+
+            <section class="card">
+              <h3>Документы (метаданные)</h3>
+              <input id="docFilename" placeholder="Имя файла (пример: opredelenie.pdf)" />
+              <div class="row">
+                <input id="docCategory" placeholder="Категория" value="court_act" />
+                <input id="docS3Key" placeholder="S3 ключ" value="manual/local-file" />
+              </div>
+              <textarea id="docText" rows="3" placeholder="Текст документа (для поиска)"></textarea>
+              <button id="addDocBtn">Добавить документ</button>
+              <div id="docsList" class="list"></div>
+            </section>
+
+            <section class="card">
+              <h3>После заседания</h3>
+              <textarea id="hearingNoteText" rows="8" placeholder="Вставь сообщение адвоката после заседания"></textarea>
+              <button id="processHearingBtn">Обработать сообщение</button>
+              <div id="hearingResult" class="muted"></div>
+            </section>
+          </div>
+        </div>
+      </main>
     </div>
+    <script>
+      const storage = {
+        get apiBase() { return localStorage.getItem("apiBase") || "http://49.12.235.166:8000"; },
+        get apiToken() { return localStorage.getItem("apiToken") || "owner-dev-token"; }
+      };
+      let selectedCaseId = null;
+
+      const el = (id) => document.getElementById(id);
+
+      function setStatus(node, text, ok = true) {
+        node.textContent = text;
+        node.className = ok ? "ok" : "error";
+      }
+
+      async function api(path, options = {}) {
+        const base = el("apiBase").value.trim();
+        const token = el("apiToken").value.trim();
+        const res = await fetch(`${base}${path}`, {
+          ...options,
+          headers: {
+            "Content-Type": "application/json",
+            "X-API-Token": token,
+            ...(options.headers || {})
+          }
+        });
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(`${res.status} ${text}`);
+        }
+        return res.json();
+      }
+
+      async function checkHealth() {
+        const node = el("healthStatus");
+        try {
+          const base = el("apiBase").value.trim();
+          const res = await fetch(`${base}/health`);
+          if (!res.ok) throw new Error("health failed");
+          setStatus(node, "API доступен", true);
+        } catch {
+          setStatus(node, "API недоступен. Проверь URL.", false);
+        }
+      }
+
+      async function loadCases() {
+        const cases = await api("/cases");
+        const list = el("casesList");
+        list.innerHTML = "";
+        for (const c of cases) {
+          const item = document.createElement("div");
+          item.className = `case-item ${selectedCaseId === c.id ? "active" : ""}`;
+          item.innerHTML = `<strong>${c.title}</strong><div class="muted">${c.case_number} | ${c.status}</div>`;
+          item.onclick = () => selectCase(c.id);
+          list.appendChild(item);
+        }
+      }
+
+      async function createCase() {
+        await api("/cases", {
+          method: "POST",
+          body: JSON.stringify({
+            title: el("newTitle").value,
+            court_name: el("newCourt").value,
+            case_number: el("newNumber").value,
+            status: el("newStatus").value || "in_progress",
+            stage: el("newStage").value || "analysis"
+          })
+        });
+        await loadCases();
+      }
+
+      async function selectCase(caseId) {
+        selectedCaseId = caseId;
+        const c = await api(`/cases/${caseId}`);
+        el("emptyState").style.display = "none";
+        el("caseWorkspace").style.display = "block";
+        el("caseHeader").textContent = c.title;
+        el("caseMeta").textContent = `${c.case_number} | ${c.court_name} | ${c.status} | стадия: ${c.stage}`;
+        await Promise.all([loadEvents(), loadTasks(), loadDocs(), loadCases()]);
+      }
+
+      async function loadEvents() {
+        const events = await api(`/cases/${selectedCaseId}/events`);
+        el("eventsList").innerHTML = events.map(e => `<div><strong>${e.event_type}</strong><div>${e.body}</div><div class="muted">${e.created_at}</div></div><hr/>`).join("");
+      }
+
+      async function addEvent() {
+        await api(`/cases/${selectedCaseId}/events`, {
+          method: "POST",
+          body: JSON.stringify({
+            event_type: el("eventType").value || "note",
+            body: el("eventText").value
+          })
+        });
+        el("eventText").value = "";
+        await loadEvents();
+      }
+
+      async function loadTasks() {
+        const tasks = await api(`/cases/${selectedCaseId}/tasks`);
+        el("tasksList").innerHTML = tasks.map(t => `<div><strong>${t.title}</strong><div class="muted">${t.priority} | ${t.status} | срок: ${t.due_date || "-"}</div></div><hr/>`).join("");
+      }
+
+      async function addTask() {
+        await api(`/cases/${selectedCaseId}/tasks`, {
+          method: "POST",
+          body: JSON.stringify({
+            title: el("taskTitle").value,
+            priority: el("taskPriority").value || "medium",
+            due_date: el("taskDueDate").value || null
+          })
+        });
+        el("taskTitle").value = "";
+        await loadTasks();
+      }
+
+      async function loadDocs() {
+        const docs = await api(`/cases/${selectedCaseId}/documents`);
+        el("docsList").innerHTML = docs.map(d => `<div><strong>${d.filename}</strong><div class="muted">${d.category}</div></div><hr/>`).join("");
+      }
+
+      async function addDoc() {
+        await api(`/cases/${selectedCaseId}/documents`, {
+          method: "POST",
+          body: JSON.stringify({
+            filename: el("docFilename").value,
+            category: el("docCategory").value || "other",
+            s3_key: el("docS3Key").value || "manual/none",
+            extracted_text: el("docText").value || ""
+          })
+        });
+        el("docFilename").value = "";
+        el("docText").value = "";
+        await loadDocs();
+      }
+
+      async function processHearingNote() {
+        const result = await api(`/cases/${selectedCaseId}/hearing-note`, {
+          method: "POST",
+          body: JSON.stringify({
+            text: el("hearingNoteText").value
+          })
+        });
+        el("hearingResult").textContent = `Событие #${result.event_id}, задач создано: ${result.created_tasks.length}, дата заседания: ${result.next_hearing_date || "-"}`;
+        el("hearingNoteText").value = "";
+        await Promise.all([loadEvents(), loadTasks(), selectCase(selectedCaseId)]);
+      }
+
+      async function loadSummary() {
+        const s = await api(`/cases/${selectedCaseId}/summary`);
+        el("summaryText").textContent = s.summary;
+      }
+
+      function init() {
+        el("apiBase").value = storage.apiBase;
+        el("apiToken").value = storage.apiToken;
+
+        el("saveConfig").onclick = async () => {
+          localStorage.setItem("apiBase", el("apiBase").value.trim());
+          localStorage.setItem("apiToken", el("apiToken").value.trim());
+          await checkHealth();
+          await loadCases();
+        };
+        el("refreshCasesBtn").onclick = loadCases;
+        el("createCaseBtn").onclick = createCase;
+        el("addEventBtn").onclick = addEvent;
+        el("addTaskBtn").onclick = addTask;
+        el("addDocBtn").onclick = addDoc;
+        el("processHearingBtn").onclick = processHearingNote;
+        el("summaryBtn").onclick = loadSummary;
+        checkHealth().then(loadCases).catch(() => {});
+      }
+
+      init();
+    </script>
   </body>
 </html>

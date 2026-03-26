@@ -1,6 +1,7 @@
 from datetime import datetime, time
 
 from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
@@ -25,6 +26,13 @@ from .schemas import (
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="My Assistant API", version="0.1.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 def require_user(x_api_token: str | None = Header(default=None)) -> str:
