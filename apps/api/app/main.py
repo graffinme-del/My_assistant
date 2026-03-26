@@ -227,6 +227,7 @@ async def ingest_document(
         if matched_case:
             case_confidence = max(0.7, llm_confidence)
         class_confidence = max(class_confidence, llm_confidence)
+    used_llm = llm_route is not None
 
     if not matched_case:
         matched_case, case_confidence = match_case(
@@ -265,6 +266,8 @@ async def ingest_document(
         matched_case_number=matched_case.case_number,
         category=category,
         confidence=round((class_confidence + case_confidence) / 2, 2),
+        routing_mode="LLM" if used_llm else "fallback-правила",
+        routing_model=settings.openai_model if used_llm else "эвристики",
         note="Документ автоматически обработан и прикреплен к делу.",
     )
 

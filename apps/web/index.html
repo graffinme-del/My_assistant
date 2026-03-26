@@ -311,7 +311,8 @@
         });
         el("docIngestResult").textContent =
           `Готово: ${result.document.filename}. Дело: ${result.matched_case_number}. ` +
-          `Категория: ${result.category}. Уверенность: ${result.confidence}`;
+          `Категория: ${result.category}. Уверенность: ${result.confidence}. ` +
+          `ИИ-сортировка: ${result.routing_mode}. Модель: ${result.routing_model}.`;
         fileInput.value = "";
         await loadDocs();
         await loadEvents();

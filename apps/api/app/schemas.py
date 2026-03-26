@@ -101,6 +101,8 @@ class DocumentIngestOut(BaseModel):
     matched_case_number: str
     category: str
     confidence: float
+    routing_mode: str
+    routing_model: str
     note: str
 
 
