@@ -23,6 +23,13 @@ jobs:
             --exclude ".env" \
             --exclude "backups/" \
             ./ ${{ secrets.HETZNER_USER }}@${{ secrets.HETZNER_HOST }}:${{ secrets.DEPLOY_PATH }}/
+      - name: Verify synced web file
+        run: |
+          LOCAL_HASH=$(sha256sum apps/web/index.html | awk '{print $1}')
+          REMOTE_HASH=$(ssh ${{ secrets.HETZNER_USER }}@${{ secrets.HETZNER_HOST }} "cd ${{ secrets.DEPLOY_PATH }} && sha256sum apps/web/index.html | awk '{print \$1}'")
+          echo "LOCAL_HASH=$LOCAL_HASH"
+          echo "REMOTE_HASH=$REMOTE_HASH"
+          test "$LOCAL_HASH" = "$REMOTE_HASH"
       - name: Deploy with Docker Compose
         run: |
           ssh ${{ secrets.HETZNER_USER }}@${{ secrets.HETZNER_HOST }} "
