@@ -1,3 +1,4 @@
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -22,6 +23,21 @@ class Settings(BaseSettings):
     llm_app_title: str = "My Assistant"
     owner_token: str = "owner-dev-token"
     member_token: str = "member-dev-token"
+
+    @field_validator("app_port", mode="before")
+    @classmethod
+    def _coerce_app_port(cls, v: object) -> object:
+        # Docker иногда передаёт APP_PORT="" — без этого API не поднимается.
+        if v == "" or v is None:
+            return 8000
+        return v
+
+    @field_validator("postgres_port", mode="before")
+    @classmethod
+    def _coerce_postgres_port(cls, v: object) -> object:
+        if v == "" or v is None:
+            return 5432
+        return v
 
     @property
     def database_url(self) -> str:

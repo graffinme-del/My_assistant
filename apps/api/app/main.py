@@ -15,6 +15,7 @@ from .ai_service import (
     classify_document,
     extract_document_text,
     llm_summary,
+    llm_assistant_chat_reply,
     llm_document_routing,
     match_case,
     parse_hearing_note,
@@ -619,6 +620,21 @@ async def assistant_ingest_text(
     if looks_like_hearing_note(text):
         _, tasks, next_hearing_date = parse_hearing_note(db, case, text)
         created_tasks = len(tasks)
+        reply_parts = [
+            f"Записал заметки по заседанию. Создано задач: {created_tasks}.",
+        ]
+        if next_hearing_date:
+            reply_parts.append(f"Дата следующего заседания (если из текста): {next_hearing_date}.")
+        reply_hearing = " ".join(reply_parts)
+        if settings.openai_api_key.strip():
+            try:
+                reply_hearing = await llm_assistant_chat_reply(
+                    f"[Режим: протокол заседания]\n{text}", case
+                )
+            except Exception:
+                reply_hearing = " ".join(reply_parts)
+        db.add(CaseEvent(case_id=case.id, event_type="assistant_reply", body=reply_hearing))
+        db.commit()
         return AssistantIngestOut(
             case_id=case.id,
             case_number=case.case_number,
@@ -626,11 +642,18 @@ async def assistant_ingest_text(
             mode="hearing-parser",
             created_tasks=created_tasks,
             next_hearing_date=next_hearing_date,
+            reply=reply_hearing,
         )
 
     db.add(CaseEvent(case_id=case.id, event_type="assistant_message", body=text))
     db.commit()
     mode = "message" if case.case_number != "UNSORTED" else "message-unsorted"
+    try:
+        reply_text = await llm_assistant_chat_reply(text, case)
+    except Exception as exc:
+        reply_text = f"Сообщение сохранено, но ответ ИИ не получен: {exc}"
+    db.add(CaseEvent(case_id=case.id, event_type="assistant_reply", body=reply_text))
+    db.commit()
     return AssistantIngestOut(
         case_id=case.id,
         case_number=case.case_number,
@@ -638,4 +661,5 @@ async def assistant_ingest_text(
         mode=mode,
         created_tasks=0,
         next_hearing_date=case.next_hearing_date,
+        reply=reply_text,
     )

@@ -129,6 +129,7 @@ class AssistantIngestOut(BaseModel):
     mode: str  # hearing-parser | message
     created_tasks: int = 0
     next_hearing_date: date | None = None
+    reply: str = ""
 
 
 class BulkIngestOut(BaseModel):

@@ -427,13 +427,15 @@
             body: JSON.stringify({ text })
           });
           let msg =
-            "Принял.\nДело: " +
-            result.case_number +
-            (result.created_case ? " (создано автоматически)" : "") +
-            "\nТип обработки: " +
-            result.mode;
-          if (result.created_tasks > 0) msg += "\nСоздано задач: " + result.created_tasks;
-          if (result.next_hearing_date) msg += "\nСледующее заседание: " + result.next_hearing_date;
+            result.reply && String(result.reply).trim()
+              ? String(result.reply).trim()
+              : "Принял.\nДело: " +
+                result.case_number +
+                (result.created_case ? " (создано автоматически)" : "") +
+                "\nТип обработки: " +
+                result.mode +
+                (result.created_tasks > 0 ? "\nСоздано задач: " + result.created_tasks : "") +
+                (result.next_hearing_date ? "\nСледующее заседание: " + result.next_hearing_date : "");
           appendChat("assistant", msg);
         } catch (e) {
           appendChat("assistant", "Ошибка: " + (e && e.message ? e.message : String(e)));

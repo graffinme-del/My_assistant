@@ -76,6 +76,26 @@ def build_case_summary(case: Case, events: list[CaseEvent], tasks: list[Task]) -
     )
 
 
+async def llm_assistant_chat_reply(user_message: str, case: Case) -> str:
+    """Ответ в стиле чата (не юридическая консультация — организация и краткие пояснения)."""
+    if not settings.openai_api_key.strip():
+        return (
+            "Сообщение сохранено. Чтобы я отвечал как ассистент на базе модели, "
+            "нужен ключ API (OPENAI_API_KEY; для OpenRouter также OPENAI_BASE_URL)."
+        )
+
+    user_content = (
+        "Ты личный помощник по организации материалов по судебным делам. "
+        "Отвечай по-русски, кратко и по существу (обычно 2–6 предложений). "
+        "Не выдавай юридических консультаций: не оценивай шансы, не подсказывай стратегию и не указывай, "
+        "какие нормы «должны» применяться. Можно помочь структурировать мысли, напомнить о сроках и фактах из контекста.\n\n"
+        f"Контекст: дело «{case.title}», номер {case.case_number}, статус {case.status}.\n\n"
+        f"Сообщение пользователя:\n{user_message}"
+    )
+    text = await _llm_chat(user_content, timeout=90.0)
+    return text or "Не удалось получить текст ответа от модели."
+
+
 async def llm_summary(prompt: str) -> str:
     if not settings.openai_api_key:
         return "LLM ключ не настроен. Возвращаю локальную сводку без внешнего ИИ."
