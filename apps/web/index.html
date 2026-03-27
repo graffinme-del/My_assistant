@@ -456,15 +456,7 @@
       }
 
       function init() {
-        el("refreshCasesBtn").onclick = loadCases;
-        el("createCaseBtn").onclick = createCase;
-        el("addEventBtn").onclick = addEvent;
-        el("addTaskBtn").onclick = addTask;
-        el("ingestDocBtn").onclick = ingestDoc;
-        el("processHearingBtn").onclick = processHearingNote;
-        el("summaryBtn").onclick = loadSummary;
-
-        // New simplified UI: chat + bulk zip
+        // Simplified UI: chat + file upload
         const mic = el("micBtn");
         const send = el("sendChatBtn");
         const attachBtn = el("attachBtn");
