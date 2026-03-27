@@ -18,9 +18,12 @@
         min-height: 100vh;
       }
       .main {
-        padding: 16px;
-        min-height: 100vh;
+        padding: 12px;
+        height: 100vh;
         box-sizing: border-box;
+        display: flex;
+        flex-direction: column;
+        justify-content: flex-end;
       }
       h1, h2, h3 {
         margin-top: 0;
@@ -29,8 +32,8 @@
         background: #fff;
         border: 1px solid #e2e5e9;
         border-radius: 8px;
-        padding: 14px;
-        margin-bottom: 12px;
+        padding: 10px;
+        margin: 0;
       }
       input, textarea, select, button {
         width: 100%;
@@ -93,16 +96,15 @@
         font-family: Arial, sans-serif;
       }
       #chatLog {
-        max-height: calc(100vh - 190px) !important;
+        max-height: calc(100vh - 130px) !important;
       }
       .chatInputWrap {
         border: 1px solid #d5d9df;
         border-radius: 26px;
         background: #fff;
-        padding: 8px 10px;
-        position: sticky;
-        bottom: 14px;
+        padding: 6px 8px;
         box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+        margin-top: 8px;
       }
       .composerRow {
         display: flex;
@@ -127,6 +129,15 @@
         color: #fff;
         border-color: #111;
       }
+      .subtleBtn {
+        border: none;
+        background: transparent;
+        color: #666;
+        width: auto;
+        margin: 0;
+        padding: 4px 6px;
+        font-size: 12px;
+      }
       .chatTextInput {
         border: none;
         outline: none;
@@ -139,13 +150,17 @@
       .hiddenInput {
         display: none;
       }
+      #emptyState {
+        width: min(1100px, 100%);
+        margin: 0 auto;
+      }
     </style>
   </head>
   <body>
     <div class="layout">
       <main class="main">
         <div id="emptyState" class="card">
-          <h3>My Assistant</h3>
+          <h3 style="margin-bottom:6px;">My Assistant</h3>
           <div id="healthStatus" class="muted">Проверка API...</div>
           <div id="chatLog" class="list" style="max-height: 360px;"></div>
           <div class="chatInputWrap">
@@ -159,17 +174,7 @@
           </div>
           <div id="uploadHint" class="muted" style="margin-top:8px;"></div>
           <div id="bulkResult" class="muted" style="margin-top:4px;"></div>
-          <div style="margin-top: 8px;">
-            <button id="clearChatBtn" class="secondary" type="button" style="width:auto;">Очистить чат</button>
-          </div>
-          <details style="margin-top:10px;">
-            <summary>Настройки подключения</summary>
-            <label>API URL</label>
-            <input id="apiBase" placeholder="http://49.12.235.166:8000" />
-            <label>Токен</label>
-            <input id="apiToken" placeholder="OWNER_TOKEN из .env" />
-            <button id="saveConfig" type="button" style="width:auto;">Сохранить</button>
-          </details>
+          <button id="clearChatBtn" class="subtleBtn" type="button" title="Очистить чат">🗑 Очистить</button>
         </div>
 
         <div id="caseWorkspace" style="display:none;">
@@ -235,8 +240,8 @@
       }
 
       async function api(path, options = {}) {
-        const base = el("apiBase").value.trim();
-        const token = el("apiToken").value.trim();
+        const base = storage.apiBase;
+        const token = storage.apiToken;
         const headers = { ...(options.headers || {}), "X-API-Token": token };
         if (!(options.body instanceof FormData)) {
           headers["Content-Type"] = "application/json";
@@ -255,7 +260,7 @@
       async function checkHealth() {
         const node = el("healthStatus");
         try {
-          const base = el("apiBase").value.trim();
+          const base = storage.apiBase;
           const res = await fetch(`${base}/health`);
           if (!res.ok) throw new Error("health failed");
           setStatus(node, "API доступен", true);
@@ -451,14 +456,6 @@
       }
 
       function init() {
-        el("apiBase").value = storage.apiBase;
-        el("apiToken").value = storage.apiToken;
-
-        el("saveConfig").onclick = async () => {
-          localStorage.setItem("apiBase", el("apiBase").value.trim());
-          localStorage.setItem("apiToken", el("apiToken").value.trim());
-          await checkHealth();
-        };
         el("refreshCasesBtn").onclick = loadCases;
         el("createCaseBtn").onclick = createCase;
         el("addEventBtn").onclick = addEvent;
