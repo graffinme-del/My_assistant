@@ -35,8 +35,9 @@ jobs:
           ssh ${{ secrets.HETZNER_USER }}@${{ secrets.HETZNER_HOST }} "
             set -e
             cd ${{ secrets.DEPLOY_PATH }}
-            docker compose --env-file .env.example pull
-            docker compose --env-file .env.example up -d --build
-            docker compose --env-file .env.example ps
+            sh infra/ensure_env.sh
+            docker compose --env-file .env pull || true
+            docker compose --env-file .env up -d --build
+            docker compose --env-file .env ps
             curl -fsS http://localhost:8000/health > /dev/null
           "
