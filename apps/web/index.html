@@ -3,6 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
     <title>My Assistant</title>
     <style>
       :root {
@@ -426,16 +427,16 @@
             method: "POST",
             body: JSON.stringify({ text })
           });
-          let msg =
-            result.reply && String(result.reply).trim()
-              ? String(result.reply).trim()
-              : "Принял.\nДело: " +
-                result.case_number +
-                (result.created_case ? " (создано автоматически)" : "") +
-                "\nТип обработки: " +
-                result.mode +
-                (result.created_tasks > 0 ? "\nСоздано задач: " + result.created_tasks : "") +
-                (result.next_hearing_date ? "\nСледующее заседание: " + result.next_hearing_date : "");
+          const hasReply =
+            result.reply != null && String(result.reply).trim() !== "";
+          let msg = hasReply
+            ? String(result.reply).trim()
+            : "Сервер не вернул текст ответа (поле reply). Сделай жёсткое обновление страницы: Ctrl+F5.\n\n" +
+              "Если снова так — на сервере в /opt/my_assistant/.env должны быть OPENAI_API_KEY и при OpenRouter — OPENAI_BASE_URL=https://openrouter.ai/api/v1\n\n" +
+              "Служебно: дело " +
+              result.case_number +
+              ", режим " +
+              result.mode;
           appendChat("assistant", msg);
         } catch (e) {
           appendChat("assistant", "Ошибка: " + (e && e.message ? e.message : String(e)));
