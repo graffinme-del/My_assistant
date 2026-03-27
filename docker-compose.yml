@@ -6,8 +6,9 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-my_assistant}
       POSTGRES_USER: ${POSTGRES_USER:-my_assistant}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me}
+    # Порты фиксированы: пустой APP_PORT/POSTGRES_PORT в .env не должен ломать публикацию.
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
@@ -15,7 +16,7 @@ services:
     image: redis:7-alpine
     restart: unless-stopped
     ports:
-      - "${REDIS_PORT:-6379}:6379"
+      - "6379:6379"
 
   minio:
     image: minio/minio:latest
@@ -25,8 +26,8 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
     ports:
-      - "${MINIO_API_PORT:-9000}:9000"
-      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+      - "9000:9000"
+      - "9001:9001"
     volumes:
       - minio_data:/data
 
@@ -51,8 +52,9 @@ services:
       LLM_APP_TITLE: ${LLM_APP_TITLE:-My Assistant}
       OWNER_TOKEN: ${OWNER_TOKEN:-owner-dev-token}
       MEMBER_TOKEN: ${MEMBER_TOKEN:-member-dev-token}
+    # Всегда 8000 снаружи — иначе при APP_PORT= в .env веб «пропадает» с :8080.
     ports:
-      - "${APP_PORT:-8000}:8000"
+      - "8000:8000"
     volumes:
       - api_storage:/app/storage
 
@@ -71,7 +73,7 @@ services:
     depends_on:
       - api
     ports:
-      - "${WEB_PORT:-8080}:80"
+      - "8080:80"
 
 volumes:
   postgres_data:

@@ -23,5 +23,11 @@ jobs:
     needs: api-check
     steps:
       - uses: actions/checkout@v4
+      - name: Validate compose (fixed ports + .env)
+        run: |
+          cp -f .env.example .env
+          docker compose --env-file .env config >/dev/null
       - name: Build containers
-        run: docker compose build
+        run: |
+          cp -f .env.example .env
+          docker compose --env-file .env build

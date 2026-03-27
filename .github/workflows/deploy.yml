@@ -21,6 +21,8 @@ jobs:
           rsync -az --delete \
             --exclude ".git" \
             --exclude ".env" \
+            --exclude ".env.backup" \
+            --exclude ".env.*.local" \
             --exclude "backups/" \
             ./ ${{ secrets.HETZNER_USER }}@${{ secrets.HETZNER_HOST }}:${{ secrets.DEPLOY_PATH }}/
       - name: Verify synced web file
@@ -38,6 +40,5 @@ jobs:
             sh infra/ensure_env.sh
             docker compose --env-file .env pull || true
             docker compose --env-file .env up -d --build
-            docker compose --env-file .env ps
-            curl -fsS http://localhost:8000/health > /dev/null
+            sh infra/verify_deploy.sh
           "
