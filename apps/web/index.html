@@ -36,11 +36,6 @@
         padding: 14px;
         margin-bottom: 12px;
       }
-      .grid {
-        display: grid;
-        grid-template-columns: repeat(2, minmax(180px, 1fr));
-        gap: 8px;
-      }
       input, textarea, select, button {
         width: 100%;
         box-sizing: border-box;
@@ -101,6 +96,47 @@
         margin: 0;
         font-family: Arial, sans-serif;
       }
+      .chatInputWrap {
+        border: 1px solid #d5d9df;
+        border-radius: 26px;
+        background: #fff;
+        padding: 8px 10px;
+      }
+      .composerRow {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .tinyIconBtn {
+        width: 34px;
+        height: 34px;
+        border-radius: 999px;
+        padding: 0;
+        margin: 0;
+        border: 1px solid #d1d7e0;
+        background: #fff;
+        color: #111;
+        font-size: 16px;
+        line-height: 34px;
+        text-align: center;
+      }
+      .sendBtn {
+        background: #111;
+        color: #fff;
+        border-color: #111;
+      }
+      .chatTextInput {
+        border: none;
+        outline: none;
+        resize: none;
+        margin: 0;
+        min-height: 34px;
+        max-height: 160px;
+        flex: 1;
+      }
+      .hiddenInput {
+        display: none;
+      }
     </style>
   </head>
   <body>
@@ -139,21 +175,19 @@
         <div id="emptyState" class="card">
           <h3>Диалог с помощником</h3>
           <div id="chatLog" class="list" style="max-height: 360px;"></div>
-          <textarea id="chatText" rows="6" placeholder="Напиши сообщение юристов (или вопрос). В тексте должен быть номер дела, например А40-12345/2026"></textarea>
-          <div class="row">
-            <button id="micBtn" class="secondary" type="button" style="width:auto;">Микрофон</button>
-            <button id="sendChatBtn" type="button" style="width:auto;">Отправить</button>
+          <div class="chatInputWrap">
+            <div class="composerRow">
+              <input id="docFilesInput" class="hiddenInput" type="file" multiple />
+              <button id="attachBtn" class="tinyIconBtn" type="button" title="Прикрепить файлы">+</button>
+              <textarea id="chatText" class="chatTextInput" rows="1" placeholder="Напиши сообщение..."></textarea>
+              <button id="micBtn" class="tinyIconBtn" type="button" title="Голос">🎤</button>
+              <button id="sendChatBtn" class="tinyIconBtn sendBtn" type="button" title="Отправить">↑</button>
+            </div>
           </div>
-          <div class="muted" style="margin-top:6px;">
-            Для сводки напиши: "сводка А40-12345/2026" или "что происходит А40-12345/2026".
-          </div>
-
-          <div style="margin-top: 14px;">
-            <h3 style="margin-bottom:8px;">Архив документов (ZIP)</h3>
-            <input id="zipFile" type="file" accept=".zip" />
-            <input id="preferredCaseNumber" type="text" placeholder="Подсказка: номер дела (необязательно)" />
-            <button id="bulkBtn" type="button">Загрузить ZIP и разобрать</button>
-            <div id="bulkResult" class="muted"></div>
+          <div id="uploadHint" class="muted" style="margin-top:8px;"></div>
+          <div id="bulkResult" class="muted" style="margin-top:4px;"></div>
+          <div style="margin-top: 8px;">
+            <button id="clearChatBtn" class="secondary" type="button" style="width:auto;">Очистить чат</button>
           </div>
         </div>
 
@@ -380,76 +414,58 @@
         log.scrollTop = log.scrollHeight;
       }
 
-      function chatLooksLikeSummaryRequest(text) {
-        const t = (text || "").toLowerCase();
-        return t.includes("сводка") || t.includes("/summary") || t.includes("что происходит");
-      }
-
       async function sendChat() {
         const text = el("chatText").value.trim();
-        if (!text) return;
+        if (!text) {
+          appendChat("assistant", "Напиши сообщение или прикрепи файлы.");
+          return;
+        }
         el("chatText").value = "";
         appendChat("user", text);
         try {
-          let result;
-          if (chatLooksLikeSummaryRequest(text)) {
-            result = await api("/assistant/summary-from-text", {
-              method: "POST",
-              body: JSON.stringify({ text })
-            });
-            appendChat(
-              "assistant",
-              "Сводка по делу " +
-                result.case_number +
-                ":\n\n" +
-                result.summary +
-                (result.next_hearing_date ? "\n\nСледующее заседание: " + result.next_hearing_date : "")
-            );
-          } else {
-            result = await api("/assistant/ingest-text", {
-              method: "POST",
-              body: JSON.stringify({ text })
-            });
-            let msg =
-              "Зафиксировал для дела " +
-              result.case_number +
-              (result.created_case ? " (дело создано)" : "") +
-              "\nРежим: " +
-              result.mode +
-              "\nСоздано задач: " +
-              result.created_tasks;
-            if (result.next_hearing_date) msg += "\nСледующее заседание: " + result.next_hearing_date;
-            appendChat("assistant", msg);
-          }
+          const result = await api("/assistant/ingest-text", {
+            method: "POST",
+            body: JSON.stringify({ text })
+          });
+          let msg =
+            "Принял.\nДело: " +
+            result.case_number +
+            (result.created_case ? " (создано автоматически)" : "") +
+            "\nТип обработки: " +
+            result.mode;
+          if (result.created_tasks > 0) msg += "\nСоздано задач: " + result.created_tasks;
+          if (result.next_hearing_date) msg += "\nСледующее заседание: " + result.next_hearing_date;
+          appendChat("assistant", msg);
         } catch (e) {
           appendChat("assistant", "Ошибка: " + (e && e.message ? e.message : String(e)));
         }
       }
 
-      async function uploadBulkZip() {
-        const file = el("zipFile").files && el("zipFile").files[0];
-        if (!file) {
-          el("bulkResult").textContent = "Выбери ZIP-файл.";
-          return;
-        }
-        el("bulkResult").textContent = "Загружаю ZIP и обрабатываю...";
+      async function uploadFiles(files) {
+        if (!files || files.length === 0) return;
+        el("bulkResult").textContent = "Загружаю файлы...";
         try {
-          const fd = new FormData();
-          fd.append("zip_file", file);
-          const pc = el("preferredCaseNumber").value.trim();
-          if (pc) fd.append("preferred_case_number", pc);
-          const res = await api("/documents/bulk-ingest", { method: "POST", body: fd });
-          let msg =
-            "ZIP обработан. Всего файлов: " +
-            res.total_files +
-            ", добавлено: " +
-            res.ingested_files +
-            ", пропущено: " +
-            res.skipped_files;
-          if (res.errors && res.errors.length) msg += "\nПервая ошибка: " + res.errors[0];
-          el("bulkResult").textContent = msg;
+          let ok = 0;
+          let failed = 0;
+          for (const f of files) {
+            const fd = new FormData();
+            fd.append("file", f);
+            try {
+              const res = await api("/documents/ingest", { method: "POST", body: fd });
+              ok += 1;
+              appendChat(
+                "assistant",
+                `Файл "${res.document.filename}" загружен. Дело: ${res.matched_case_number}. ` +
+                  `Категория: ${res.category}.`
+              );
+            } catch (e) {
+              failed += 1;
+              appendChat("assistant", `Не удалось загрузить "${f.name}": ${e && e.message ? e.message : e}`);
+            }
+          }
+          el("bulkResult").textContent = `Загрузка завершена. Успешно: ${ok}, ошибок: ${failed}.`;
         } catch (e) {
-          el("bulkResult").textContent = "Ошибка: " + (e && e.message ? e.message : String(e));
+          el("bulkResult").textContent = "Ошибка загрузки: " + (e && e.message ? e.message : String(e));
         }
       }
 
@@ -473,9 +489,22 @@
         // New simplified UI: chat + bulk zip
         const mic = el("micBtn");
         const send = el("sendChatBtn");
-        const bulk = el("bulkBtn");
+        const attachBtn = el("attachBtn");
+        const filesInput = el("docFilesInput");
+        const clearChatBtn = el("clearChatBtn");
         if (send) send.onclick = sendChat;
-        if (bulk) bulk.onclick = uploadBulkZip;
+        if (attachBtn) attachBtn.onclick = () => filesInput.click();
+        if (filesInput) {
+          filesInput.onchange = async () => {
+            const files = Array.from(filesInput.files || []);
+            el("uploadHint").textContent = files.length ? `Выбрано файлов: ${files.length}` : "";
+            await uploadFiles(files);
+            filesInput.value = "";
+          };
+        }
+        if (clearChatBtn) clearChatBtn.onclick = () => {
+          el("chatLog").innerHTML = "";
+        };
 
         // Optional voice input
         let recognition = null;

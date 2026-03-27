@@ -64,6 +64,23 @@ def require_user(x_api_token: str | None = Header(default=None)) -> str:
     raise HTTPException(status_code=401, detail="Unauthorized. Provide X-API-Token header.")
 
 
+def get_or_create_unsorted_case(db: Session) -> Case:
+    case = db.query(Case).filter(Case.case_number == "UNSORTED").first()
+    if case:
+        return case
+    case = Case(
+        title="Входящие без номера дела",
+        court_name="неизвестно",
+        case_number="UNSORTED",
+        status="analysis",
+        stage="analysis",
+    )
+    db.add(case)
+    db.commit()
+    db.refresh(case)
+    return case
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -274,7 +291,8 @@ async def ingest_document(
             case_confidence = 0.4
 
     if not matched_case:
-        raise HTTPException(status_code=400, detail="Не удалось привязать документ к делу.")
+        matched_case = get_or_create_unsorted_case(db)
+        case_confidence = 0.2
 
     doc = Document(
         case_id=matched_case.id,
@@ -288,10 +306,7 @@ async def ingest_document(
         CaseEvent(
             case_id=matched_case.id,
             event_type="document_ingested",
-            body=(
-                f"Добавлен документ: {safe_name} (категория: {category}). "
-                f"{llm_note}".strip()
-            ),
+            body=(f"Добавлен документ: {safe_name} (категория: {category}). " f"{llm_note}".strip()),
         )
     )
     db.commit()
@@ -509,13 +524,13 @@ async def assistant_summary_from_text(
     _: str = Depends(require_user),
 ) -> AssistantSummaryOut:
     extracted_case_number = payload.preferred_case_number or extract_case_number(payload.text)
-    if not extracted_case_number:
-        raise HTTPException(status_code=400, detail="Не удалось найти номер дела в тексте.")
-
-    normalized_case_number = extracted_case_number.replace(" ", "").replace("\n", "")
-    case = db.query(Case).filter(Case.case_number == normalized_case_number).first()
+    if extracted_case_number:
+        normalized_case_number = extracted_case_number.replace(" ", "").replace("\n", "")
+        case = db.query(Case).filter(Case.case_number == normalized_case_number).first()
+    else:
+        case = db.query(Case).order_by(Case.updated_at.desc()).first()
     if not case:
-        raise HTTPException(status_code=404, detail="Дело не найдено.")
+        case = get_or_create_unsorted_case(db)
 
     events = db.query(CaseEvent).filter(CaseEvent.case_id == case.id).all()
     tasks = db.query(Task).filter(Task.case_id == case.id).all()
@@ -540,30 +555,26 @@ async def assistant_ingest_text(
         raise HTTPException(status_code=400, detail="Empty text")
 
     extracted_case_number = payload.preferred_case_number or extract_case_number(text)
-    if not extracted_case_number:
-        raise HTTPException(
-            status_code=400,
-            detail="Не удалось найти номер дела в тексте. Укажи номер (или создай дело и прикрепляй сообщения).",
-        )
-
-    normalized_case_number = extracted_case_number.replace(" ", "").replace("\n", "")
-    case = db.query(Case).filter(Case.case_number == normalized_case_number).first()
     created_case = False
-
-    if not case:
-        if not payload.allow_case_create:
-            raise HTTPException(status_code=404, detail="Дело с таким номером не найдено.")
-        case = Case(
-            title=f"Дело {normalized_case_number}",
-            court_name="неизвестно",
-            case_number=normalized_case_number,
-            status="analysis",
-            stage="analysis",
-        )
-        db.add(case)
-        db.commit()
-        db.refresh(case)
-        created_case = True
+    if extracted_case_number:
+        normalized_case_number = extracted_case_number.replace(" ", "").replace("\n", "")
+        case = db.query(Case).filter(Case.case_number == normalized_case_number).first()
+        if not case:
+            if not payload.allow_case_create:
+                raise HTTPException(status_code=404, detail="Дело с таким номером не найдено.")
+            case = Case(
+                title=f"Дело {normalized_case_number}",
+                court_name="неизвестно",
+                case_number=normalized_case_number,
+                status="analysis",
+                stage="analysis",
+            )
+            db.add(case)
+            db.commit()
+            db.refresh(case)
+            created_case = True
+    else:
+        case = get_or_create_unsorted_case(db)
 
     created_tasks = 0
     next_hearing_date = None
@@ -582,11 +593,12 @@ async def assistant_ingest_text(
 
     db.add(CaseEvent(case_id=case.id, event_type="assistant_message", body=text))
     db.commit()
+    mode = "message" if case.case_number != "UNSORTED" else "message-unsorted"
     return AssistantIngestOut(
         case_id=case.id,
         case_number=case.case_number,
         created_case=created_case,
-        mode="message",
+        mode=mode,
         created_tasks=0,
         next_hearing_date=case.next_hearing_date,
     )
