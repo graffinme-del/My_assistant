@@ -25,4 +25,14 @@ jobs:
             ./ ${{ secrets.HETZNER_USER }}@${{ secrets.HETZNER_HOST }}:${{ secrets.DEPLOY_PATH }}/
       - name: Deploy with Docker Compose
         run: |
-          ssh ${{ secrets.HETZNER_USER }}@${{ secrets.HETZNER_HOST }} "cd ${{ secrets.DEPLOY_PATH }} && docker compose pull && docker compose up -d --build"
+          ssh ${{ secrets.HETZNER_USER }}@${{ secrets.HETZNER_HOST }} "
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+            if [ ! -f .env ]; then
+              cp .env.example .env
+            fi
+            docker compose --env-file .env pull
+            docker compose --env-file .env up -d --build
+            docker compose --env-file .env ps
+            curl -fsS http://localhost:8000/health > /dev/null
+          "
