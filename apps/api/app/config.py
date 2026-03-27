@@ -14,7 +14,12 @@ class Settings(BaseSettings):
     postgres_host: str = "postgres"
 
     openai_api_key: str = ""
+    # База API: OpenAI по умолчанию; для OpenRouter: https://openrouter.ai/api/v1
+    openai_base_url: str = "https://api.openai.com/v1"
     openai_model: str = "gpt-4.1-mini"
+    # Опционально для OpenRouter (рекомендуется указать свой сайт)
+    llm_http_referer: str = ""
+    llm_app_title: str = "My Assistant"
     owner_token: str = "owner-dev-token"
     member_token: str = "member-dev-token"
 

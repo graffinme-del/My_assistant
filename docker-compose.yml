@@ -45,7 +45,10 @@ services:
       POSTGRES_PORT: 5432
       POSTGRES_HOST: postgres
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4.1-mini}
+      LLM_HTTP_REFERER: ${LLM_HTTP_REFERER:-}
+      LLM_APP_TITLE: ${LLM_APP_TITLE:-My Assistant}
       OWNER_TOKEN: ${OWNER_TOKEN:-owner-dev-token}
       MEMBER_TOKEN: ${MEMBER_TOKEN:-member-dev-token}
     ports:

@@ -13,6 +13,39 @@ from .config import settings
 from .models import Case, CaseEvent, Task
 
 
+def _chat_completions_url() -> str:
+    base = settings.openai_base_url.rstrip("/")
+    return f"{base}/chat/completions"
+
+
+def _llm_headers() -> dict[str, str]:
+    h: dict[str, str] = {
+        "Authorization": f"Bearer {settings.openai_api_key}",
+        "Content-Type": "application/json",
+    }
+    if settings.llm_http_referer.strip():
+        h["HTTP-Referer"] = settings.llm_http_referer.strip()
+    if settings.llm_app_title.strip():
+        h["X-Title"] = settings.llm_app_title.strip()
+    return h
+
+
+async def _llm_chat(user_content: str, *, timeout: float = 45.0) -> str:
+    payload = {
+        "model": settings.openai_model,
+        "messages": [{"role": "user", "content": user_content}],
+    }
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.post(_chat_completions_url(), headers=_llm_headers(), json=payload)
+        resp.raise_for_status()
+        data = resp.json()
+    choices = data.get("choices") or []
+    if not choices:
+        return ""
+    msg = (choices[0].get("message") or {}).get("content") or ""
+    return str(msg).strip()
+
+
 def _extract_date(text: str) -> date | None:
     match = re.search(r"(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?", text)
     if not match:
@@ -47,27 +80,13 @@ async def llm_summary(prompt: str) -> str:
     if not settings.openai_api_key:
         return "LLM ключ не настроен. Возвращаю локальную сводку без внешнего ИИ."
 
-    headers = {
-        "Authorization": f"Bearer {settings.openai_api_key}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "model": settings.openai_model,
-        "input": (
-            "Ты личный помощник по судебным делам. Дай короткую сводку в 5-8 строках. "
-            "Только факты из входных данных.\n\n"
-            f"{prompt}"
-        ),
-    }
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
-            "https://api.openai.com/v1/responses",
-            headers=headers,
-            json=payload,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return data.get("output_text", "").strip() or "Не удалось получить ответ модели."
+    user_content = (
+        "Ты личный помощник по судебным делам. Дай короткую сводку в 5-8 строках. "
+        "Только факты из входных данных.\n\n"
+        f"{prompt}"
+    )
+    text = await _llm_chat(user_content, timeout=60.0)
+    return text or "Не удалось получить ответ модели."
 
 
 def parse_hearing_note(db: Session, case: Case, text: str) -> tuple[CaseEvent, list[Task], date | None]:
@@ -229,18 +248,7 @@ async def llm_document_routing(
         f"Имя файла: {filename}\n"
         f"Текст:\n{text_sample}"
     )
-    headers = {
-        "Authorization": f"Bearer {settings.openai_api_key}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "model": settings.openai_model,
-        "input": prompt,
-    }
-    async with httpx.AsyncClient(timeout=45) as client:
-        resp = await client.post("https://api.openai.com/v1/responses", headers=headers, json=payload)
-        resp.raise_for_status()
-        raw = (resp.json().get("output_text") or "").strip()
+    raw = await _llm_chat(prompt, timeout=60.0)
     try:
         import json
 

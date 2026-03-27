@@ -86,6 +86,43 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/ai/status")
+async def ai_status(_: str = Depends(require_user)) -> dict[str, str | bool]:
+    base = settings.openai_base_url.rstrip("/")
+    provider = "openrouter" if "openrouter" in base.lower() else "openai"
+    configured = bool(settings.openai_api_key.strip())
+    if not configured:
+        return {
+            "provider": provider,
+            "base_url": base,
+            "configured": False,
+            "status": "not_configured",
+            "model": settings.openai_model,
+            "message": "OPENAI_API_KEY пустой",
+        }
+
+    try:
+        # Small probe call: proves API key/model/billing are operational.
+        probe = await llm_summary("Проверка подключения. Ответь одним словом: OK")
+        return {
+            "provider": provider,
+            "base_url": base,
+            "configured": True,
+            "status": "connected",
+            "model": settings.openai_model,
+            "message": (probe or "OK")[:120],
+        }
+    except Exception as exc:
+        return {
+            "provider": provider,
+            "base_url": base,
+            "configured": True,
+            "status": "error",
+            "model": settings.openai_model,
+            "message": str(exc)[:200],
+        }
+
+
 @app.post("/cases", response_model=CaseOut)
 def create_case(
     payload: CaseCreate, db: Session = Depends(get_db), _: str = Depends(require_user)

@@ -263,7 +263,20 @@
           const base = storage.apiBase;
           const res = await fetch(`${base}/health`);
           if (!res.ok) throw new Error("health failed");
-          setStatus(node, "API доступен", true);
+          let aiLine = "ChatGPT: неизвестно";
+          try {
+            const ai = await api("/ai/status");
+            if (ai.status === "connected") {
+              aiLine = `ChatGPT: подключен (${ai.model})`;
+            } else if (ai.status === "not_configured") {
+              aiLine = "ChatGPT: ключ не задан";
+            } else {
+              aiLine = `ChatGPT: ошибка (${ai.message || "не удалось подключиться"})`;
+            }
+          } catch (e) {
+            aiLine = `ChatGPT: ошибка (${e.message || "запрос не выполнен"})`;
+          }
+          setStatus(node, `API доступен | ${aiLine}`, true);
         } catch {
           setStatus(node, "API недоступен. Проверь URL.", false);
         }
