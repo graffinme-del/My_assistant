@@ -14,17 +14,13 @@
         color: #1b1f24;
       }
       .layout {
-        display: grid;
-        grid-template-columns: 360px 1fr;
+        display: block;
         min-height: 100vh;
-      }
-      .panel {
-        background: #fff;
-        border-right: 1px solid #e2e5e9;
-        padding: 16px;
       }
       .main {
         padding: 16px;
+        min-height: 100vh;
+        box-sizing: border-box;
       }
       h1, h2, h3 {
         margin-top: 0;
@@ -96,11 +92,17 @@
         margin: 0;
         font-family: Arial, sans-serif;
       }
+      #chatLog {
+        max-height: calc(100vh - 190px) !important;
+      }
       .chatInputWrap {
         border: 1px solid #d5d9df;
         border-radius: 26px;
         background: #fff;
         padding: 8px 10px;
+        position: sticky;
+        bottom: 14px;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
       }
       .composerRow {
         display: flex;
@@ -141,39 +143,10 @@
   </head>
   <body>
     <div class="layout">
-      <aside class="panel">
-        <h2>My Assistant</h2>
-        <div class="card">
-          <label>API URL</label>
-          <input id="apiBase" placeholder="http://49.12.235.166:8000" />
-          <label>Токен</label>
-          <input id="apiToken" placeholder="OWNER_TOKEN из .env" />
-          <button id="saveConfig">Сохранить</button>
-          <div id="healthStatus" class="muted">Проверка API...</div>
-        </div>
-
-        <div class="card" style="display:none;">
-          <h3>Новое дело</h3>
-          <input id="newTitle" placeholder="Название дела" />
-          <input id="newCourt" placeholder="Суд" />
-          <input id="newNumber" placeholder="Номер дела" />
-          <div class="row">
-            <input id="newStatus" placeholder="Статус" value="in_progress" />
-            <input id="newStage" placeholder="Стадия" value="hearing" />
-          </div>
-          <button id="createCaseBtn">Создать дело</button>
-        </div>
-
-        <div class="card" style="display:none;">
-          <h3>Дела</h3>
-          <button id="refreshCasesBtn">Обновить список</button>
-          <div id="casesList" class="list"></div>
-        </div>
-      </aside>
-
       <main class="main">
         <div id="emptyState" class="card">
-          <h3>Диалог с помощником</h3>
+          <h3>My Assistant</h3>
+          <div id="healthStatus" class="muted">Проверка API...</div>
           <div id="chatLog" class="list" style="max-height: 360px;"></div>
           <div class="chatInputWrap">
             <div class="composerRow">
@@ -189,6 +162,14 @@
           <div style="margin-top: 8px;">
             <button id="clearChatBtn" class="secondary" type="button" style="width:auto;">Очистить чат</button>
           </div>
+          <details style="margin-top:10px;">
+            <summary>Настройки подключения</summary>
+            <label>API URL</label>
+            <input id="apiBase" placeholder="http://49.12.235.166:8000" />
+            <label>Токен</label>
+            <input id="apiToken" placeholder="OWNER_TOKEN из .env" />
+            <button id="saveConfig" type="button" style="width:auto;">Сохранить</button>
+          </details>
         </div>
 
         <div id="caseWorkspace" style="display:none;">
