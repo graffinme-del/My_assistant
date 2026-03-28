@@ -51,6 +51,8 @@ else
 fi
 
 cd "$ROOT"
+# Иначе chmod +x на сервере даёт постоянные «modified» в git status.
+git config core.fileMode false
 assert_compose_sane "$ROOT"
 chmod +x infra/ensure_env.sh infra/verify_deploy.sh 2>/dev/null || true
 
