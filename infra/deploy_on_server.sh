@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Единая точка деплоя: сервер = git-рабочая копия main (как у тебя на ПК).
-# Первый запуск: старый каталог без .git переименовывается в *.pre-git.*, .env сохраняется.
+# Первый запуск: в существующем каталоге git init + fetch + checkout (без mv — часто нет прав на /opt).
 # Дальше: git fetch + reset --hard origin/main → ensure_env → docker compose.
 set -euo pipefail
 
@@ -31,25 +31,15 @@ assert_compose_sane() {
 }
 
 if [ ! -d "$ROOT/.git" ]; then
-  log "нет .git в $ROOT — миграция на git-deploy"
+  log "нет .git в $ROOT — привязка к origin/$BRANCH без mv (права на /opt часто запрещают rename)"
   stop_stack_in_dir "$ROOT"
-  BAK=""
-  if [ -d "$ROOT" ]; then
-    BAK="${ROOT}.pre-git.$(date +%s)"
-    mv "$ROOT" "$BAK"
-    log "старый каталог сохранён: $BAK"
-  fi
-  mkdir -p "$(dirname "$ROOT")"
-  # Полный clone (без --depth): иначе shallow fetch на сервере часто ломает reset на следующий push.
-  git clone --branch "$BRANCH" "$REPO" "$ROOT"
-  if [ -n "$BAK" ]; then
-    for f in .env .env.backup; do
-      if [ -f "$BAK/$f" ]; then
-        cp -a "$BAK/$f" "$ROOT/"
-        log "восстановлен $f из бэкапа"
-      fi
-    done
-  fi
+  mkdir -p "$ROOT"
+  cd "$ROOT"
+  git init
+  git remote remove origin 2>/dev/null || true
+  git remote add origin "$REPO"
+  git fetch origin "$BRANCH"
+  git checkout -f -B "$BRANCH" "origin/$BRANCH"
 else
   log "обновление из git: $ROOT"
   stop_stack_in_dir "$ROOT"
