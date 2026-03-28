@@ -42,3 +42,13 @@
    docker compose -f runtime.compose.yml down --remove-orphans
    docker compose -f runtime.compose.yml up -d
    Если postgres не поднимается: docker compose -f runtime.compose.yml logs postgres
+
+7) В логах: «password authentication failed for user my_assistant» — API постоянно Restarting
+   Пароль в .env НЕ совпадает с тем, с которым ПЕРВЫЙ РАЗ создали базу (данные в томе postgres_data).
+   Вариант А (данные сохранить): в .env верните POSTGRES_PASSWORD= тот же, что был при первом запуске (часто это был change_me).
+   Вариант Б (всё стереть и задать новый пароль — делайте только если база пустая/не жалко):
+   cd /opt/my_assistant
+   docker compose -f runtime.compose.yml down
+   docker volume rm my_assistant_postgres_data
+   docker compose -f runtime.compose.yml up -d
+   Имя тома уточните: docker volume ls | grep postgres
