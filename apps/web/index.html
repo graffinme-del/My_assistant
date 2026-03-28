@@ -228,7 +228,11 @@
     </div>
     <script>
       const storage = {
-        get apiBase() { return localStorage.getItem("apiBase") || "http://49.12.235.166:8000"; },
+        get apiBase() {
+          const saved = localStorage.getItem("apiBase");
+          if (saved) return saved.replace(/\/$/, "");
+          return `${window.location.origin}/api`;
+        },
         get apiToken() { return localStorage.getItem("apiToken") || "owner-dev-token"; }
       };
       let selectedCaseId = null;
