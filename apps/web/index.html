@@ -244,17 +244,31 @@
         node.className = ok ? "ok" : "error";
       }
 
+      /** Иначе при «висящем» nginx/прокси fetch не завершается — страница вечно «Ждём API». */
+      function fetchWithTimeout(url, init, ms) {
+        if (typeof AbortSignal !== "undefined" && AbortSignal.timeout) {
+          return fetch(url, { ...init, signal: AbortSignal.timeout(ms) });
+        }
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), ms);
+        return fetch(url, { ...init, signal: ctrl.signal }).finally(() =>
+          clearTimeout(t)
+        );
+      }
+
       async function api(path, options = {}) {
+        const { timeoutMs, ...rest } = options;
         const base = storage.apiBase;
         const token = storage.apiToken;
-        const headers = { ...(options.headers || {}), "X-API-Token": token };
-        if (!(options.body instanceof FormData)) {
+        const headers = { ...(rest.headers || {}), "X-API-Token": token };
+        if (!(rest.body instanceof FormData)) {
           headers["Content-Type"] = "application/json";
         }
-        const res = await fetch(`${base}${path}`, {
-          ...options,
-          headers
-        });
+        const fetchInit = { ...rest, headers };
+        const url = `${base}${path}`;
+        const res = timeoutMs
+          ? await fetchWithTimeout(url, fetchInit, timeoutMs)
+          : await fetch(url, fetchInit);
         if (!res.ok) {
           const text = await res.text();
           throw new Error(`${res.status} ${text}`);
@@ -265,20 +279,30 @@
       async function checkHealth() {
         const node = el("healthStatus");
         const base = storage.apiBase;
-        const maxWaitSec = 90;
-        for (let i = 0; i < maxWaitSec; i++) {
+        const maxMs = 3 * 60 * 1000;
+        const started = Date.now();
+        const healthTimeoutMs = 8000;
+        let lastProgressSec = -1;
+        node.textContent =
+          "Ждём API (макс. 3 мин). Запрос не зависнет: каждые 8 с новая попытка.";
+        node.className = "muted";
+        while (Date.now() - started < maxMs) {
           try {
-            const res = await fetch(`${base}/health`, { cache: "no-store" });
+            const res = await fetchWithTimeout(
+              `${base}/health`,
+              { cache: "no-store" },
+              healthTimeoutMs
+            );
             if (res.ok) {
               let aiLine = "ChatGPT: неизвестно";
               try {
-                const ai = await api("/ai/status");
+                const ai = await api("/ai/status", { timeoutMs: 20000 });
                 if (ai.status === "connected") {
                   aiLine = `ChatGPT: подключен (${ai.model})`;
-            } else if (ai.status === "not_configured") {
-              aiLine = ai.message
-                ? `ключ не задан — ${ai.message}`
-                : "ChatGPT: ключ не задан";
+                } else if (ai.status === "not_configured") {
+                  aiLine = ai.message
+                    ? `ключ не задан — ${ai.message}`
+                    : "ChatGPT: ключ не задан";
                 } else {
                   aiLine = `ChatGPT: ошибка (${ai.message || "не удалось подключиться"})`;
                 }
@@ -289,16 +313,17 @@
               return;
             }
           } catch (_) {}
-          if (i === 0) {
-            node.textContent =
-              "Ждём API (после деплоя БД и бэкенд могут подниматься до минуты)…";
+          const elapsed = Math.floor((Date.now() - started) / 1000);
+          if (elapsed >= 15 && elapsed - lastProgressSec >= 15) {
+            lastProgressSec = elapsed;
+            node.textContent = `Ждём API… ${elapsed} с. На сервере: cd /opt/my_assistant && docker compose -f runtime.compose.yml ps`;
             node.className = "muted";
           }
           await new Promise((r) => setTimeout(r, 1000));
         }
         setStatus(
           node,
-          "API не ответил за 90 с. Обновите страницу (Ctrl+F5). Если в Local Storage есть apiBase на :8000 — удалите ключ apiBase. На сервере: docker compose -f runtime.compose.yml ps",
+          "API не ответил за 3 мин. SSH: docker compose -f runtime.compose.yml ps и logs api / logs postgres. Браузер: Ctrl+F5; в Local Storage удалите apiBase, если там :8000.",
           false
         );
       }
