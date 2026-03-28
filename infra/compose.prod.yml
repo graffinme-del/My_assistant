@@ -1,0 +1,81 @@
+# Прод: деплой ВСЕГДА через этот файл (-f infra/compose.prod.yml).
+# Фиксированные порты — даже без .env веб остаётся на :8080, API на :8000.
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-my_assistant}
+      POSTGRES_USER: ${POSTGRES_USER:-my_assistant}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+
+  api:
+    build: ./apps/api
+    restart: unless-stopped
+    depends_on:
+      - postgres
+      - redis
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      APP_PORT: ${APP_PORT:-8000}
+      POSTGRES_DB: ${POSTGRES_DB:-my_assistant}
+      POSTGRES_USER: ${POSTGRES_USER:-my_assistant}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me}
+      POSTGRES_PORT: 5432
+      POSTGRES_HOST: postgres
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4.1-mini}
+      LLM_HTTP_REFERER: ${LLM_HTTP_REFERER:-}
+      LLM_APP_TITLE: ${LLM_APP_TITLE:-My Assistant}
+      OWNER_TOKEN: ${OWNER_TOKEN:-owner-dev-token}
+      MEMBER_TOKEN: ${MEMBER_TOKEN:-member-dev-token}
+    ports:
+      - "8000:8000"
+    volumes:
+      - api_storage:/app/storage
+
+  worker:
+    build: ./apps/worker
+    restart: unless-stopped
+    depends_on:
+      - redis
+      - postgres
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+
+  web:
+    build: ./apps/web
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "8080:80"
+
+volumes:
+  postgres_data:
+  minio_data:
+  api_storage:

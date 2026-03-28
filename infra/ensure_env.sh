@@ -10,15 +10,7 @@ if [ ! -f .env ]; then
   cp -f .env.example .env
 fi
 
-# Удаляем строки, где значение пустое (VAR= или VAR=   ) — только для переменных портов.
-awk '
-  /^APP_PORT=[[:space:]]*$/ { next }
-  /^WEB_PORT=[[:space:]]*$/ { next }
-  /^POSTGRES_PORT=[[:space:]]*$/ { next }
-  /^REDIS_PORT=[[:space:]]*$/ { next }
-  /^MINIO_API_PORT=[[:space:]]*$/ { next }
-  /^MINIO_CONSOLE_PORT=[[:space:]]*$/ { next }
-  { print }
-' .env > .env.tmp && mv .env.tmp .env
+# Удаляем строки VAR= без значения для портов (sed -e — без скобок | в grep и без многострочного awk).
+sed -e '/^APP_PORT=[[:space:]]*$/d' -e '/^WEB_PORT=[[:space:]]*$/d' -e '/^POSTGRES_PORT=[[:space:]]*$/d' -e '/^REDIS_PORT=[[:space:]]*$/d' -e '/^MINIO_API_PORT=[[:space:]]*$/d' -e '/^MINIO_CONSOLE_PORT=[[:space:]]*$/d' .env > .env.tmp && mv .env.tmp .env
 
 echo "ensure_env: OK (.env готов)"
