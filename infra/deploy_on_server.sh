@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
-# Единая точка деплоя: сервер = git-рабочая копия main (как у тебя на ПК).
-# Первый запуск: в существующем каталоге git init + fetch + checkout (без mv — часто нет прав на /opt).
-# Дальше: git fetch + reset --hard origin/main → ensure_env → docker compose.
+# Единая точка деплоя: рабочая копия = origin/main. Не кладите сюда второй rsync/копирование с ПК — сломаете дерево.
 set -euo pipefail
 
 ROOT="${DEPLOY_ROOT:-/opt/my_assistant}"
@@ -30,10 +28,22 @@ assert_compose_sane() {
   grep -q '8080:80' "$d/infra/compose.prod.yml"
 }
 
+require_infra() {
+  local d="$1"
+  local f
+  for f in infra/compose.prod.yml infra/ensure_env.sh infra/verify_deploy.sh infra/deploy_on_server.sh; do
+    if [ ! -f "$d/$f" ]; then
+      log "FATAL: нет $f после синхронизации с origin/$BRANCH — дерево битое или не тот remote"
+      exit 1
+    fi
+  done
+}
+
+mkdir -p "$ROOT"
+
 if [ ! -d "$ROOT/.git" ]; then
-  log "нет .git в $ROOT — привязка к origin/$BRANCH без mv (права на /opt часто запрещают rename)"
+  log "первичная привязка: git init в $ROOT"
   stop_stack_in_dir "$ROOT"
-  mkdir -p "$ROOT"
   cd "$ROOT"
   git init
   git remote remove origin 2>/dev/null || true
@@ -41,19 +51,19 @@ if [ ! -d "$ROOT/.git" ]; then
   git fetch origin "$BRANCH"
   git checkout -f -B "$BRANCH" "origin/$BRANCH"
 else
-  log "обновление из git: $ROOT"
-  stop_stack_in_dir "$ROOT"
+  log "git fetch + reset --hard (сначала чиним файлы на диске)"
   cd "$ROOT"
   git remote set-url origin "$REPO"
   git fetch origin "$BRANCH"
-  git checkout "$BRANCH"
   git reset --hard "origin/$BRANCH"
+  stop_stack_in_dir "$ROOT"
 fi
 
 cd "$ROOT"
-# Иначе chmod +x на сервере даёт постоянные «modified» в git status.
 git config core.fileMode false
+require_infra "$ROOT"
 assert_compose_sane "$ROOT"
+
 chmod +x infra/ensure_env.sh infra/verify_deploy.sh 2>/dev/null || true
 
 test -f .env || cp -f .env.example .env
