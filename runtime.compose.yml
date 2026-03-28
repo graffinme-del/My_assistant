@@ -15,12 +15,24 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
 
   redis:
     image: redis:7-alpine
     restart: unless-stopped
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
 
   minio:
     image: minio/minio:latest
@@ -39,8 +51,10 @@ services:
     image: ghcr.io/graffinme-del/my_assistant/api:main
     restart: unless-stopped
     depends_on:
-      - postgres
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     # Секреты из .env / .env.local — не через ${OPENAI_API_KEY:-}: пустая подстановка затирала ключ.
     env_file:
       - path: .env
@@ -55,13 +69,21 @@ services:
       - "8000:8000"
     volumes:
       - api_storage:/app/storage
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)\""]
+      interval: 5s
+      timeout: 5s
+      retries: 18
+      start_period: 60s
 
   worker:
     image: ghcr.io/graffinme-del/my_assistant/worker:main
     restart: unless-stopped
     depends_on:
-      - redis
-      - postgres
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
     environment:
       APP_ENV: ${APP_ENV:-development}
 

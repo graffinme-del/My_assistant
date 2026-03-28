@@ -56,7 +56,14 @@ grep -q '8080:80' runtime.compose.yml
 
 log "docker compose pull + up (ghcr.io)"
 docker compose -f runtime.compose.yml "${COMPOSE_ENV[@]}" pull
-docker compose -f runtime.compose.yml "${COMPOSE_ENV[@]}" up -d
+# Дождаться healthy у postgres/redis/api (до ~5 мин при тяжёлом старте)
+export COMPOSE_WAIT_TIMEOUT="${COMPOSE_WAIT_TIMEOUT:-300}"
+if docker compose -f runtime.compose.yml "${COMPOSE_ENV[@]}" up -d --wait 2>/dev/null; then
+  log "compose: все сервисы с healthcheck стали healthy"
+else
+  log "compose: up -d (без --wait — старая версия compose или таймаут)"
+  docker compose -f runtime.compose.yml "${COMPOSE_ENV[@]}" up -d
+fi
 
 sh infra/verify_deploy.sh
 log "OK — сервер на образах GHCR, исходники на диске не нужны"
