@@ -1,5 +1,6 @@
 # Прод: деплой ВСЕГДА через этот файл (-f infra/compose.prod.yml).
 # Фиксированные порты — даже без .env веб остаётся на :8080, API на :8000.
+# build.context ../apps/* — файл лежит в infra/; иначе Docker ищет infra/apps/api.
 services:
   postgres:
     image: postgres:16-alpine
@@ -33,7 +34,9 @@ services:
       - minio_data:/data
 
   api:
-    build: ./apps/api
+    build:
+      context: ../apps/api
+      dockerfile: Dockerfile
     restart: unless-stopped
     depends_on:
       - postgres
@@ -59,7 +62,9 @@ services:
       - api_storage:/app/storage
 
   worker:
-    build: ./apps/worker
+    build:
+      context: ../apps/worker
+      dockerfile: Dockerfile
     restart: unless-stopped
     depends_on:
       - redis
@@ -68,7 +73,9 @@ services:
       APP_ENV: ${APP_ENV:-development}
 
   web:
-    build: ./apps/web
+    build:
+      context: ../apps/web
+      dockerfile: Dockerfile
     restart: unless-stopped
     depends_on:
       - api
