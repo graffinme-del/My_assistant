@@ -1,0 +1,35 @@
+=== Не программисту: где смотреть, что всё живо ===
+
+1) САЙТ В БРАУЗЕРЕ (с телефона или ПК)
+   Открой в адресной строке (подставь IP своего сервера Hetzner):
+   http://49.12.235.166:8080
+   Должна открыться страница «My Assistant» с полем чата.
+   Если «не открывается» — проверь, что в панели Hetzner в Firewall открыт порт 8080.
+
+2) ТЕРМИНАЛ НА СЕРВЕРЕ (SSH)
+   Всегда сначала:
+   cd /opt/my_assistant
+   (если у тебя другой каталог — тот, где лежат runtime.compose.yml и .env)
+
+   Посмотреть контейнеры:
+   docker compose -f runtime.compose.yml ps
+   У всех в колонке STATE должно быть «running» или «Up».
+
+3) ФАЙЛ НАСТРОЕК
+   Один обязательный файл: /opt/my_assistant/.env
+   Редактировать: nano .env
+   Сохранить в nano: Ctrl+O, Enter, выйти: Ctrl+X
+
+   НЕ запускай команды с --env-file .env.local, если файла .env.local НЕТ —
+   Docker напишет «couldn't find env file». Это нормально: просто не добавляй этот флаг.
+
+   Правильно перезапустить после правок .env:
+   docker compose -f runtime.compose.yml up -d
+
+4) ПРОВЕРКА КЛЮЧА ИИ (по желанию)
+   cd /opt/my_assistant
+   docker compose -f runtime.compose.yml exec api printenv OPENAI_API_KEY
+   Если пусто — в .env нет строки OPENAI_API_KEY=sk-...
+
+5) ЕСЛИ «ВЕБ УПАЛ», А В ТЕРМИНАЛЕ ВСЁ Up
+   Сначала открой ссылку из пункта 1. Если там ошибка — пришли текст с экрана или скрин.
