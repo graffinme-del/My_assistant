@@ -41,6 +41,11 @@ jobs:
             grep -q '8000:8000' infra/compose.prod.yml
             grep -q '8080:80' infra/compose.prod.yml
             test -f infra/ensure_env.sh
+            test -f docker-compose.yml
+            grep -q '8000:8000' docker-compose.yml
+            grep -q '8080:80' docker-compose.yml
+            ! grep -q 'APP_PORT}:8000' docker-compose.yml
+            ! grep -q 'WEB_PORT}:80' docker-compose.yml
           "
       - name: Deploy with Docker Compose
         run: |
