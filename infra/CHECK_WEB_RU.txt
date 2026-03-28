@@ -35,3 +35,10 @@
 
 5) ЕСЛИ «ВЕБ УПАЛ», А В ТЕРМИНАЛЕ ВСЁ Up
    Сначала открой ссылку из пункта 1. Если там ошибка — пришли текст с экрана или скрин.
+
+6) Ошибка «No such container» / postgres Error при compose up
+   Не пересоздавай только api — подними весь стек заново:
+   cd /opt/my_assistant
+   docker compose -f runtime.compose.yml down --remove-orphans
+   docker compose -f runtime.compose.yml up -d
+   Если postgres не поднимается: docker compose -f runtime.compose.yml logs postgres
