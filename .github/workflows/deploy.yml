@@ -16,44 +16,9 @@ jobs:
           echo "${{ secrets.HETZNER_SSH_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H "${{ secrets.HETZNER_HOST }}" >> ~/.ssh/known_hosts
-      - name: Sync project files to server
+      - name: Deploy on server (git clone/pull, not rsync)
         run: |
-          rsync -az --delete \
-            --exclude ".git" \
-            --exclude ".env" \
-            --exclude ".env.backup" \
-            --exclude ".env.*.local" \
-            --exclude "backups/" \
-            ./ ${{ secrets.HETZNER_USER }}@${{ secrets.HETZNER_HOST }}:${{ secrets.DEPLOY_PATH }}/
-      - name: Verify synced web file
-        run: |
-          LOCAL_HASH=$(sha256sum apps/web/index.html | awk '{print $1}')
-          REMOTE_HASH=$(ssh ${{ secrets.HETZNER_USER }}@${{ secrets.HETZNER_HOST }} "cd ${{ secrets.DEPLOY_PATH }} && sha256sum apps/web/index.html | awk '{print \$1}'")
-          echo "LOCAL_HASH=$LOCAL_HASH"
-          echo "REMOTE_HASH=$REMOTE_HASH"
-          test "$LOCAL_HASH" = "$REMOTE_HASH"
-      - name: Verify remote prod compose (fixed ports)
-        run: |
-          ssh ${{ secrets.HETZNER_USER }}@${{ secrets.HETZNER_HOST }} "
-            set -e
-            cd ${{ secrets.DEPLOY_PATH }}
-            test -f infra/compose.prod.yml
-            grep -q '8000:8000' infra/compose.prod.yml
-            grep -q '8080:80' infra/compose.prod.yml
-            test -f infra/ensure_env.sh
-            test -f docker-compose.yml
-            grep -q '8000:8000' docker-compose.yml
-            grep -q '8080:80' docker-compose.yml
-            ! grep -q 'APP_PORT}:8000' docker-compose.yml
-            ! grep -q 'WEB_PORT}:80' docker-compose.yml
-          "
-      - name: Deploy with Docker Compose
-        run: |
-          ssh ${{ secrets.HETZNER_USER }}@${{ secrets.HETZNER_HOST }} "
-            set -e
-            cd ${{ secrets.DEPLOY_PATH }}
-            sh infra/ensure_env.sh
-            docker compose --project-directory . -f infra/compose.prod.yml --env-file .env pull || true
-            docker compose --project-directory . -f infra/compose.prod.yml --env-file .env up -d --build
-            sh infra/verify_deploy.sh
-          "
+          DEPLOY_PATH='${{ secrets.DEPLOY_PATH }}'
+          ssh ${{ secrets.HETZNER_USER }}@${{ secrets.HETZNER_HOST }} \
+            "export DEPLOY_ROOT='${DEPLOY_PATH}' GIT_REPO_URL='https://github.com/graffinme-del/My_assistant.git' GIT_BRANCH='main'; bash -s" \
+            < infra/deploy_on_server.sh
