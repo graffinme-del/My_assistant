@@ -33,7 +33,7 @@ stop_all() {
 stop_all
 
 log "curl: runtime.compose.yml, ensure_env, verify_deploy, .env.example"
-curl -fsSL -o runtime.compose.yml "${RAW}/infra/runtime.compose.yml"
+curl -fsSL -o runtime.compose.yml "${RAW}/runtime.compose.yml"
 curl -fsSL -o infra/ensure_env.sh "${RAW}/infra/ensure_env.sh"
 curl -fsSL -o infra/verify_deploy.sh "${RAW}/infra/verify_deploy.sh"
 chmod +x infra/ensure_env.sh infra/verify_deploy.sh

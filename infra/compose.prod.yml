@@ -41,22 +41,16 @@ services:
     depends_on:
       - postgres
       - redis
+    env_file:
+      - path: ../.env
+        required: true
+      - path: ../.env.local
+        required: false
     environment:
-      APP_ENV: ${APP_ENV:-development}
       # Только литерал: иначе в .env бывает APP_PORT= и Docker передаёт пустую строку в контейнер.
       APP_PORT: "8000"
-      POSTGRES_DB: ${POSTGRES_DB:-my_assistant}
-      POSTGRES_USER: ${POSTGRES_USER:-my_assistant}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me}
-      POSTGRES_PORT: 5432
       POSTGRES_HOST: postgres
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
-      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4.1-mini}
-      LLM_HTTP_REFERER: ${LLM_HTTP_REFERER:-}
-      LLM_APP_TITLE: ${LLM_APP_TITLE:-My Assistant}
-      OWNER_TOKEN: ${OWNER_TOKEN:-owner-dev-token}
-      MEMBER_TOKEN: ${MEMBER_TOKEN:-member-dev-token}
+      POSTGRES_PORT: 5432
     ports:
       - "8000:8000"
     volumes:

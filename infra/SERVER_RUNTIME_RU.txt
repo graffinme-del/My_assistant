@@ -1,4 +1,4 @@
-Прод сейчас: образы api/web/worker в ghcr.io, на сервере только .env + runtime.compose.yml (качется с raw при деплое).
+Прод сейчас: образы api/web/worker в ghcr.io, на сервере .env + runtime.compose.yml в корне DEPLOY_ROOT (compose качается с raw как /runtime.compose.yml).
 
 1) После первого зелёного GitHub Actions → Deploy на сервере уже подтянутся образы. Вручную:
    curl -fsSL https://raw.githubusercontent.com/graffinme-del/My_assistant/main/infra/deploy_on_server.sh | bash
