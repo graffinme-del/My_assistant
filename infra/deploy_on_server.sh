@@ -23,12 +23,12 @@ stop_stack_in_dir() {
 
 assert_compose_sane() {
   local d="$1"
-  grep -q '8000:8000' "$d/docker-compose.yml"
-  grep -q '8080:80' "$d/docker-compose.yml"
-  ! grep -q 'APP_PORT}:8000' "$d/docker-compose.yml"
-  ! grep -q 'WEB_PORT}:80' "$d/docker-compose.yml"
+  # Корневой compose только подключает infra/compose.prod.yml — порты проверяем там.
+  grep -q 'compose.prod.yml' "$d/docker-compose.yml"
   grep -q '8000:8000' "$d/infra/compose.prod.yml"
   grep -q '8080:80' "$d/infra/compose.prod.yml"
+  ! grep -q 'APP_PORT}:8000' "$d/infra/compose.prod.yml"
+  ! grep -q 'WEB_PORT}:80' "$d/infra/compose.prod.yml"
 }
 
 require_infra() {
