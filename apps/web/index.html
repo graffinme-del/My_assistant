@@ -275,8 +275,10 @@
                 const ai = await api("/ai/status");
                 if (ai.status === "connected") {
                   aiLine = `ChatGPT: подключен (${ai.model})`;
-                } else if (ai.status === "not_configured") {
-                  aiLine = "ChatGPT: ключ не задан";
+            } else if (ai.status === "not_configured") {
+              aiLine = ai.message
+                ? `ключ не задан — ${ai.message}`
+                : "ChatGPT: ключ не задан";
                 } else {
                   aiLine = `ChatGPT: ошибка (${ai.message || "не удалось подключиться"})`;
                 }

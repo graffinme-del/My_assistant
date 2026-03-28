@@ -1,10 +1,16 @@
-from pydantic import field_validator
+import os
+from pathlib import Path
+
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# В контейнере рабочий каталог /app без вашего .env на диске — настройки только из env, который задаёт compose.
+_in_docker = Path("/.dockerenv").exists()
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=None if _in_docker else ".env",
         env_file_encoding="utf-8",
         # Пустые переменные из Docker/compose не затирают дефолты (иначе APP_PORT="" роняет API).
         env_ignore_empty=True,
@@ -50,6 +56,13 @@ class Settings(BaseSettings):
         if v is None or v == "":
             return v
         return str(v).strip()
+
+    @model_validator(mode="after")
+    def openai_key_from_process_env(self) -> "Settings":
+        raw = (os.environ.get("OPENAI_API_KEY") or "").strip()
+        if raw and not (self.openai_api_key or "").strip():
+            return self.model_copy(update={"openai_api_key": raw})
+        return self
 
     @property
     def database_url(self) -> str:
