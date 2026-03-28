@@ -1,11 +1,25 @@
 #!/usr/bin/env sh
-# Проверка после деплоя (тот же compose-файл, что и в GitHub Actions).
+# Проверка после деплоя. COMPOSE: runtime.compose.yml (GHCR) или infra/compose.prod.yml (локальный build).
 set -eu
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+COMPOSE="${MY_ASSISTANT_COMPOSE:-runtime.compose.yml}"
+if [ ! -f "$COMPOSE" ]; then
+  COMPOSE="infra/compose.prod.yml"
+fi
+
+dc() {
+  if echo "$COMPOSE" | grep -q '^infra/'; then
+    docker compose --project-directory . -f "$COMPOSE" --env-file .env "$@"
+  else
+    docker compose -f "$COMPOSE" --env-file .env "$@"
+  fi
+}
+
+echo "verify: using compose file $COMPOSE"
 echo "verify: docker compose ps"
-docker compose --project-directory . -f infra/compose.prod.yml --env-file .env ps
+dc ps
 
 echo "verify: wait for API"
 i=0

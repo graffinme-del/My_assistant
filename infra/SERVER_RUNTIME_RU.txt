@@ -1,0 +1,12 @@
+Прод сейчас: образы api/web/worker в ghcr.io, на сервере только .env + runtime.compose.yml (качется с raw при деплое).
+
+1) После первого зелёного GitHub Actions → Deploy на сервере уже подтянутся образы. Вручную:
+   curl -fsSL https://raw.githubusercontent.com/graffinme-del/My_assistant/main/infra/deploy_on_server.sh | bash
+
+2) Если docker pull пишет 403/денаед — пакеты GHCR сделайте Public:
+   GitHub → Packages → каждый пакет api/web/worker → Package settings → Change visibility → Public
+   Либо на сервере: docker login ghcr.io (PAT с read:packages).
+
+3) Локальная разработка по-прежнему: docker compose с infra/compose.prod.yml и --project-directory .
+
+4) Не заливайте старый код поверх /opt — он больше не участвует в запуске, но может путать вас; .env не перезаписывайте случайно.

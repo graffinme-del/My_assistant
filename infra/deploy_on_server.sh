@@ -1,80 +1,52 @@
 #!/usr/bin/env bash
-# Единая точка деплоя: рабочая копия = origin/main. Не кладите сюда второй rsync/копирование с ПК — сломаете дерево.
+# Прод: без git и без docker build на сервере. Каждый запуск тянет с GitHub raw актуальный
+# runtime.compose.yml + скрипты; контейнеры из ghcr.io (собираются в GitHub Actions).
+# Копирование старого проекта с ПК на /opt больше не может подменить образы — только .env трогайте вручную.
 set -euo pipefail
 
 ROOT="${DEPLOY_ROOT:-/opt/my_assistant}"
-REPO="${GIT_REPO_URL:-https://github.com/graffinme-del/My_assistant.git}"
 BRANCH="${GIT_BRANCH:-main}"
+RAW="https://raw.githubusercontent.com/graffinme-del/My_assistant/${BRANCH}"
 
 log() { echo "[deploy_on_server] $*"; }
 
-stop_stack_in_dir() {
-  local d="$1"
-  [ -d "$d" ] || return 0
-  if [ -f "$d/infra/compose.prod.yml" ] && [ -f "$d/.env" ]; then
-    (cd "$d" && docker compose --project-directory . -f infra/compose.prod.yml --env-file .env down --remove-orphans 2>/dev/null) || true
-  fi
-  (cd "$d" 2>/dev/null && docker compose down --remove-orphans 2>/dev/null) || true
-  docker ps -q --filter name=my_assistant | xargs -r docker stop 2>/dev/null || true
-  # Имя в фильтре иногда не матчится; метка проекта надёжнее.
+mkdir -p "$ROOT/infra"
+cd "$ROOT"
+
+stop_all() {
+  local f
+  for f in runtime.compose.yml infra/compose.prod.yml docker-compose.yml; do
+    if [ -f "$ROOT/$f" ] && [ -f "$ROOT/.env" ]; then
+      (cd "$ROOT" && docker compose -f "$f" --env-file .env down --remove-orphans 2>/dev/null) || true
+    fi
+  done
+  (cd "$ROOT" 2>/dev/null && docker compose down --remove-orphans 2>/dev/null) || true
   docker ps -aq --filter "label=com.docker.compose.project=my_assistant" | xargs -r docker rm -f 2>/dev/null || true
   docker ps -aq --filter name=my_assistant | xargs -r docker rm -f 2>/dev/null || true
   docker network rm my_assistant_default 2>/dev/null || true
 }
 
-assert_compose_sane() {
-  local d="$1"
-  # Корневой compose только подключает infra/compose.prod.yml — порты проверяем там.
-  grep -q 'compose.prod.yml' "$d/docker-compose.yml"
-  grep -q '8000:8000' "$d/infra/compose.prod.yml"
-  grep -q '8080:80' "$d/infra/compose.prod.yml"
-  ! grep -q 'APP_PORT}:8000' "$d/infra/compose.prod.yml"
-  ! grep -q 'WEB_PORT}:80' "$d/infra/compose.prod.yml"
-}
+stop_all
 
-require_infra() {
-  local d="$1"
-  local f
-  for f in infra/compose.prod.yml infra/ensure_env.sh infra/verify_deploy.sh infra/deploy_on_server.sh; do
-    if [ ! -f "$d/$f" ]; then
-      log "FATAL: нет $f после синхронизации с origin/$BRANCH — дерево битое или не тот remote"
-      exit 1
-    fi
-  done
-}
+log "curl: runtime.compose.yml, ensure_env, verify_deploy, .env.example"
+curl -fsSL -o runtime.compose.yml "${RAW}/infra/runtime.compose.yml"
+curl -fsSL -o infra/ensure_env.sh "${RAW}/infra/ensure_env.sh"
+curl -fsSL -o infra/verify_deploy.sh "${RAW}/infra/verify_deploy.sh"
+chmod +x infra/ensure_env.sh infra/verify_deploy.sh
 
-mkdir -p "$ROOT"
-
-if [ ! -d "$ROOT/.git" ]; then
-  log "первичная привязка: git init в $ROOT"
-  stop_stack_in_dir "$ROOT"
-  cd "$ROOT"
-  git init
-  git remote remove origin 2>/dev/null || true
-  git remote add origin "$REPO"
-  git fetch origin "$BRANCH"
-  git checkout -f -B "$BRANCH" "origin/$BRANCH"
-else
-  log "git fetch + reset --hard (сначала чиним файлы на диске)"
-  cd "$ROOT"
-  git remote set-url origin "$REPO"
-  git fetch origin "$BRANCH"
-  git reset --hard "origin/$BRANCH"
-  stop_stack_in_dir "$ROOT"
-fi
-
-cd "$ROOT"
-git config core.fileMode false
-require_infra "$ROOT"
-assert_compose_sane "$ROOT"
-
-chmod +x infra/ensure_env.sh infra/verify_deploy.sh 2>/dev/null || true
-
+curl -fsSL -o .env.example "${RAW}/.env.example"
 test -f .env || cp -f .env.example .env
 sh infra/ensure_env.sh
 
-docker compose --project-directory . -f infra/compose.prod.yml --env-file .env pull || true
-docker compose --project-directory . -f infra/compose.prod.yml --env-file .env up -d --build
+export MY_ASSISTANT_COMPOSE=runtime.compose.yml
+
+grep -q 'ghcr.io/graffinme-del/my_assistant' runtime.compose.yml
+grep -q '8000:8000' runtime.compose.yml
+grep -q '8080:80' runtime.compose.yml
+
+log "docker compose pull + up (ghcr.io)"
+docker compose -f runtime.compose.yml --env-file .env pull
+docker compose -f runtime.compose.yml --env-file .env up -d
 
 sh infra/verify_deploy.sh
-log "OK $(git rev-parse --short HEAD)"
+log "OK — сервер на образах GHCR, исходники на диске не нужны"

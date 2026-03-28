@@ -5,8 +5,51 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push api
+        uses: docker/build-push-action@v6
+        with:
+          context: apps/api
+          push: true
+          tags: |
+            ghcr.io/graffinme-del/my_assistant/api:main
+            ghcr.io/graffinme-del/my_assistant/api:latest
+      - name: Build and push worker
+        uses: docker/build-push-action@v6
+        with:
+          context: apps/worker
+          push: true
+          tags: |
+            ghcr.io/graffinme-del/my_assistant/worker:main
+            ghcr.io/graffinme-del/my_assistant/worker:latest
+      - name: Build and push web
+        uses: docker/build-push-action@v6
+        with:
+          context: apps/web
+          push: true
+          tags: |
+            ghcr.io/graffinme-del/my_assistant/web:main
+            ghcr.io/graffinme-del/my_assistant/web:latest
+
   deploy:
+    needs: publish
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -16,9 +59,9 @@ jobs:
           echo "${{ secrets.HETZNER_SSH_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H "${{ secrets.HETZNER_HOST }}" >> ~/.ssh/known_hosts
-      - name: Deploy on server (git clone/pull, not rsync)
+      - name: Deploy on server (pull images + runtime compose, no git build)
         run: |
           DEPLOY_PATH='${{ secrets.DEPLOY_PATH }}'
           ssh ${{ secrets.HETZNER_USER }}@${{ secrets.HETZNER_HOST }} \
-            "export DEPLOY_ROOT='${DEPLOY_PATH}' GIT_REPO_URL='https://github.com/graffinme-del/My_assistant.git' GIT_BRANCH='main'; bash -s" \
+            "export DEPLOY_ROOT='${DEPLOY_PATH}' GIT_BRANCH='main'; bash -s" \
             < infra/deploy_on_server.sh
