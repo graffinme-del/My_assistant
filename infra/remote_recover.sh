@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd /opt/my_assistant
-for f in infra/ensure_env.sh infra/verify_deploy.sh; do
-  if [ -f "$f" ]; then
-    tr -d '\r' <"$f" >"$f.tmp" && mv "$f.tmp" "$f"
-  fi
-done
+REPO="${MY_ASSISTANT_REPO:-graffinme-del/My_assistant}"
+BRANCH="${MY_ASSISTANT_BRANCH:-main}"
+mkdir -p infra
+curl -fsSL -o infra/ensure_env.sh "https://raw.githubusercontent.com/${REPO}/${BRANCH}/infra/ensure_env.sh"
+curl -fsSL -o infra/verify_deploy.sh "https://raw.githubusercontent.com/${REPO}/${BRANCH}/infra/verify_deploy.sh"
 chmod +x infra/*.sh
 ids=$(docker ps -q --filter name=my_assistant 2>/dev/null || true)
 if [ -n "${ids:-}" ]; then
