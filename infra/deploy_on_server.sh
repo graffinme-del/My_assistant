@@ -13,14 +13,18 @@ log() { echo "[deploy_on_server] $*"; }
 mkdir -p "$ROOT/infra"
 cd "$ROOT"
 
+# .env.local не скачивается с GitHub — только ваши секреты; при наличии подмешивается поверх .env.
+COMPOSE_ENV=(--env-file .env)
+[ -f .env.local ] && COMPOSE_ENV+=(--env-file .env.local)
+
 stop_all() {
   local f
   for f in runtime.compose.yml infra/compose.prod.yml docker-compose.yml; do
     if [ -f "$ROOT/$f" ] && [ -f "$ROOT/.env" ]; then
-      (cd "$ROOT" && docker compose -f "$f" --env-file .env down --remove-orphans 2>/dev/null) || true
+      (cd "$ROOT" && docker compose -f "$f" "${COMPOSE_ENV[@]}" down --remove-orphans 2>/dev/null) || true
     fi
   done
-  (cd "$ROOT" 2>/dev/null && docker compose down --remove-orphans 2>/dev/null) || true
+  (cd "$ROOT" 2>/dev/null && docker compose "${COMPOSE_ENV[@]}" down --remove-orphans 2>/dev/null) || true
   docker ps -aq --filter "label=com.docker.compose.project=my_assistant" | xargs -r docker rm -f 2>/dev/null || true
   docker ps -aq --filter name=my_assistant | xargs -r docker rm -f 2>/dev/null || true
   docker network rm my_assistant_default 2>/dev/null || true
@@ -35,6 +39,7 @@ curl -fsSL -o infra/verify_deploy.sh "${RAW}/infra/verify_deploy.sh"
 chmod +x infra/ensure_env.sh infra/verify_deploy.sh
 
 curl -fsSL -o .env.example "${RAW}/.env.example"
+curl -fsSL -o .env.local.example "${RAW}/.env.local.example" || log "нет .env.local.example в ветке — пропуск"
 test -f .env || cp -f .env.example .env
 sh infra/ensure_env.sh
 
@@ -45,8 +50,8 @@ grep -q '8000:8000' runtime.compose.yml
 grep -q '8080:80' runtime.compose.yml
 
 log "docker compose pull + up (ghcr.io)"
-docker compose -f runtime.compose.yml --env-file .env pull
-docker compose -f runtime.compose.yml --env-file .env up -d
+docker compose -f runtime.compose.yml "${COMPOSE_ENV[@]}" pull
+docker compose -f runtime.compose.yml "${COMPOSE_ENV[@]}" up -d
 
 sh infra/verify_deploy.sh
 log "OK — сервер на образах GHCR, исходники на диске не нужны"

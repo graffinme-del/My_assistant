@@ -10,10 +10,18 @@ if [ ! -f "$COMPOSE" ]; then
 fi
 
 dc() {
-  if echo "$COMPOSE" | grep -q '^infra/'; then
-    docker compose --project-directory . -f "$COMPOSE" --env-file .env "$@"
+  if [ -f .env.local ]; then
+    if echo "$COMPOSE" | grep -q '^infra/'; then
+      docker compose --project-directory . -f "$COMPOSE" --env-file .env --env-file .env.local "$@"
+    else
+      docker compose -f "$COMPOSE" --env-file .env --env-file .env.local "$@"
+    fi
   else
-    docker compose -f "$COMPOSE" --env-file .env "$@"
+    if echo "$COMPOSE" | grep -q '^infra/'; then
+      docker compose --project-directory . -f "$COMPOSE" --env-file .env "$@"
+    else
+      docker compose -f "$COMPOSE" --env-file .env "$@"
+    fi
   fi
 }
 
