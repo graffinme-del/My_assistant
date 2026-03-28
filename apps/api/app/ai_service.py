@@ -37,8 +37,22 @@ async def _llm_chat(user_content: str, *, timeout: float = 45.0) -> str:
     }
     async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.post(_chat_completions_url(), headers=_llm_headers(), json=payload)
+    try:
         resp.raise_for_status()
-        data = resp.json()
+    except httpx.HTTPStatusError as e:
+        code = e.response.status_code
+        if code == 401:
+            raise ValueError(
+                "OpenAI/OpenRouter вернул 401: ключ неверный, не тот для этого URL, или истёк. "
+                "На сервере в /opt/my_assistant/.env задайте OPENAI_API_KEY (sk-… с platform.openai.com). "
+                "Если ключ от OpenRouter — OPENAI_BASE_URL=https://openrouter.ai/api/v1 и модель вида openai/gpt-4o-mini."
+            ) from e
+        if code == 429:
+            raise ValueError(
+                "Провайдер вернул 429 (лимит или нет оплаты). Проверьте биллинг и квоты."
+            ) from e
+        raise
+    data = resp.json()
     choices = data.get("choices") or []
     if not choices:
         return ""

@@ -44,6 +44,13 @@ class Settings(BaseSettings):
             return 5432
         return v
 
+    @field_validator("openai_api_key", "openai_base_url", mode="before")
+    @classmethod
+    def _strip_llm_strings(cls, v: object) -> object:
+        if v is None or v == "":
+            return v
+        return str(v).strip()
+
     @property
     def database_url(self) -> str:
         return (
