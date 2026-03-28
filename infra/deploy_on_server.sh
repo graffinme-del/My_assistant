@@ -16,7 +16,8 @@ stop_stack_in_dir() {
   fi
   (cd "$d" 2>/dev/null && docker compose down --remove-orphans 2>/dev/null) || true
   docker ps -q --filter name=my_assistant | xargs -r docker stop 2>/dev/null || true
-  # stop не удаляет контейнер — без rm следующий up даёт «name already in use».
+  # Имя в фильтре иногда не матчится; метка проекта надёжнее.
+  docker ps -aq --filter "label=com.docker.compose.project=my_assistant" | xargs -r docker rm -f 2>/dev/null || true
   docker ps -aq --filter name=my_assistant | xargs -r docker rm -f 2>/dev/null || true
   docker network rm my_assistant_default 2>/dev/null || true
 }
