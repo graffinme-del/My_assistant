@@ -40,6 +40,11 @@ chmod +x infra/ensure_env.sh infra/verify_deploy.sh
 
 curl -fsSL -o .env.example "${RAW}/.env.example"
 curl -fsSL -o .env.local.example "${RAW}/.env.local.example" || log "нет .env.local.example в ветке — пропуск"
+# Резервная копия перед ensure_env (на случай ручного отката: cp .env.bak .env)
+if [ -f .env ]; then
+  cp -a .env .env.bak
+  log "сохранена копия .env → .env.bak"
+fi
 test -f .env || cp -f .env.example .env
 sh infra/ensure_env.sh
 
