@@ -147,9 +147,30 @@ def looks_like_documents_analyze_request(text: str) -> bool:
 
 def looks_like_group_by_cases_request(text: str) -> bool:
     t = text.lower()
-    return any(k in t for k in ["разлож", "разложи", "сгруппируй", "раскидай"]) and any(
-        k in t for k in ["по делам", "по папкам", "по дел", "по папк"]
-    )
+    action_markers = [
+        "разлож",
+        "разложи",
+        "разложил",
+        "сгруппируй",
+        "сгруппировал",
+        "раскидай",
+        "раскидал",
+        "как разлож",
+        "как раскид",
+        "что разлож",
+        "что раскид",
+    ]
+    target_markers = [
+        "по делам",
+        "по папкам",
+        "по дел",
+        "по папк",
+        "документы по делам",
+        "файлы по делам",
+        "как разложены документы",
+        "как разложены файлы",
+    ]
+    return any(k in t for k in action_markers) and any(k in t for k in target_markers)
 
 
 def looks_like_unsorted_tag_suggestion_request(text: str) -> bool:
