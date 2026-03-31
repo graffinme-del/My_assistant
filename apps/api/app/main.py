@@ -145,6 +145,13 @@ def looks_like_documents_analyze_request(text: str) -> bool:
     )
 
 
+def looks_like_group_by_cases_request(text: str) -> bool:
+    t = text.lower()
+    return any(k in t for k in ["разлож", "разложи", "сгруппируй", "раскидай"]) and any(
+        k in t for k in ["по делам", "по папкам", "по дел", "по папк"]
+    )
+
+
 def looks_like_chronology_request(text: str) -> bool:
     t = text.lower()
     return any(k in t for k in ["хронолог", "таймлайн", "по датам", "по времени"])
@@ -734,6 +741,55 @@ def render_document_list(case: Case, docs: list[Document]) -> str:
     return "\n".join(lines)
 
 
+def render_documents_grouped_by_cases(db: Session) -> str:
+    cases_with_docs = (
+        db.query(Case)
+        .join(Document, Document.case_id == Case.id)
+        .order_by(Case.updated_at.desc())
+        .all()
+    )
+    if not cases_with_docs:
+        return "Пока нет загруженных документов, которые можно разложить по делам."
+
+    seen_case_ids: set[int] = set()
+    lines = ["Разложил документы по делам:"]
+    unresolved_count = 0
+    unresolved_examples: list[str] = []
+    for case in cases_with_docs:
+        if case.id in seen_case_ids:
+            continue
+        seen_case_ids.add(case.id)
+        docs = (
+            db.query(Document)
+            .filter(Document.case_id == case.id)
+            .order_by(Document.created_at.desc())
+            .all()
+        )
+        if not docs:
+            continue
+        category_counts: dict[str, int] = {}
+        for doc in docs:
+            category_counts[doc.category] = category_counts.get(doc.category, 0) + 1
+        top_categories = ", ".join(
+            f"{name}: {count}" for name, count in sorted(category_counts.items(), key=lambda x: (-x[1], x[0]))[:4]
+        )
+        sample_docs = "; ".join(doc.filename for doc in docs[:3])
+        if case.case_number == "UNSORTED":
+            unresolved_count = len(docs)
+            unresolved_examples = [doc.filename for doc in docs[:5]]
+            continue
+        lines.append(
+            f'- "{case.title}" ({case.case_number}) -> документов: {len(docs)}; категории: {top_categories or "нет"}; '
+            f'примеры: {sample_docs}'
+        )
+
+    if unresolved_count:
+        lines.append(
+            f'- Неразобранные / требуют ручной проверки: {unresolved_count}; примеры: {", ".join(unresolved_examples)}'
+        )
+    return "\n".join(lines)
+
+
 async def summarize_documents_for_case(case: Case, docs: list[Document], *, chronology: bool) -> str:
     if not docs:
         return f'По делу "{case.title}" пока нет документов для разбора.'
@@ -858,6 +914,21 @@ async def assistant_ingest_text(
             mode="case-tags",
             created_tasks=0,
             next_hearing_date=case.next_hearing_date,
+            reply=reply_text,
+        )
+
+    if looks_like_group_by_cases_request(text):
+        reply_text = render_documents_grouped_by_cases(db)
+        unsorted_case = get_or_create_unsorted_case(db)
+        db.add(CaseEvent(case_id=unsorted_case.id, event_type="assistant_reply", body=reply_text))
+        db.commit()
+        return AssistantIngestOut(
+            case_id=unsorted_case.id,
+            case_number=unsorted_case.case_number,
+            created_case=False,
+            mode="documents-grouped-by-case",
+            created_tasks=0,
+            next_hearing_date=unsorted_case.next_hearing_date,
             reply=reply_text,
         )
 
