@@ -112,6 +112,11 @@
         font-size: 12px;
         font-weight: 600;
       }
+      .summaryBtn {
+        border-color: #666;
+        background: #f5f5f5;
+        color: #333 !important;
+      }
       #chatLog {
         max-height: calc(100vh - 130px) !important;
       }
@@ -464,28 +469,56 @@
         el("summaryText").textContent = s.summary;
       }
 
+      async function showDocumentSummary(documentId) {
+        appendChat("assistant", `Готовлю выжимку по документу #${documentId}...`);
+        try {
+          const res = await api(`/documents/${documentId}/summary`, { timeoutMs: 90000 });
+          appendChat(
+            "assistant",
+            `Выжимка по документу "${res.filename}":\n${res.summary}`
+          );
+        } catch (e) {
+          appendChat(
+            "assistant",
+            `Не удалось сделать выжимку по документу #${documentId}: ${e && e.message ? e.message : e}`
+          );
+        }
+      }
+
       function renderAssistantMessage(container, text) {
         const lines = String(text).split("\n");
         for (const line of lines) {
           const row = document.createElement("div");
           row.style.whiteSpace = "pre-wrap";
-          const m = line.match(/^(.*?)(\/api\/documents\/\d+\/download)(.*)$/i);
+          const m = line.match(/^(.*?\[(\d+)\].*?)(\/api\/documents\/\d+\/download)(.*)$/i);
           if (!m) {
             row.textContent = line;
             container.appendChild(row);
             continue;
           }
           const before = (m[1] || "").replace(/скачать:\s*$/i, "").trimEnd();
+          const documentId = m[2];
           const after = (m[3] || "").trim();
           if (before) row.append(document.createTextNode(before + " "));
           const link = document.createElement("a");
           const token = storage.apiToken || "owner-dev-token";
-          link.href = `${window.location.origin}${m[2]}?token=${encodeURIComponent(token)}`;
+          link.href = `${window.location.origin}${m[3]}?token=${encodeURIComponent(token)}`;
           link.textContent = "Скачать";
           link.target = "_blank";
           link.rel = "noopener noreferrer";
           link.className = "downloadBtn";
           row.append(link);
+          if (documentId) {
+            const summaryBtn = document.createElement("a");
+            summaryBtn.href = "#";
+            summaryBtn.textContent = "Выжимка";
+            summaryBtn.className = "downloadBtn summaryBtn";
+            summaryBtn.onclick = (ev) => {
+              ev.preventDefault();
+              showDocumentSummary(Number(documentId));
+            };
+            row.append(summaryBtn);
+          }
           if (after) row.append(document.createTextNode(" " + after));
           container.appendChild(row);
         }

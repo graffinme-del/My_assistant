@@ -414,6 +414,31 @@ def download_document(
     return FileResponse(path=str(path), filename=doc.filename, media_type="application/octet-stream")
 
 
+@app.get("/documents/{document_id}/summary")
+async def document_summary(
+    document_id: int, db: Session = Depends(get_db), _: str = Depends(require_user)
+) -> dict[str, str | int]:
+    doc = db.query(Document).filter(Document.id == document_id).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    case = db.query(Case).filter(Case.id == doc.case_id).first()
+    text_sample = re.sub(r"\s+", " ", (doc.extracted_text or "").strip())[:6000]
+    if not text_sample:
+        text_sample = "Текст документа не извлечён. Есть только имя файла и категория."
+    prompt = (
+        "Сделай краткую выжимку по одному судебному документу.\n"
+        "Ответ дай по-русски, коротко и по делу: что это за документ, по какому делу, "
+        "главные участники, ключевые факты, даты и что важно проверить дальше. "
+        "Не выдумывай то, чего нет в тексте.\n\n"
+        f'Дело: {case.title if case else "неизвестно"} ({case.case_number if case else "-"})\n'
+        f"Файл: {doc.filename}\n"
+        f"Категория: {doc.category}\n"
+        f"Текст:\n{text_sample}"
+    )
+    summary = await llm_summary(prompt)
+    return {"document_id": doc.id, "filename": doc.filename, "summary": summary}
+
+
 @app.post("/documents/ingest", response_model=DocumentIngestOut)
 async def ingest_document(
     file: UploadFile = File(...),
