@@ -6,7 +6,7 @@ from uuid import uuid4
 import tempfile
 import zipfile
 
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from sqlalchemy import or_
@@ -68,6 +68,16 @@ STORAGE_ROOT.mkdir(parents=True, exist_ok=True)
 def require_user(x_api_token: str | None = Header(default=None)) -> str:
     if x_api_token in (settings.owner_token, settings.member_token):
         return "owner" if x_api_token == settings.owner_token else "member"
+    raise HTTPException(status_code=401, detail="Unauthorized. Provide X-API-Token header.")
+
+
+def require_user_header_or_query(
+    x_api_token: str | None = Header(default=None),
+    token: str | None = Query(default=None),
+) -> str:
+    effective = x_api_token or token
+    if effective in (settings.owner_token, settings.member_token):
+        return "owner" if effective == settings.owner_token else "member"
     raise HTTPException(status_code=401, detail="Unauthorized. Provide X-API-Token header.")
 
 
@@ -393,7 +403,7 @@ def list_documents(
 
 @app.get("/documents/{document_id}/download")
 def download_document(
-    document_id: int, db: Session = Depends(get_db), _: str = Depends(require_user)
+    document_id: int, db: Session = Depends(get_db), _: str = Depends(require_user_header_or_query)
 ) -> FileResponse:
     doc = db.query(Document).filter(Document.id == document_id).first()
     if not doc:

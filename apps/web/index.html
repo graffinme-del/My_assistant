@@ -479,7 +479,8 @@
           const after = (m[3] || "").trim();
           if (before) row.append(document.createTextNode(before + " "));
           const link = document.createElement("a");
-          link.href = `${window.location.origin}${m[2]}`;
+          const token = storage.apiToken || "owner-dev-token";
+          link.href = `${window.location.origin}${m[2]}?token=${encodeURIComponent(token)}`;
           link.textContent = "Скачать";
           link.target = "_blank";
           link.rel = "noopener noreferrer";
