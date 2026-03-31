@@ -1142,6 +1142,7 @@ def apply_pending_move_plan(db: Session, text: str) -> str:
     moved: list[str] = []
     moved_total = 0
     rerouted: list[str] = []
+    excluded_docs: list[tuple[int, Document]] = []
     for idx, doc in enumerate(docs, start=1):
         if idx in alternate_moves:
             alt_case = alternate_moves[idx]
@@ -1154,6 +1155,7 @@ def apply_pending_move_plan(db: Session, text: str) -> str:
                 rerouted.append(f"{idx}. [{doc.id}] {doc.filename} -> {alt_case.title}")
             continue
         if idx in exclude_numbers:
+            excluded_docs.append((idx, doc))
             continue
         old_case_id = doc.case_id
         doc.case_id = target_case.id
@@ -1167,6 +1169,29 @@ def apply_pending_move_plan(db: Session, text: str) -> str:
     lines = [f'Перенёс документы в дело "{target_case.title}" ({target_case.case_number}). Перенесено: {moved_total}.']
     if exclude_numbers:
         lines.append("Исключены из переноса номера: " + ", ".join(str(x) for x in sorted(exclude_numbers)))
+    if excluded_docs:
+        lines.append("Что можно сделать с исключёнными документами:")
+        all_cases = db.query(Case).all()
+        for idx, doc in excluded_docs[:12]:
+            suggestions: list[str] = []
+            for case in all_cases:
+                if case.id == target_case.id or case.case_number == "UNSORTED":
+                    continue
+                confidence = 0.0
+                haystack = f"{doc.filename}\n{doc.extracted_text or ''}".lower()
+                title_norm = case.title.lower()
+                if title_norm and title_norm[:12] in haystack:
+                    confidence += 0.35
+                for tag in getattr(case, "tags", []):
+                    token = tag.value.lower()
+                    if token and token in haystack:
+                        confidence += 0.7 if tag.kind == "alias" else 0.45
+                if confidence >= 0.45:
+                    suggestions.append(f'{case.title} ({confidence:.2f})')
+            if suggestions:
+                lines.append(f"{idx}. [{doc.id}] {doc.filename} -> возможно: " + "; ".join(suggestions[:3]))
+            else:
+                lines.append(f"{idx}. [{doc.id}] {doc.filename} -> явного дела не найдено, оставлен без переноса")
     if moved:
         lines.append("Что перенесено:")
         lines.extend(moved)
