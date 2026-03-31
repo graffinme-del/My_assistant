@@ -187,6 +187,13 @@ def looks_like_reclassify_unsorted_request(text: str) -> bool:
     )
 
 
+def looks_like_manual_move_request(text: str) -> bool:
+    t = text.lower()
+    return any(k in t for k in ["перенеси", "перемести", "привяжи"]) and "дело" in t and any(
+        k in t for k in ["документ", "файл", "["]
+    )
+
+
 def looks_like_chronology_request(text: str) -> bool:
     t = text.lower()
     return any(k in t for k in ["хронолог", "таймлайн", "по датам", "по времени"])
@@ -915,6 +922,51 @@ def reclassify_unsorted_documents(db: Session) -> str:
     return "\n".join(summary)
 
 
+def move_documents_by_chat_command(db: Session, text: str) -> str:
+    doc_ids = [int(x) for x in re.findall(r"\[(\d+)\]", text)]
+    if not doc_ids:
+        doc_ids = [int(x) for x in re.findall(r"(?:документ|файл)\s+(\d+)", text, flags=re.IGNORECASE)]
+    if not doc_ids:
+        return "Не вижу ID документов. Напишите, например: перенеси документ 4 в дело Банкротство АГМ"
+
+    m = re.search(r"в\s+дел[оау]\s+(.+)$", text, flags=re.IGNORECASE)
+    if not m:
+        return "Не вижу, в какое дело переносить. Напишите: перенеси документ 4 в дело <название>"
+    case_hint = m.group(1).strip(" .:-")
+    target_case = find_case_by_hint(db.query(Case).all(), case_hint)
+    if not target_case:
+        return f'Не нашёл дело по фразе "{case_hint}". Сначала добавьте теги/алиасы или уточните название дела.'
+
+    docs = db.query(Document).filter(Document.id.in_(doc_ids)).all()
+    if not docs:
+        return "Не нашёл документы с такими ID."
+
+    moved: list[str] = []
+    for doc in docs:
+        old_case_id = doc.case_id
+        doc.case_id = target_case.id
+        db.add(
+            CaseEvent(
+                case_id=target_case.id,
+                event_type="document_reclassified",
+                body=f'Документ "{doc.filename}" вручную перенесён через чат.',
+            )
+        )
+        db.add(
+            CaseEvent(
+                case_id=old_case_id,
+                event_type="document_reclassified",
+                body=f'Документ "{doc.filename}" вручную перенесён в дело "{target_case.title}".',
+            )
+        )
+        moved.append(f'- [{doc.id}] {doc.filename}')
+    db.commit()
+    return (
+        f'Перенёс документы в дело "{target_case.title}" ({target_case.case_number}).\n'
+        + "\n".join(moved)
+    )
+
+
 async def summarize_documents_for_case(case: Case, docs: list[Document], *, chronology: bool) -> str:
     if not docs:
         return f'По делу "{case.title}" пока нет документов для разбора.'
@@ -1082,6 +1134,21 @@ async def assistant_ingest_text(
             case_number=unsorted_case.case_number,
             created_case=False,
             mode="unsorted-reclassified",
+            created_tasks=0,
+            next_hearing_date=unsorted_case.next_hearing_date,
+            reply=reply_text,
+        )
+
+    if looks_like_manual_move_request(text):
+        reply_text = move_documents_by_chat_command(db, text)
+        unsorted_case = get_or_create_unsorted_case(db)
+        db.add(CaseEvent(case_id=unsorted_case.id, event_type="assistant_reply", body=reply_text))
+        db.commit()
+        return AssistantIngestOut(
+            case_id=unsorted_case.id,
+            case_number=unsorted_case.case_number,
+            created_case=False,
+            mode="documents-manual-move",
             created_tasks=0,
             next_hearing_date=unsorted_case.next_hearing_date,
             reply=reply_text,

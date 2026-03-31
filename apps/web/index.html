@@ -467,25 +467,26 @@
       function renderAssistantMessage(container, text) {
         const lines = String(text).split("\n");
         for (const line of lines) {
-          const m = line.match(/^(.*скачать:\s*)(\/api\/documents\/\d+\/download)\s*$/i);
-          if (m) {
-            const row = document.createElement("div");
-            row.style.whiteSpace = "pre-wrap";
-            row.append(document.createTextNode(m[1]));
-            const link = document.createElement("a");
-            link.href = `${window.location.origin}${m[2]}`;
-            link.textContent = "Скачать";
-            link.target = "_blank";
-            link.rel = "noopener noreferrer";
-            link.className = "downloadBtn";
-            row.append(link);
-            container.appendChild(row);
-          } else {
-            const row = document.createElement("div");
-            row.style.whiteSpace = "pre-wrap";
+          const row = document.createElement("div");
+          row.style.whiteSpace = "pre-wrap";
+          const m = line.match(/^(.*?)(\/api\/documents\/\d+\/download)(.*)$/i);
+          if (!m) {
             row.textContent = line;
             container.appendChild(row);
+            continue;
           }
+          const before = (m[1] || "").replace(/скачать:\s*$/i, "").trimEnd();
+          const after = (m[3] || "").trim();
+          if (before) row.append(document.createTextNode(before + " "));
+          const link = document.createElement("a");
+          link.href = `${window.location.origin}${m[2]}`;
+          link.textContent = "Скачать";
+          link.target = "_blank";
+          link.rel = "noopener noreferrer";
+          link.className = "downloadBtn";
+          row.append(link);
+          if (after) row.append(document.createTextNode(" " + after));
+          container.appendChild(row);
         }
       }
 
