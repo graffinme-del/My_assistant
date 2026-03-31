@@ -100,6 +100,18 @@
         color: #2463eb;
         text-decoration: underline;
       }
+      .downloadBtn {
+        display: inline-block;
+        margin-left: 8px;
+        padding: 4px 10px;
+        border: 1px solid #2463eb;
+        border-radius: 999px;
+        background: #eef4ff;
+        color: #2463eb !important;
+        text-decoration: none !important;
+        font-size: 12px;
+        font-weight: 600;
+      }
       #chatLog {
         max-height: calc(100vh - 130px) !important;
       }
@@ -461,10 +473,11 @@
             row.style.whiteSpace = "pre-wrap";
             row.append(document.createTextNode(m[1]));
             const link = document.createElement("a");
-            link.href = m[2];
-            link.textContent = "скачать документ";
+            link.href = `${window.location.origin}${m[2]}`;
+            link.textContent = "Скачать";
             link.target = "_blank";
             link.rel = "noopener noreferrer";
+            link.className = "downloadBtn";
             row.append(link);
             container.appendChild(row);
           } else {
