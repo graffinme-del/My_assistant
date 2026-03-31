@@ -1,4 +1,5 @@
 from datetime import datetime, time
+import re
 import shutil
 from pathlib import Path
 from uuid import uuid4
@@ -7,6 +8,7 @@ import zipfile
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
@@ -84,6 +86,84 @@ def get_or_create_unsorted_case(db: Session) -> Case:
     db.commit()
     db.refresh(case)
     return case
+
+
+def resolve_case_for_chat(
+    db: Session,
+    text: str,
+    *,
+    preferred_case_number: str | None = None,
+) -> Case:
+    cases = db.query(Case).all()
+    if preferred_case_number:
+        normalized_case_number = preferred_case_number.replace(" ", "").replace("\n", "")
+        case = db.query(Case).filter(Case.case_number == normalized_case_number).first()
+        if case:
+            return case
+
+    extracted_case_number = extract_case_number(text)
+    if extracted_case_number:
+        normalized_case_number = extracted_case_number.replace(" ", "").replace("\n", "")
+        case = db.query(Case).filter(Case.case_number == normalized_case_number).first()
+        if case:
+            return case
+
+    hinted = find_case_by_hint(cases, text)
+    if hinted:
+        return hinted
+
+    with_docs = (
+        db.query(Case)
+        .join(Document, Document.case_id == Case.id)
+        .order_by(Case.updated_at.desc())
+        .first()
+    )
+    if with_docs:
+        return with_docs
+    return get_or_create_unsorted_case(db)
+
+
+def local_storage_path(doc: Document) -> Path | None:
+    if not doc.s3_key.startswith("local://"):
+        return None
+    rel = doc.s3_key.replace("local://", "", 1)
+    path = STORAGE_ROOT / rel
+    return path if path.exists() else None
+
+
+def looks_like_documents_list_request(text: str) -> bool:
+    t = text.lower()
+    return any(noun in t for noun in ["документ", "файл", "архив"]) and any(
+        k in t for k in ["покажи", "список", "какие", "дай"]
+    )
+
+
+def looks_like_documents_analyze_request(text: str) -> bool:
+    t = text.lower()
+    return any(noun in t for noun in ["документ", "файл", "архив"]) and any(
+        k in t for k in ["разбери", "проанализ", "разлож", "сгруппир"]
+    )
+
+
+def looks_like_chronology_request(text: str) -> bool:
+    t = text.lower()
+    return any(k in t for k in ["хронолог", "таймлайн", "по датам", "по времени"])
+
+
+def extract_search_query(text: str) -> str:
+    lowered = text.lower()
+    for marker in ["найди", "поиск", "ищи", "покажи документы с", "документы с"]:
+        idx = lowered.find(marker)
+        if idx >= 0:
+            return text[idx + len(marker) :].strip(" :.-")
+    return ""
+
+
+def looks_like_documents_search_request(text: str) -> bool:
+    t = text.lower()
+    return any(k in t for k in ["найди", "поиск", "ищи"]) and any(
+        k in t for k in ["док", "файл", "асв", "банк", "определен", "договор", "жалоб", "акт"]
+    )
 
 
 @app.get("/health")
@@ -260,6 +340,19 @@ def list_documents(
         .order_by(Document.created_at.desc())
         .all()
     )
+
+
+@app.get("/documents/{document_id}/download")
+def download_document(
+    document_id: int, db: Session = Depends(get_db), _: str = Depends(require_user)
+) -> FileResponse:
+    doc = db.query(Document).filter(Document.id == document_id).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    path = local_storage_path(doc)
+    if not path:
+        raise HTTPException(status_code=404, detail="Document file not found on disk")
+    return FileResponse(path=str(path), filename=doc.filename, media_type="application/octet-stream")
 
 
 @app.post("/documents/ingest", response_model=DocumentIngestOut)
@@ -591,6 +684,67 @@ async def assistant_summary_from_text(
     )
 
 
+def render_document_list(case: Case, docs: list[Document]) -> str:
+    if not docs:
+        return f'По делу "{case.title}" пока нет загруженных документов.'
+    lines = [f'Документы по делу "{case.title}" ({len(docs)} шт.):']
+    for doc in docs[:20]:
+        lines.append(
+            f'- [{doc.id}] {doc.filename} | {doc.category} | скачать: /api/documents/{doc.id}/download'
+        )
+    if len(docs) > 20:
+        lines.append(f"... и еще {len(docs) - 20}. Уточните запрос, если нужен отбор.")
+    return "\n".join(lines)
+
+
+async def summarize_documents_for_case(case: Case, docs: list[Document], *, chronology: bool) -> str:
+    if not docs:
+        return f'По делу "{case.title}" пока нет документов для разбора.'
+    snippets: list[str] = []
+    for doc in docs[:15]:
+        text_sample = (doc.extracted_text or "").strip()
+        text_sample = re.sub(r"\s+", " ", text_sample)[:900]
+        if not text_sample:
+            text_sample = "Текст не извлечён."
+        snippets.append(f"Файл: {doc.filename}\nКатегория: {doc.category}\nТекст: {text_sample}")
+    prompt = (
+        "Ты помощник по разбору судебных документов.\n"
+        + (
+            "Собери хронологию по документам: даты, события, участники, что произошло. "
+            "Не выдумывай факты, пиши только то, что видно из материалов.\n\n"
+            if chronology
+            else "Кратко разложи документы по смыслу: что это за документы, какие важные факты, лица, сроки и что стоит посмотреть дальше.\n\n"
+        )
+        + f'Дело: {case.title} ({case.case_number})\n\n'
+        + "\n\n".join(snippets)
+    )
+    try:
+        return await llm_summary(prompt)
+    except Exception as exc:
+        return f"Не удалось разобрать документы автоматически: {exc}"
+
+
+def search_documents(case: Case, docs: list[Document], query: str) -> str:
+    if not docs:
+        return f'По делу "{case.title}" пока нет документов.'
+    norm_query = query.lower()
+    matched = [
+        doc
+        for doc in docs
+        if norm_query in doc.filename.lower()
+        or norm_query in doc.category.lower()
+        or norm_query in (doc.extracted_text or "").lower()
+    ]
+    if not matched:
+        return f'По запросу "{query}" в деле "{case.title}" ничего не найдено.'
+    lines = [f'Нашёл {len(matched)} документ(ов) по запросу "{query}" в деле "{case.title}":']
+    for doc in matched[:20]:
+        lines.append(f'- [{doc.id}] {doc.filename} | {doc.category} | скачать: /api/documents/{doc.id}/download')
+    if len(matched) > 20:
+        lines.append(f"... и еще {len(matched) - 20}.")
+    return "\n".join(lines)
+
+
 @app.post("/assistant/ingest-text", response_model=AssistantIngestOut)
 async def assistant_ingest_text(
     payload: AssistantIngestIn,
@@ -669,6 +823,71 @@ async def assistant_ingest_text(
             next_hearing_date=case.next_hearing_date,
             reply=reply_text,
         )
+
+    command_case = resolve_case_for_chat(db, text, preferred_case_number=payload.preferred_case_number)
+    command_docs = (
+        db.query(Document)
+        .filter(Document.case_id == command_case.id)
+        .order_by(Document.created_at.desc())
+        .all()
+    )
+    if looks_like_documents_list_request(text):
+        reply_text = render_document_list(command_case, command_docs)
+        db.add(CaseEvent(case_id=command_case.id, event_type="assistant_reply", body=reply_text))
+        db.commit()
+        return AssistantIngestOut(
+            case_id=command_case.id,
+            case_number=command_case.case_number,
+            created_case=False,
+            mode="documents-list",
+            created_tasks=0,
+            next_hearing_date=command_case.next_hearing_date,
+            reply=reply_text,
+        )
+
+    if looks_like_chronology_request(text):
+        reply_text = await summarize_documents_for_case(command_case, command_docs, chronology=True)
+        db.add(CaseEvent(case_id=command_case.id, event_type="assistant_reply", body=reply_text))
+        db.commit()
+        return AssistantIngestOut(
+            case_id=command_case.id,
+            case_number=command_case.case_number,
+            created_case=False,
+            mode="documents-chronology",
+            created_tasks=0,
+            next_hearing_date=command_case.next_hearing_date,
+            reply=reply_text,
+        )
+
+    if looks_like_documents_analyze_request(text):
+        reply_text = await summarize_documents_for_case(command_case, command_docs, chronology=False)
+        db.add(CaseEvent(case_id=command_case.id, event_type="assistant_reply", body=reply_text))
+        db.commit()
+        return AssistantIngestOut(
+            case_id=command_case.id,
+            case_number=command_case.case_number,
+            created_case=False,
+            mode="documents-analyze",
+            created_tasks=0,
+            next_hearing_date=command_case.next_hearing_date,
+            reply=reply_text,
+        )
+
+    if looks_like_documents_search_request(text):
+        query = extract_search_query(text)
+        if query:
+            reply_text = search_documents(command_case, command_docs, query)
+            db.add(CaseEvent(case_id=command_case.id, event_type="assistant_reply", body=reply_text))
+            db.commit()
+            return AssistantIngestOut(
+                case_id=command_case.id,
+                case_number=command_case.case_number,
+                created_case=False,
+                mode="documents-search",
+                created_tasks=0,
+                next_hearing_date=command_case.next_hearing_date,
+                reply=reply_text,
+            )
 
     extracted_case_number = payload.preferred_case_number or extract_case_number(text)
     created_case = False
