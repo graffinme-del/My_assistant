@@ -152,6 +152,13 @@ def looks_like_group_by_cases_request(text: str) -> bool:
     )
 
 
+def looks_like_unsorted_tag_suggestion_request(text: str) -> bool:
+    t = text.lower()
+    return any(k in t for k in ["предлож", "подскажи", "придумай", "выдели"]) and any(
+        k in t for k in ["теги", "алиасы", "ключевые слова", "неразобран", "unsorted"]
+    )
+
+
 def looks_like_chronology_request(text: str) -> bool:
     t = text.lower()
     return any(k in t for k in ["хронолог", "таймлайн", "по датам", "по времени"])
@@ -790,6 +797,42 @@ def render_documents_grouped_by_cases(db: Session) -> str:
     return "\n".join(lines)
 
 
+async def suggest_tags_for_unsorted_case(db: Session) -> str:
+    unsorted = db.query(Case).filter(Case.case_number == "UNSORTED").first()
+    if not unsorted:
+        return "Неразобранного дела нет."
+    docs = (
+        db.query(Document)
+        .filter(Document.case_id == unsorted.id)
+        .order_by(Document.created_at.desc())
+        .all()
+    )
+    if not docs:
+        return "В неразобранных документах пока ничего нет."
+
+    snippets: list[str] = []
+    for doc in docs[:20]:
+        text_sample = re.sub(r"\s+", " ", (doc.extracted_text or "").strip())[:700]
+        snippets.append(
+            f"Файл: {doc.filename}\nКатегория: {doc.category}\nТекст: {text_sample or 'Текст не извлечён.'}"
+        )
+
+    prompt = (
+        "Ты помогаешь разложить неразобранные судебные документы по делам.\n"
+        "Нужно предложить возможные группы дел и для каждой дать:\n"
+        "1. рабочее название дела,\n"
+        "2. 3-8 тегов/ключевых слов,\n"
+        "3. 1-3 алиаса/варианта названия,\n"
+        "4. какие файлы к этой группе относятся.\n"
+        "Если документы смешаны, раздели их на несколько групп. Не выдумывай номера дел, если их нет.\n\n"
+        + "\n\n".join(snippets)
+    )
+    try:
+        return await llm_summary(prompt)
+    except Exception as exc:
+        return f"Не удалось автоматически предложить теги для неразобранных документов: {exc}"
+
+
 async def summarize_documents_for_case(case: Case, docs: list[Document], *, chronology: bool) -> str:
     if not docs:
         return f'По делу "{case.title}" пока нет документов для разбора.'
@@ -927,6 +970,21 @@ async def assistant_ingest_text(
             case_number=unsorted_case.case_number,
             created_case=False,
             mode="documents-grouped-by-case",
+            created_tasks=0,
+            next_hearing_date=unsorted_case.next_hearing_date,
+            reply=reply_text,
+        )
+
+    if looks_like_unsorted_tag_suggestion_request(text):
+        unsorted_case = get_or_create_unsorted_case(db)
+        reply_text = await suggest_tags_for_unsorted_case(db)
+        db.add(CaseEvent(case_id=unsorted_case.id, event_type="assistant_reply", body=reply_text))
+        db.commit()
+        return AssistantIngestOut(
+            case_id=unsorted_case.id,
+            case_number=unsorted_case.case_number,
+            created_case=False,
+            mode="unsorted-tag-suggestions",
             created_tasks=0,
             next_hearing_date=unsorted_case.next_hearing_date,
             reply=reply_text,
