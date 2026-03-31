@@ -512,6 +512,11 @@ async def bulk_ingest(
     ingested_files = 0
     skipped_files = 0
     errors: list[str] = []
+    max_error_details = 15
+
+    def add_skip_detail(message: str) -> None:
+        if len(errors) < max_error_details:
+            errors.append(message)
 
     try:
         with zipfile.ZipFile(dst) as zf, tempfile.TemporaryDirectory() as td:
@@ -539,22 +544,33 @@ async def bulk_ingest(
             for idx, m in enumerate(members):
                 if max_files > 0 and idx >= max_files:
                     skipped_files += max(0, total_files - idx)
-                    errors.append(
+                    add_skip_detail(
                         f"Остановлено по лимиту max_files={max_files}. Не обработано файлов: {total_files - idx}."
                     )
                     break
                 ext = (m.filename.rsplit(".", 1)[-1] if "." in m.filename else "").lower()
                 if ext not in allowed_exts:
                     skipped_files += 1
+                    add_skip_detail(f"{Path(m.filename).name}: неподдерживаемый формат .{ext or 'без_расширения'}")
                     continue
 
                 # Extract one file
                 extracted_path = Path(td) / Path(m.filename).name
-                with zf.open(m) as src, extracted_path.open("wb") as f_out:
-                    shutil.copyfileobj(src, f_out)
+                try:
+                    with zf.open(m) as src, extracted_path.open("wb") as f_out:
+                        shutil.copyfileobj(src, f_out)
+                except Exception as e:
+                    skipped_files += 1
+                    add_skip_detail(f"{Path(m.filename).name}: не удалось распаковать ({str(e)[:120]})")
+                    continue
 
                 original_name = Path(m.filename).name
-                extracted_text = extract_document_text(extracted_path, original_name)
+                try:
+                    extracted_text = extract_document_text(extracted_path, original_name)
+                except Exception as e:
+                    skipped_files += 1
+                    add_skip_detail(f"{original_name}: не удалось прочитать содержимое ({str(e)[:120]})")
+                    continue
                 category, class_confidence = classify_document(original_name, extracted_text)
 
                 matched_case, case_confidence = match_case(
@@ -591,6 +607,7 @@ async def bulk_ingest(
                         case_confidence = 0.4
                     else:
                         skipped_files += 1
+                        add_skip_detail(f"{original_name}: не удалось определить дело")
                         continue
 
                 storage_name = f"{uuid4().hex}-{original_name}"
@@ -617,7 +634,10 @@ async def bulk_ingest(
     except zipfile.BadZipFile:
         raise HTTPException(status_code=400, detail="ZIP поврежден или не распаковывается.")
     except Exception as e:
-        errors.append(str(e))
+        add_skip_detail(str(e))
+
+    if skipped_files > len(errors):
+        errors.append(f"И еще пропущено файлов без детализации: {skipped_files - len(errors)}")
 
     return BulkIngestOut(
         total_files=total_files,
