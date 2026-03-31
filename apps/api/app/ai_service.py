@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from openpyxl import load_workbook
 from pypdf import PdfReader
 from sqlalchemy.orm import Session
 
@@ -173,6 +174,21 @@ def extract_document_text(file_path: Path, filename: str) -> str:
         return "\n".join(chunks).strip()
     if suffix in {"csv", "log"}:
         return file_path.read_text(encoding="utf-8", errors="ignore")
+    if suffix == "xlsx":
+        wb = load_workbook(filename=str(file_path), read_only=True, data_only=True)
+        chunks: list[str] = []
+        for ws in wb.worksheets[:10]:
+            rows_seen = 0
+            chunks.append(f"Лист: {ws.title}")
+            for row in ws.iter_rows(values_only=True):
+                values = [str(v).strip() for v in row if v is not None and str(v).strip()]
+                if not values:
+                    continue
+                chunks.append(" | ".join(values[:20]))
+                rows_seen += 1
+                if rows_seen >= 200:
+                    break
+        return "\n".join(chunks).strip()
     return ""
 
 

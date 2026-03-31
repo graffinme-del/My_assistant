@@ -549,6 +549,7 @@ async def bulk_ingest(
                 "md",
                 "csv",
                 "log",
+                "xlsx",
                 "doc",
                 "docx",
                 "rtf",
@@ -556,6 +557,8 @@ async def bulk_ingest(
                 "jpeg",
                 "png",
                 "webp",
+                "mp3",
+                "mp4",
             }
             if total_files == 0:
                 return BulkIngestOut(

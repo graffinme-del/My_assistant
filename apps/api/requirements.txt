@@ -8,3 +8,4 @@ python-multipart==0.0.20
 redis==6.4.0
 httpx==0.28.1
 pypdf==5.9.0
+openpyxl
