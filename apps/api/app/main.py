@@ -1,4 +1,5 @@
 from datetime import datetime, time
+import json
 import re
 import shutil
 from pathlib import Path
@@ -30,7 +31,7 @@ from .ai_service import (
 )
 from .config import settings
 from .db import Base, engine, get_db
-from .models import Case, CaseEvent, CaseTag, Document, Reminder, Task
+from .models import Case, CaseEvent, CaseTag, Document, PendingMovePlan, Reminder, Task
 from .schemas import (
     CaseCreate,
     CaseOut,
@@ -209,6 +210,16 @@ def looks_like_bulk_folder_by_keywords_request(text: str) -> bool:
     return any(k in t for k in ["создай папк", "создай дело", "создай папку", "новая папка", "новое дело"]) and any(
         k in t for k in ["отправь туда", "перенеси туда", "все документы", "содержат", "ключевые слова"]
     )
+
+
+def looks_like_pending_move_confirmation(text: str) -> bool:
+    t = text.lower()
+    return any(k in t for k in ["да, перенеси", "перенеси все", "подтверждаю", "ок, перенеси", "да перенеси"])
+
+
+def looks_like_pending_move_rejection(text: str) -> bool:
+    t = text.lower()
+    return any(k in t for k in ["не относится", "кроме", "исключи", "не переноси", "убери"])
 
 
 def looks_like_chronology_request(text: str) -> bool:
@@ -1037,7 +1048,17 @@ def parse_bulk_folder_request(text: str) -> tuple[str, list[str]] | None:
     return title, deduped
 
 
-def bulk_move_documents_to_case_by_keywords(db: Session, title: str, keywords: list[str]) -> str:
+def build_bulk_move_candidates(db: Session, keywords: list[str]) -> list[Document]:
+    docs = db.query(Document).order_by(Document.created_at.asc()).all()
+    result: list[Document] = []
+    for doc in docs:
+        haystack = f"{doc.filename}\n{doc.extracted_text or ''}".lower()
+        if any(word.lower() in haystack for word in keywords):
+            result.append(doc)
+    return result
+
+
+def preview_bulk_move_documents_to_case_by_keywords(db: Session, title: str, keywords: list[str]) -> str:
     case = find_case_by_hint(db.query(Case).all(), title)
     created = False
     if not case:
@@ -1063,44 +1084,66 @@ def bulk_move_documents_to_case_by_keywords(db: Session, title: str, keywords: l
             db.add(CaseTag(case_id=case.id, value=word[:255], kind="keyword"))
     db.commit()
 
-    docs = db.query(Document).order_by(Document.created_at.asc()).all()
-    moved_total = 0
-    moved: list[str] = []
-    for doc in docs:
-        haystack = f"{doc.filename}\n{doc.extracted_text or ''}".lower()
-        if any(word.lower() in haystack for word in keywords):
-            if doc.case_id != case.id:
-                old_case_id = doc.case_id
-                doc.case_id = case.id
-                db.add(
-                    CaseEvent(
-                        case_id=case.id,
-                        event_type="document_reclassified",
-                        body=f'Документ "{doc.filename}" перенесён по ключевым словам.',
-                    )
-                )
-                db.add(
-                    CaseEvent(
-                        case_id=old_case_id,
-                        event_type="document_reclassified",
-                        body=f'Документ "{doc.filename}" перенесён в дело "{case.title}" по ключевым словам.',
-                    )
-                )
-                moved_total += 1
-                if len(moved) < 20:
-                    moved.append(f'- [{doc.id}] {doc.filename}')
+    docs = [doc for doc in build_bulk_move_candidates(db, keywords) if doc.case_id != case.id]
+    db.query(PendingMovePlan).filter(PendingMovePlan.case_id == case.id).delete()
+    db.add(
+        PendingMovePlan(
+            case_id=case.id,
+            title=case.title,
+            keywords_json=json.dumps(keywords, ensure_ascii=False),
+            doc_ids_json=json.dumps([doc.id for doc in docs]),
+        )
+    )
     db.commit()
     summary = [
         f'{"Создал" if created else "Использовал"} дело "{case.title}" ({case.case_number}).',
         f"Ключевые слова: {', '.join(keywords)}.",
-        f"Перенесено документов: {moved_total}.",
+        f"Нашёл кандидатов на перенос: {len(docs)}.",
     ]
-    if moved:
-        summary.append("Примеры перенесённых:")
-        summary.extend(moved)
+    if docs:
+        summary.append("Проверь список ниже и ответь, например:")
+        summary.append('`Да, перенеси все` или `Да, перенеси все, кроме 3, 7`')
+        summary.append("Кандидаты:")
+        for idx, doc in enumerate(docs[:50], start=1):
+            summary.append(f"{idx}. [{doc.id}] {doc.filename}")
+        if len(docs) > 50:
+            summary.append(f"... и еще {len(docs) - 50}.")
     else:
         summary.append("Совпадений по документам не найдено.")
     return "\n".join(summary)
+
+
+def apply_pending_move_plan(db: Session, text: str) -> str:
+    plan = db.query(PendingMovePlan).order_by(PendingMovePlan.created_at.desc()).first()
+    if not plan:
+        return "Нет активного списка на перенос. Сначала попросите создать папку и подобрать документы."
+    target_case = db.query(Case).filter(Case.id == plan.case_id).first()
+    if not target_case:
+        return "Не нашёл дело для активного списка переноса."
+    planned_ids = json.loads(plan.doc_ids_json or "[]")
+    exclude_numbers = {int(x) for x in re.findall(r"\b(\d+)\b", text)}
+    docs = db.query(Document).filter(Document.id.in_(planned_ids)).order_by(Document.created_at.asc()).all()
+    moved: list[str] = []
+    moved_total = 0
+    for idx, doc in enumerate(docs, start=1):
+        if idx in exclude_numbers:
+            continue
+        old_case_id = doc.case_id
+        doc.case_id = target_case.id
+        db.add(CaseEvent(case_id=target_case.id, event_type="document_reclassified", body=f'Документ "{doc.filename}" перенесён по подтверждённому списку.'))
+        db.add(CaseEvent(case_id=old_case_id, event_type="document_reclassified", body=f'Документ "{doc.filename}" перенесён в дело "{target_case.title}" по подтверждённому списку.'))
+        moved_total += 1
+        if len(moved) < 20:
+            moved.append(f"{idx}. [{doc.id}] {doc.filename}")
+    db.delete(plan)
+    db.commit()
+    lines = [f'Перенёс документы в дело "{target_case.title}" ({target_case.case_number}). Перенесено: {moved_total}.']
+    if exclude_numbers:
+        lines.append("Исключены из переноса номера: " + ", ".join(str(x) for x in sorted(exclude_numbers)))
+    if moved:
+        lines.append("Что перенесено:")
+        lines.extend(moved)
+    return "\n".join(lines)
 
 
 async def summarize_documents_for_case(case: Case, docs: list[Document], *, chronology: bool) -> str:
@@ -1285,7 +1328,7 @@ async def assistant_ingest_text(
             )
         else:
             title, keywords = parsed
-            reply_text = bulk_move_documents_to_case_by_keywords(db, title, keywords)
+            reply_text = preview_bulk_move_documents_to_case_by_keywords(db, title, keywords)
         unsorted_case = get_or_create_unsorted_case(db)
         db.add(CaseEvent(case_id=unsorted_case.id, event_type="assistant_reply", body=reply_text))
         db.commit()
@@ -1294,6 +1337,21 @@ async def assistant_ingest_text(
             case_number=unsorted_case.case_number,
             created_case=False,
             mode="documents-bulk-move-by-keywords",
+            created_tasks=0,
+            next_hearing_date=unsorted_case.next_hearing_date,
+            reply=reply_text,
+        )
+
+    if looks_like_pending_move_confirmation(text) or looks_like_pending_move_rejection(text):
+        reply_text = apply_pending_move_plan(db, text)
+        unsorted_case = get_or_create_unsorted_case(db)
+        db.add(CaseEvent(case_id=unsorted_case.id, event_type="assistant_reply", body=reply_text))
+        db.commit()
+        return AssistantIngestOut(
+            case_id=unsorted_case.id,
+            case_number=unsorted_case.case_number,
+            created_case=False,
+            mode="documents-bulk-move-confirmed",
             created_tasks=0,
             next_hearing_date=unsorted_case.next_hearing_date,
             reply=reply_text,

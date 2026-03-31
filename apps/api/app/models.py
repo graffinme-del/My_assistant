@@ -91,6 +91,17 @@ class CaseTag(Base):
     case: Mapped[Case] = relationship(back_populates="tags")
 
 
+class PendingMovePlan(Base):
+    __tablename__ = "pending_move_plans"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    case_id: Mapped[int] = mapped_column(ForeignKey("cases.id", ondelete="CASCADE"), index=True)
+    title: Mapped[str] = mapped_column(String(255))
+    keywords_json: Mapped[str] = mapped_column(Text, default="[]")
+    doc_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class CaseEmbedding(Base):
     __tablename__ = "case_embeddings"
 
