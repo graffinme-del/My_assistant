@@ -159,6 +159,13 @@ def looks_like_unsorted_tag_suggestion_request(text: str) -> bool:
     )
 
 
+def looks_like_reclassify_unsorted_request(text: str) -> bool:
+    t = text.lower()
+    return any(k in t for k in ["разбери", "переразбери", "перенеси", "привяжи", "разложи"]) and any(
+        k in t for k in ["неразобран", "unsorted", "по тегам", "по делам"]
+    )
+
+
 def looks_like_chronology_request(text: str) -> bool:
     t = text.lower()
     return any(k in t for k in ["хронолог", "таймлайн", "по датам", "по времени"])
@@ -833,6 +840,57 @@ async def suggest_tags_for_unsorted_case(db: Session) -> str:
         return f"Не удалось автоматически предложить теги для неразобранных документов: {exc}"
 
 
+def reclassify_unsorted_documents(db: Session) -> str:
+    unsorted = db.query(Case).filter(Case.case_number == "UNSORTED").first()
+    if not unsorted:
+        return "Неразобранного дела нет."
+
+    docs = (
+        db.query(Document)
+        .filter(Document.case_id == unsorted.id)
+        .order_by(Document.created_at.asc())
+        .all()
+    )
+    if not docs:
+        return "В неразобранных документах пока ничего нет."
+
+    moved = 0
+    remained = 0
+    details: list[str] = []
+    for doc in docs:
+        matched_case, confidence = match_case(db, filename=doc.filename, text=doc.extracted_text or "")
+        if not matched_case or matched_case.id == unsorted.id or confidence < 0.6:
+            remained += 1
+            continue
+
+        old_case_id = doc.case_id
+        doc.case_id = matched_case.id
+        db.add(
+            CaseEvent(
+                case_id=matched_case.id,
+                event_type="document_reclassified",
+                body=f'Документ "{doc.filename}" автоматически перенесён из UNSORTED (confidence={confidence:.2f}).',
+            )
+        )
+        db.add(
+            CaseEvent(
+                case_id=old_case_id,
+                event_type="document_reclassified",
+                body=f'Документ "{doc.filename}" перенесён в дело "{matched_case.title}" ({matched_case.case_number}).',
+            )
+        )
+        moved += 1
+        if len(details) < 12:
+            details.append(f'- {doc.filename} -> "{matched_case.title}" ({matched_case.case_number}), confidence={confidence:.2f}')
+
+    db.commit()
+    summary = [f"Переразобрал неразобранные документы по тегам/алиасам. Перенесено: {moved}. Осталось в UNSORTED: {remained}."]
+    if details:
+        summary.append("Что перенесено:")
+        summary.extend(details)
+    return "\n".join(summary)
+
+
 async def summarize_documents_for_case(case: Case, docs: list[Document], *, chronology: bool) -> str:
     if not docs:
         return f'По делу "{case.title}" пока нет документов для разбора.'
@@ -985,6 +1043,21 @@ async def assistant_ingest_text(
             case_number=unsorted_case.case_number,
             created_case=False,
             mode="unsorted-tag-suggestions",
+            created_tasks=0,
+            next_hearing_date=unsorted_case.next_hearing_date,
+            reply=reply_text,
+        )
+
+    if looks_like_reclassify_unsorted_request(text):
+        unsorted_case = get_or_create_unsorted_case(db)
+        reply_text = reclassify_unsorted_documents(db)
+        db.add(CaseEvent(case_id=unsorted_case.id, event_type="assistant_reply", body=reply_text))
+        db.commit()
+        return AssistantIngestOut(
+            case_id=unsorted_case.id,
+            case_number=unsorted_case.case_number,
+            created_case=False,
+            mode="unsorted-reclassified",
             created_tasks=0,
             next_hearing_date=unsorted_case.next_hearing_date,
             reply=reply_text,
