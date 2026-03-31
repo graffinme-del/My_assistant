@@ -1121,11 +1121,38 @@ def apply_pending_move_plan(db: Session, text: str) -> str:
     if not target_case:
         return "Не нашёл дело для активного списка переноса."
     planned_ids = json.loads(plan.doc_ids_json or "[]")
-    exclude_numbers = {int(x) for x in re.findall(r"\b(\d+)\b", text)}
+    all_cases = db.query(Case).all()
+    alternate_moves: dict[int, Case] = {}
+    for m in re.finditer(r"(\d+)\s*(?:и\s*(\d+))?\s*.*?перенеси\s+в\s+дел[оау]\s+([^.;\n]+)", text, flags=re.IGNORECASE):
+        nums = [m.group(1), m.group(2)]
+        case_hint = (m.group(3) or "").strip(" .:-")
+        alt_case = find_case_by_hint(all_cases, case_hint)
+        if not alt_case:
+            continue
+        for raw_num in nums:
+            if raw_num:
+                alternate_moves[int(raw_num)] = alt_case
+
+    exclude_numbers = {
+        int(x)
+        for x in re.findall(r"\b(\d+)\b", text)
+        if int(x) not in alternate_moves
+    }
     docs = db.query(Document).filter(Document.id.in_(planned_ids)).order_by(Document.created_at.asc()).all()
     moved: list[str] = []
     moved_total = 0
+    rerouted: list[str] = []
     for idx, doc in enumerate(docs, start=1):
+        if idx in alternate_moves:
+            alt_case = alternate_moves[idx]
+            old_case_id = doc.case_id
+            doc.case_id = alt_case.id
+            db.add(CaseEvent(case_id=alt_case.id, event_type="document_reclassified", body=f'Документ "{doc.filename}" перенесён по вашему уточнению.'))
+            db.add(CaseEvent(case_id=old_case_id, event_type="document_reclassified", body=f'Документ "{doc.filename}" перенесён в дело "{alt_case.title}" по уточнению в чате.'))
+            moved_total += 1
+            if len(rerouted) < 20:
+                rerouted.append(f"{idx}. [{doc.id}] {doc.filename} -> {alt_case.title}")
+            continue
         if idx in exclude_numbers:
             continue
         old_case_id = doc.case_id
@@ -1143,6 +1170,9 @@ def apply_pending_move_plan(db: Session, text: str) -> str:
     if moved:
         lines.append("Что перенесено:")
         lines.extend(moved)
+    if rerouted:
+        lines.append("Что перенесено в другие дела по вашему уточнению:")
+        lines.extend(rerouted)
     return "\n".join(lines)
 
 
