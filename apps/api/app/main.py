@@ -204,6 +204,13 @@ def looks_like_manual_move_request(text: str) -> bool:
     )
 
 
+def looks_like_bulk_folder_by_keywords_request(text: str) -> bool:
+    t = text.lower()
+    return any(k in t for k in ["создай папк", "создай дело", "создай папку", "новая папка", "новое дело"]) and any(
+        k in t for k in ["отправь туда", "перенеси туда", "все документы", "содержат", "ключевые слова"]
+    )
+
+
 def looks_like_chronology_request(text: str) -> bool:
     t = text.lower()
     return any(k in t for k in ["хронолог", "таймлайн", "по датам", "по времени"])
@@ -1002,6 +1009,100 @@ def move_documents_by_chat_command(db: Session, text: str) -> str:
     )
 
 
+def parse_bulk_folder_request(text: str) -> tuple[str, list[str]] | None:
+    title = ""
+    m = re.search(r'создай\s+(?:папк[ау]?|дело)\s*[:"«]?\s*([^"\n».]+)', text, flags=re.IGNORECASE)
+    if m:
+        title = m.group(1).strip(" .:-\"«»")
+    quoted = [q.strip() for q in re.findall(r'"([^"]+)"|«([^»]+)»', text) for q in q if q.strip()]
+    keywords: list[str] = []
+    if "содерж" in text.lower():
+        tail = re.split(r"содерж[а-я]*\s*[:]", text, flags=re.IGNORECASE)
+        if len(tail) > 1:
+            raw = tail[-1]
+            keywords = [p.strip(" .:-\"«»") for p in re.split(r"[,\n;]+", raw) if p.strip(" .:-\"«»")]
+    if not title and quoted:
+        title = quoted[0]
+    if not keywords:
+        keywords = quoted[1:] if len(quoted) > 1 else []
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for value in keywords:
+        key = value.lower()
+        if value and key not in seen:
+            seen.add(key)
+            deduped.append(value)
+    if not title or not deduped:
+        return None
+    return title, deduped
+
+
+def bulk_move_documents_to_case_by_keywords(db: Session, title: str, keywords: list[str]) -> str:
+    case = find_case_by_hint(db.query(Case).all(), title)
+    created = False
+    if not case:
+        case = Case(
+            title=title[:255],
+            court_name="неизвестно",
+            case_number=f"TAG-{uuid4().hex[:8].upper()}",
+            status="analysis",
+            stage="analysis",
+        )
+        db.add(case)
+        db.commit()
+        db.refresh(case)
+        created = True
+
+    existing_tags = {
+        (tag.kind, tag.value.strip().lower())
+        for tag in db.query(CaseTag).filter(CaseTag.case_id == case.id).all()
+    }
+    for word in keywords:
+        key = ("keyword", word.strip().lower())
+        if key not in existing_tags:
+            db.add(CaseTag(case_id=case.id, value=word[:255], kind="keyword"))
+    db.commit()
+
+    docs = db.query(Document).order_by(Document.created_at.asc()).all()
+    moved_total = 0
+    moved: list[str] = []
+    for doc in docs:
+        haystack = f"{doc.filename}\n{doc.extracted_text or ''}".lower()
+        if any(word.lower() in haystack for word in keywords):
+            if doc.case_id != case.id:
+                old_case_id = doc.case_id
+                doc.case_id = case.id
+                db.add(
+                    CaseEvent(
+                        case_id=case.id,
+                        event_type="document_reclassified",
+                        body=f'Документ "{doc.filename}" перенесён по ключевым словам.',
+                    )
+                )
+                db.add(
+                    CaseEvent(
+                        case_id=old_case_id,
+                        event_type="document_reclassified",
+                        body=f'Документ "{doc.filename}" перенесён в дело "{case.title}" по ключевым словам.',
+                    )
+                )
+                moved_total += 1
+                if len(moved) < 20:
+                    moved.append(f'- [{doc.id}] {doc.filename}')
+    db.commit()
+    summary = [
+        f'{"Создал" if created else "Использовал"} дело "{case.title}" ({case.case_number}).',
+        f"Ключевые слова: {', '.join(keywords)}.",
+        f"Перенесено документов: {moved_total}.",
+    ]
+    if moved:
+        summary.append("Примеры перенесённых:")
+        summary.extend(moved)
+    else:
+        summary.append("Совпадений по документам не найдено.")
+    return "\n".join(summary)
+
+
 async def summarize_documents_for_case(case: Case, docs: list[Document], *, chronology: bool) -> str:
     if not docs:
         return f'По делу "{case.title}" пока нет документов для разбора.'
@@ -1169,6 +1270,30 @@ async def assistant_ingest_text(
             case_number=unsorted_case.case_number,
             created_case=False,
             mode="unsorted-reclassified",
+            created_tasks=0,
+            next_hearing_date=unsorted_case.next_hearing_date,
+            reply=reply_text,
+        )
+
+    if looks_like_bulk_folder_by_keywords_request(text):
+        parsed = parse_bulk_folder_request(text)
+        if not parsed:
+            reply_text = (
+                'Не смог понять команду. Пример: Создай папку "Сделка Grimme". '
+                'Перенеси туда все документы, которые содержат: "Grimme Landmaschinenfabrik GmbH & Co.", '
+                '"Ex officio", "ООО Эй Джи Мануфактуринг"'
+            )
+        else:
+            title, keywords = parsed
+            reply_text = bulk_move_documents_to_case_by_keywords(db, title, keywords)
+        unsorted_case = get_or_create_unsorted_case(db)
+        db.add(CaseEvent(case_id=unsorted_case.id, event_type="assistant_reply", body=reply_text))
+        db.commit()
+        return AssistantIngestOut(
+            case_id=unsorted_case.id,
+            case_number=unsorted_case.case_number,
+            created_case=False,
+            mode="documents-bulk-move-by-keywords",
             created_tasks=0,
             next_hearing_date=unsorted_case.next_hearing_date,
             reply=reply_text,
