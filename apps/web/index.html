@@ -166,7 +166,7 @@
           <div id="chatLog" class="list" style="max-height: 360px;"></div>
           <div class="chatInputWrap">
             <div class="composerRow">
-              <input id="docFilesInput" class="hiddenInput" type="file" multiple />
+              <input id="docFilesInput" class="hiddenInput" type="file" multiple accept=".zip,.pdf,.txt,.md,.doc,.docx,.rtf,.jpg,.jpeg,.png,.webp" />
               <button id="attachBtn" class="tinyIconBtn" type="button" title="Прикрепить файлы">+</button>
               <textarea id="chatText" class="chatTextInput" rows="1" placeholder="Напиши сообщение..."></textarea>
               <button id="micBtn" class="tinyIconBtn" type="button" title="Голос">🎤</button>
@@ -495,16 +495,29 @@
           let ok = 0;
           let failed = 0;
           for (const f of files) {
-            const fd = new FormData();
-            fd.append("file", f);
             try {
-              const res = await api("/documents/ingest", { method: "POST", body: fd });
-              ok += 1;
-              appendChat(
-                "assistant",
-                `Файл "${res.document.filename}" загружен. Дело: ${res.matched_case_number}. ` +
-                  `Категория: ${res.category}.`
-              );
+              const fd = new FormData();
+              const isZip = String(f.name || "").toLowerCase().endsWith(".zip");
+              if (isZip) {
+                fd.append("zip_file", f);
+                fd.append("max_files", "100");
+                const res = await api("/documents/bulk-ingest", { method: "POST", body: fd, timeoutMs: 180000 });
+                ok += 1;
+                appendChat(
+                  "assistant",
+                  `ZIP "${f.name}" обработан. В архиве: ${res.total_files}, загружено: ${res.ingested_files}, ` +
+                    `пропущено: ${res.skipped_files}${res.errors && res.errors.length ? `. Ошибки: ${res.errors.join("; ")}` : ""}.`
+                );
+              } else {
+                fd.append("file", f);
+                const res = await api("/documents/ingest", { method: "POST", body: fd, timeoutMs: 120000 });
+                ok += 1;
+                appendChat(
+                  "assistant",
+                  `Файл "${res.document.filename}" загружен. Дело: ${res.matched_case_number}. ` +
+                    `Категория: ${res.category}.`
+                );
+              }
             } catch (e) {
               failed += 1;
               appendChat("assistant", `Не удалось загрузить "${f.name}": ${e && e.message ? e.message : e}`);
