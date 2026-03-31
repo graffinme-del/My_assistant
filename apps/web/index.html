@@ -500,7 +500,7 @@
               const isZip = String(f.name || "").toLowerCase().endsWith(".zip");
               if (isZip) {
                 fd.append("zip_file", f);
-                fd.append("max_files", "100");
+                fd.append("max_files", "0");
                 const res = await api("/documents/bulk-ingest", { method: "POST", body: fd, timeoutMs: 180000 });
                 ok += 1;
                 appendChat(

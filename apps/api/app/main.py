@@ -488,7 +488,7 @@ def process_hearing_note(
 async def bulk_ingest(
     zip_file: UploadFile = File(...),
     preferred_case_number: str | None = Form(default=None),
-    max_files: int = Form(default=25),
+    max_files: int = Form(default=0),
     db: Session = Depends(get_db),
     _: str = Depends(require_user),
 ) -> BulkIngestOut:
@@ -517,17 +517,34 @@ async def bulk_ingest(
         with zipfile.ZipFile(dst) as zf, tempfile.TemporaryDirectory() as td:
             members = [m for m in zf.infolist() if not m.is_dir()]
             total_files = len(members)
+            allowed_exts = {
+                "pdf",
+                "txt",
+                "md",
+                "csv",
+                "log",
+                "doc",
+                "docx",
+                "rtf",
+                "jpg",
+                "jpeg",
+                "png",
+                "webp",
+            }
             if total_files == 0:
                 return BulkIngestOut(
                     total_files=0, ingested_files=0, skipped_files=0, errors=["Архив пуст."]
                 )
 
             for idx, m in enumerate(members):
-                if idx >= max_files:
+                if max_files > 0 and idx >= max_files:
+                    skipped_files += max(0, total_files - idx)
+                    errors.append(
+                        f"Остановлено по лимиту max_files={max_files}. Не обработано файлов: {total_files - idx}."
+                    )
                     break
                 ext = (m.filename.rsplit(".", 1)[-1] if "." in m.filename else "").lower()
-                if ext not in {"pdf", "txt", "md"}:
-                    # We still store metadata, but extracted text will be empty.
+                if ext not in allowed_exts:
                     skipped_files += 1
                     continue
 

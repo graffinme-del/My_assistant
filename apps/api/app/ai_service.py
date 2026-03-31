@@ -171,6 +171,8 @@ def extract_document_text(file_path: Path, filename: str) -> str:
         for page in reader.pages[:30]:
             chunks.append(page.extract_text() or "")
         return "\n".join(chunks).strip()
+    if suffix in {"csv", "log"}:
+        return file_path.read_text(encoding="utf-8", errors="ignore")
     return ""
 
 
