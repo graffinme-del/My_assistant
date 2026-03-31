@@ -142,6 +142,28 @@ def local_storage_path(doc: Document) -> Path | None:
     return path if path.exists() else None
 
 
+def normalize_document_signature(filename: str, extracted_text: str) -> tuple[str, str]:
+    norm_name = re.sub(r"\s+", " ", filename.strip().lower())
+    norm_text = re.sub(r"\s+", " ", (extracted_text or "").strip().lower())[:4000]
+    return norm_name, norm_text
+
+
+def find_duplicate_document(
+    db: Session,
+    *,
+    case_id: int,
+    filename: str,
+    extracted_text: str,
+) -> Document | None:
+    norm_name, norm_text = normalize_document_signature(filename, extracted_text)
+    docs = db.query(Document).filter(Document.case_id == case_id).all()
+    for doc in docs:
+        doc_name, doc_text = normalize_document_signature(doc.filename, doc.extracted_text or "")
+        if doc_name == norm_name and doc_text == norm_text:
+            return doc
+    return None
+
+
 def looks_like_documents_list_request(text: str) -> bool:
     t = text.lower()
     return any(noun in t for noun in ["документ", "файл", "архив"]) and any(
@@ -241,6 +263,11 @@ def looks_like_documents_search_request(text: str) -> bool:
     return any(k in t for k in ["найди", "поиск", "ищи"]) and any(
         k in t for k in ["док", "файл", "асв", "банк", "определен", "договор", "жалоб", "акт"]
     )
+
+
+def looks_like_single_doc_summary_request(text: str) -> bool:
+    t = text.lower()
+    return any(k in t for k in ["суть документа", "выжимка документа", "о чем документ", "резюме документа"])
 
 
 @app.get("/health")
@@ -457,6 +484,14 @@ async def document_summary(
     return {"document_id": doc.id, "filename": doc.filename, "summary": summary}
 
 
+async def build_document_summary_by_id(db: Session, document_id: int) -> tuple[Document | None, str]:
+    doc = db.query(Document).filter(Document.id == document_id).first()
+    if not doc:
+        return None, f"Документ {document_id} не найден."
+    result = await document_summary(document_id=document_id, db=db, _="owner")
+    return doc, str(result["summary"])
+
+
 @app.post("/documents/ingest", response_model=DocumentIngestOut)
 async def ingest_document(
     file: UploadFile = File(...),
@@ -535,6 +570,24 @@ async def ingest_document(
     if not matched_case:
         matched_case = get_or_create_unsorted_case(db)
         case_confidence = 0.2
+
+    duplicate = find_duplicate_document(
+        db,
+        case_id=matched_case.id,
+        filename=safe_name,
+        extracted_text=extracted_text,
+    )
+    if duplicate:
+        return DocumentIngestOut(
+            document=duplicate,
+            matched_case_id=matched_case.id,
+            matched_case_number=matched_case.case_number,
+            category=duplicate.category,
+            confidence=1.0,
+            routing_mode="duplicate-skip",
+            routing_model="дедупликация",
+            note="Такой документ уже есть в этом деле. Повторная загрузка пропущена.",
+        )
 
     doc = Document(
         case_id=matched_case.id,
@@ -714,6 +767,17 @@ async def bulk_ingest(
                         skipped_files += 1
                         add_skip_detail(f"{original_name}: не удалось определить дело")
                         continue
+
+                duplicate = find_duplicate_document(
+                    db,
+                    case_id=matched_case.id,
+                    filename=original_name,
+                    extracted_text=extracted_text,
+                )
+                if duplicate:
+                    skipped_files += 1
+                    add_skip_detail(f"{original_name}: уже есть в деле \"{matched_case.title}\"")
+                    continue
 
                 storage_name = f"{uuid4().hex}-{original_name}"
                 final_path = STORAGE_ROOT / storage_name
@@ -1338,6 +1402,30 @@ async def assistant_ingest_text(
             case_number=unsorted_case.case_number,
             created_case=False,
             mode="documents-grouped-by-case",
+            created_tasks=0,
+            next_hearing_date=unsorted_case.next_hearing_date,
+            reply=reply_text,
+        )
+
+    if looks_like_single_doc_summary_request(text):
+        ids = [int(x) for x in re.findall(r"\b(\d+)\b", text)]
+        if not ids:
+            reply_text = "Не вижу номер документа. Напишите, например: дай мне суть документа 72"
+        else:
+            doc, summary_text = await build_document_summary_by_id(db, ids[0])
+            reply_text = (
+                summary_text
+                if doc is None
+                else f'Суть документа [{doc.id}] "{doc.filename}":\n{summary_text}'
+            )
+        unsorted_case = get_or_create_unsorted_case(db)
+        db.add(CaseEvent(case_id=unsorted_case.id, event_type="assistant_reply", body=reply_text))
+        db.commit()
+        return AssistantIngestOut(
+            case_id=unsorted_case.id,
+            case_number=unsorted_case.case_number,
+            created_case=False,
+            mode="document-summary-by-id",
             created_tasks=0,
             next_hearing_date=unsorted_case.next_hearing_date,
             reply=reply_text,
