@@ -11,6 +11,15 @@ class CaseCreate(BaseModel):
     stage: str = "analysis"
 
 
+class CaseTagOut(BaseModel):
+    id: int
+    value: str
+    kind: str
+
+    class Config:
+        from_attributes = True
+
+
 class CaseOut(BaseModel):
     id: int
     title: str
@@ -21,6 +30,7 @@ class CaseOut(BaseModel):
     summary: str
     next_hearing_date: date | None
     created_at: datetime
+    tags: list[CaseTagOut] = []
 
     class Config:
         from_attributes = True

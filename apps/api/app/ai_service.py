@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from datetime import date
 from pathlib import Path
@@ -10,7 +11,7 @@ from pypdf import PdfReader
 from sqlalchemy.orm import Session
 
 from .config import settings
-from .models import Case, CaseEvent, Task
+from .models import Case, CaseEvent, CaseTag, Task
 
 
 def _chat_completions_url() -> str:
@@ -81,9 +82,11 @@ def build_case_summary(case: Case, events: list[CaseEvent], tasks: list[Task]) -
     latest_events = sorted(events, key=lambda e: e.created_at, reverse=True)[:3]
     events_block = "\n".join([f"- {e.event_type}: {e.body[:160]}" for e in latest_events]) or "- нет"
     tasks_block = "\n".join([f"- {t.title} ({t.priority})" for t in open_tasks[:5]]) or "- нет"
+    tags_block = ", ".join(sorted({t.value for t in getattr(case, "tags", [])})) or "нет"
     return (
         f"Дело: {case.title}\n"
         f"Статус: {case.status}, стадия: {case.stage}\n"
+        f"Теги/алиасы: {tags_block}\n"
         f"Следующее заседание: {case.next_hearing_date or 'не указано'}\n"
         f"Последние события:\n{events_block}\n"
         f"Открытые задачи:\n{tasks_block}"
@@ -102,7 +105,10 @@ async def llm_assistant_chat_reply(user_message: str, case: Case) -> str:
         "Ты личный помощник по организации материалов по судебным делам. "
         "Отвечай по-русски, кратко и по существу (обычно 2–6 предложений). "
         "Не выдавай юридических консультаций: не оценивай шансы, не подсказывай стратегию и не указывай, "
-        "какие нормы «должны» применяться. Можно помочь структурировать мысли, напомнить о сроках и фактах из контекста.\n\n"
+        "какие нормы «должны» применяться. Можно помочь структурировать мысли, напомнить о сроках и фактах из контекста. "
+        "Если пользователь уже пишет, что архив/файлы загружены, не проси загрузить их повторно. "
+        "Если данных не хватает, задай только один самый полезный уточняющий вопрос. "
+        "Если речь о разборе документов по делам, предлагай конкретное следующее действие, а не общие рассуждения.\n\n"
         f"Контекст: дело «{case.title}», номер {case.case_number}, статус {case.status}.\n\n"
         f"Сообщение пользователя:\n{user_message}"
     )
@@ -188,6 +194,122 @@ def _normalize(value: str) -> str:
     return re.sub(r"[^a-zа-я0-9]", "", value.lower())
 
 
+def _tokenize_tag_values(raw: str) -> list[str]:
+    quoted = [m.strip() for m in re.findall(r'"([^"]+)"|«([^»]+)»', raw) for m in m if m.strip()]
+    cleaned = re.sub(r'"[^"]+"|«[^»]+»', ",", raw)
+    parts = re.split(r"[,\n;•|]+", cleaned)
+    values = quoted + [p.strip(" -\t\r\n") for p in parts]
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if not value:
+            continue
+        key = _normalize(value)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(value)
+    return deduped
+
+
+def find_case_by_hint(cases: list[Case], hint: str) -> Case | None:
+    norm_hint = _normalize(hint)
+    if not norm_hint:
+        return None
+
+    best: Case | None = None
+    best_score = 0.0
+    for case in cases:
+        score = 0.0
+        title_norm = _normalize(case.title)
+        if title_norm and (title_norm in norm_hint or norm_hint in title_norm):
+            score += 0.8
+        if case.case_number and _normalize(case.case_number) in norm_hint:
+            score += 0.95
+        for tag in getattr(case, "tags", []):
+            tag_norm = _normalize(tag.value)
+            if not tag_norm:
+                continue
+            if tag_norm in norm_hint or norm_hint in tag_norm:
+                score += 0.7 if tag.kind == "alias" else 0.45
+        if score > best_score:
+            best_score = score
+            best = case
+    return best if best_score >= 0.65 else None
+
+
+def looks_like_case_tag_update(text: str) -> bool:
+    t = text.lower()
+    return (
+        any(marker in t for marker in ["теги", "теги", "ключевые слова", "алиасы", "алиас", "синоним"])
+        and any(marker in t for marker in ["дело", "папк", "банкрот"])
+    )
+
+
+def parse_case_tag_update(text: str) -> dict[str, Any] | None:
+    if not looks_like_case_tag_update(text):
+        return None
+
+    normalized = " ".join(text.replace("\r", "\n").split())
+    tag_match = re.search(
+        r"(?:теги|теги|ключевые слова|алиасы|алиас|синонимы?)\s*[:\-]\s*(.+)$",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if not tag_match:
+        return None
+
+    tags_raw = tag_match.group(1).strip()
+    before_tags = normalized[: tag_match.start()].strip(" .:-")
+    case_match = re.search(
+        r"(?:для|по)\s+(?:папк[еи]|дел[ауо]?|банкротств[ауо]?)\s+(.+)$|дело\s+(.+)$",
+        before_tags,
+        flags=re.IGNORECASE,
+    )
+    case_hint = ""
+    if case_match:
+        case_hint = next((g for g in case_match.groups() if g), "").strip(" .:-")
+    if not case_hint:
+        return None
+
+    aliases = _tokenize_tag_values(re.sub(r"\s+или\s+", ", ", case_hint, flags=re.IGNORECASE))
+    tags = _tokenize_tag_values(tags_raw)
+    if not tags:
+        return None
+    return {
+        "case_hint": case_hint,
+        "title_candidate": aliases[0] if aliases else case_hint,
+        "aliases": aliases,
+        "tags": tags,
+    }
+
+
+async def llm_parse_case_tag_update(text: str, cases: list[Case]) -> dict[str, Any] | None:
+    if not settings.openai_api_key.strip() or not looks_like_case_tag_update(text):
+        return None
+    prompt = (
+        "Извлеки из сообщения пользователя настройку тегов для судебного дела.\n"
+        "Верни JSON строго такого вида:\n"
+        '{"case_hint":"...","title_candidate":"...","aliases":["..."],"tags":["..."]}\n'
+        "Если это не запрос на сохранение тегов по делу, верни {}.\n"
+        "aliases — варианты названия дела. tags — ключевые слова для автопривязки документов.\n"
+        f"Уже существующие дела: {[c.title for c in cases[:30]]}\n\n"
+        f"Сообщение:\n{text}"
+    )
+    raw = await _llm_chat(prompt, timeout=45.0)
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return None
+    if not isinstance(parsed, dict) or not parsed.get("tags") or not parsed.get("case_hint"):
+        return None
+    parsed["aliases"] = _tokenize_tag_values(", ".join(parsed.get("aliases") or []))
+    parsed["tags"] = _tokenize_tag_values(", ".join(parsed.get("tags") or []))
+    parsed["title_candidate"] = str(parsed.get("title_candidate") or parsed["case_hint"]).strip()
+    parsed["case_hint"] = str(parsed["case_hint"]).strip()
+    return parsed if parsed["tags"] and parsed["case_hint"] else None
+
+
 def match_case(db: Session, filename: str, text: str, preferred_case_id: int | None = None) -> tuple[Case | None, float]:
     if preferred_case_id:
         case = db.query(Case).filter(Case.id == preferred_case_id).first()
@@ -213,6 +335,12 @@ def match_case(db: Session, filename: str, text: str, preferred_case_id: int | N
             score += 0.35
         if court_token and court_token[:12] in corpus:
             score += 0.25
+        for tag in getattr(case, "tags", []):
+            tag_token = _normalize(tag.value)
+            if not tag_token or len(tag_token) < 3:
+                continue
+            if tag_token in corpus:
+                score += 0.7 if tag.kind == "alias" else 0.45
         if score > best_score:
             best_score = score
             best = case

@@ -14,17 +14,21 @@ from .ai_service import (
     build_case_summary,
     classify_document,
     extract_document_text,
-    llm_summary,
     llm_assistant_chat_reply,
+    llm_parse_case_tag_update,
     llm_document_routing,
+    llm_summary,
     match_case,
-    parse_hearing_note,
     extract_case_number,
+    find_case_by_hint,
     looks_like_hearing_note,
+    looks_like_case_tag_update,
+    parse_case_tag_update,
+    parse_hearing_note,
 )
 from .config import settings
 from .db import Base, engine, get_db
-from .models import Case, CaseEvent, Document, Reminder, Task
+from .models import Case, CaseEvent, CaseTag, Document, Reminder, Task
 from .schemas import (
     CaseCreate,
     CaseOut,
@@ -596,6 +600,75 @@ async def assistant_ingest_text(
     text = payload.text.strip()
     if not text:
         raise HTTPException(status_code=400, detail="Empty text")
+
+    cases = db.query(Case).all()
+    tag_update = parse_case_tag_update(text)
+    if not tag_update and looks_like_case_tag_update(text):
+        try:
+            tag_update = await llm_parse_case_tag_update(text, cases)
+        except Exception:
+            tag_update = None
+    if tag_update:
+        case = find_case_by_hint(cases, tag_update["case_hint"])
+        created_case = False
+        if not case:
+            case = Case(
+                title=tag_update["title_candidate"][:255],
+                court_name="неизвестно",
+                case_number=f"TAG-{uuid4().hex[:8].upper()}",
+                status="analysis",
+                stage="analysis",
+            )
+            db.add(case)
+            db.commit()
+            db.refresh(case)
+            created_case = True
+
+        existing = {
+            (tag.kind, tag.value.strip().lower()): tag
+            for tag in db.query(CaseTag).filter(CaseTag.case_id == case.id).all()
+        }
+        added: list[str] = []
+        alias_values = tag_update.get("aliases") or []
+        tag_values = tag_update.get("tags") or []
+        for value in alias_values:
+            key = ("alias", value.strip().lower())
+            if key not in existing:
+                db.add(CaseTag(case_id=case.id, value=value[:255], kind="alias"))
+                added.append(f'алиас "{value}"')
+        for value in tag_values:
+            key = ("keyword", value.strip().lower())
+            if key not in existing:
+                db.add(CaseTag(case_id=case.id, value=value[:255], kind="keyword"))
+                added.append(f'тег "{value}"')
+        db.add(
+            CaseEvent(
+                case_id=case.id,
+                event_type="case_tags_updated",
+                body=f"Сохранены теги из чата: {', '.join(tag_values[:20])}",
+            )
+        )
+        db.commit()
+        all_tags = [
+            t.value
+            for t in db.query(CaseTag).filter(CaseTag.case_id == case.id).order_by(CaseTag.kind, CaseTag.value).all()
+        ]
+        reply_text = (
+            f'Сохранил привязку для дела "{case.title}". '
+            f'Добавлено: {", ".join(added) if added else "новых тегов не было"}. '
+            f'Всего тегов/алиасов у дела: {len(all_tags)}.'
+        )
+        db.add(CaseEvent(case_id=case.id, event_type="assistant_reply", body=reply_text))
+        db.commit()
+        return AssistantIngestOut(
+            case_id=case.id,
+            case_number=case.case_number,
+            created_case=created_case,
+            mode="case-tags",
+            created_tasks=0,
+            next_hearing_date=case.next_hearing_date,
+            reply=reply_text,
+        )
 
     extracted_case_number = payload.preferred_case_number or extract_case_number(text)
     created_case = False

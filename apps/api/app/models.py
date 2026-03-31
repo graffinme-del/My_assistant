@@ -25,6 +25,7 @@ class Case(Base):
     events: Mapped[list["CaseEvent"]] = relationship(back_populates="case")
     tasks: Mapped[list["Task"]] = relationship(back_populates="case")
     documents: Mapped[list["Document"]] = relationship(back_populates="case")
+    tags: Mapped[list["CaseTag"]] = relationship(back_populates="case", cascade="all, delete-orphan")
 
 
 class CaseEvent(Base):
@@ -76,6 +77,18 @@ class Reminder(Base):
     remind_at: Mapped[datetime] = mapped_column(DateTime)
     channel: Mapped[str] = mapped_column(String(30), default="push")
     sent: Mapped[bool] = mapped_column(default=False)
+
+
+class CaseTag(Base):
+    __tablename__ = "case_tags"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    case_id: Mapped[int] = mapped_column(ForeignKey("cases.id", ondelete="CASCADE"), index=True)
+    value: Mapped[str] = mapped_column(String(255), index=True)
+    kind: Mapped[str] = mapped_column(String(30), default="keyword")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    case: Mapped[Case] = relationship(back_populates="tags")
 
 
 class CaseEmbedding(Base):
