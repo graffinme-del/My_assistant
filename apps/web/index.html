@@ -96,6 +96,10 @@
         margin: 0;
         font-family: Arial, sans-serif;
       }
+      #chatLog a {
+        color: #2463eb;
+        text-decoration: underline;
+      }
       #chatLog {
         max-height: calc(100vh - 130px) !important;
       }
@@ -448,13 +452,41 @@
         el("summaryText").textContent = s.summary;
       }
 
+      function renderAssistantMessage(container, text) {
+        const lines = String(text).split("\n");
+        for (const line of lines) {
+          const m = line.match(/^(.*скачать:\s*)(\/api\/documents\/\d+\/download)\s*$/i);
+          if (m) {
+            const row = document.createElement("div");
+            row.style.whiteSpace = "pre-wrap";
+            row.append(document.createTextNode(m[1]));
+            const link = document.createElement("a");
+            link.href = m[2];
+            link.textContent = "скачать документ";
+            link.target = "_blank";
+            link.rel = "noopener noreferrer";
+            row.append(link);
+            container.appendChild(row);
+          } else {
+            const row = document.createElement("div");
+            row.style.whiteSpace = "pre-wrap";
+            row.textContent = line;
+            container.appendChild(row);
+          }
+        }
+      }
+
       function appendChat(role, text) {
         const log = el("chatLog");
         const box = document.createElement("div");
         box.className = role === "user" ? "msg userMsg" : "msg assistantMsg";
-        const pre = document.createElement("pre");
-        pre.textContent = text;
-        box.appendChild(pre);
+        if (role === "assistant") {
+          renderAssistantMessage(box, text);
+        } else {
+          const pre = document.createElement("pre");
+          pre.textContent = text;
+          box.appendChild(pre);
+        }
         log.appendChild(box);
         log.scrollTop = log.scrollHeight;
       }
