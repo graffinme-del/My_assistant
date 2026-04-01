@@ -2,9 +2,14 @@ from __future__ import annotations
 
 import json
 import re
+import zipfile
 from datetime import date
+from email import policy
+from email.parser import BytesParser
+from html import unescape
 from pathlib import Path
 from typing import Any
+from xml.etree import ElementTree as ET
 
 import httpx
 from openpyxl import load_workbook
@@ -176,6 +181,28 @@ def extract_document_text(file_path: Path, filename: str) -> str:
         return "\n".join(chunks).strip()
     if suffix in {"csv", "log"}:
         return file_path.read_text(encoding="utf-8", errors="ignore")
+    if suffix == "docx":
+        chunks: list[str] = []
+        try:
+            with zipfile.ZipFile(file_path) as zf:
+                xml_bytes = zf.read("word/document.xml")
+            root = ET.fromstring(xml_bytes)
+            ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+            for paragraph in root.findall(".//w:p", ns):
+                parts = [node.text or "" for node in paragraph.findall(".//w:t", ns)]
+                line = "".join(parts).strip()
+                if line:
+                    chunks.append(line)
+        except Exception:
+            return ""
+        return "\n".join(chunks).strip()
+    if suffix == "rtf":
+        raw = file_path.read_text(encoding="utf-8", errors="ignore")
+        text = re.sub(r"\\'[0-9a-fA-F]{2}", " ", raw)
+        text = re.sub(r"\\[a-zA-Z]+-?\d* ?", " ", text)
+        text = re.sub(r"[{}]", " ", text)
+        text = re.sub(r"\s+", " ", text)
+        return unescape(text).strip()
     if suffix == "xlsx":
         wb = load_workbook(filename=str(file_path), read_only=True, data_only=True)
         chunks: list[str] = []
@@ -190,6 +217,34 @@ def extract_document_text(file_path: Path, filename: str) -> str:
                 rows_seen += 1
                 if rows_seen >= 200:
                     break
+        return "\n".join(chunks).strip()
+    if suffix == "eml":
+        try:
+            message = BytesParser(policy=policy.default).parsebytes(file_path.read_bytes())
+        except Exception:
+            return ""
+        chunks: list[str] = []
+        for header in ("subject", "from", "to", "date"):
+            value = message.get(header)
+            if value:
+                chunks.append(f"{header.title()}: {value}")
+        if message.is_multipart():
+            for part in message.walk():
+                if part.get_content_type() == "text/plain":
+                    try:
+                        body = part.get_content()
+                    except Exception:
+                        body = ""
+                    if body:
+                        chunks.append(str(body))
+                        break
+        else:
+            try:
+                body = message.get_content()
+            except Exception:
+                body = ""
+            if body:
+                chunks.append(str(body))
         return "\n".join(chunks).strip()
     return ""
 

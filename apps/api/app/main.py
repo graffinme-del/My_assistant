@@ -730,6 +730,7 @@ async def bulk_ingest(
                 "md",
                 "csv",
                 "log",
+                "eml",
                 "xlsx",
                 "doc",
                 "docx",
