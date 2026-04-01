@@ -4,7 +4,12 @@ from sqlalchemy.orm import Session
 
 from .ai_service import build_case_summary, llm_summary
 from .models import Case, CaseEvent, Conversation, ConversationMessage, Document, Task
-from .retrieval import retrieve_relevant_chunks, retrieve_relevant_documents, sync_document_chunks
+from .retrieval import (
+    query_requests_strict_scope,
+    retrieve_relevant_chunks,
+    retrieve_relevant_documents,
+    sync_document_chunks,
+)
 
 
 def get_or_create_conversation(db: Session, user_key: str) -> Conversation:
@@ -82,6 +87,7 @@ def build_grounded_prompt(
     user_message: str,
     case: Case | None,
 ) -> tuple[str, list[Document], list[str]]:
+    strict_scope = query_requests_strict_scope(user_message)
     if case is not None:
         chunk_exists = db.query(Document).join(Document.chunks).filter(Document.case_id == case.id).first()
         if not chunk_exists:
@@ -99,8 +105,20 @@ def build_grounded_prompt(
         .all()
     )
     recent_messages.reverse()
-    docs_with_scores = retrieve_relevant_documents(db, query=user_message, case=case, limit=6)
-    chunk_matches = retrieve_relevant_chunks(db, query=user_message, case=case, limit=6)
+    docs_with_scores = retrieve_relevant_documents(
+        db,
+        query=user_message,
+        case=case,
+        limit=6,
+        min_score=2.0 if strict_scope else 0.9,
+    )
+    chunk_matches = retrieve_relevant_chunks(
+        db,
+        query=user_message,
+        case=case,
+        limit=6,
+        min_score=2.4 if strict_scope else 1.0,
+    )
     source_docs = [doc for doc, _ in docs_with_scores]
 
     history_block = "\n".join(f"{msg.role}: {msg.content}" for msg in recent_messages) or "история пуста"
@@ -122,14 +140,19 @@ def build_grounded_prompt(
             f"{citation} | {chunk.page_hint} | score={score:.2f}\n{chunk.chunk_text[:900]}"
         )
     if not chunk_lines:
-        chunk_lines.append("Релевантных фрагментов документов не найдено.")
+        chunk_lines.append(
+            "Релевантных фрагментов документов не найдено. "
+            "Если вопрос задан слишком широко или точных совпадений нет, нужно прямо сказать об этом."
+        )
 
     prompt = (
         "Ты личный помощник по судебным делам. "
         "Отвечай по-русски, уверенно, по делу и только на основе найденного контекста. "
         "Если данных недостаточно, скажи это прямо. Не выдумывай факты. "
         "Если используешь сведения из документов, ссылайся на них в формате [doc:ID]. "
-        "Если вопрос операционный, предложи конкретный следующий шаг.\n\n"
+        "Если вопрос операционный, предложи конкретный следующий шаг. "
+        "Не подтягивай соседний контекст, если связь слабая.\n\n"
+        f"Режим отбора: {'строгий, только текущее дело и только сильные совпадения' if strict_scope else 'обычный, внутри активного дела'}.\n\n"
         f"Рабочая память беседы:\n{conversation.rolling_summary or 'нет'}\n\n"
         f"Активное дело:\n{case_block}\n\n"
         f"Последние сообщения:\n{history_block}\n\n"

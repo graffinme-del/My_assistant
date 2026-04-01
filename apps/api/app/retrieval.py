@@ -20,6 +20,25 @@ def tokenize_query(value: str) -> list[str]:
     ]
 
 
+def query_requests_strict_scope(value: str) -> bool:
+    normalized = normalize_search_text(value)
+    return any(
+        marker in normalized
+        for marker in [
+            "только по текущему делу",
+            "только по этому делу",
+            "только по делу",
+            "только документы",
+            "высок",
+            "строго",
+            "без соседнего контекста",
+        ]
+    ) or (
+        ("по банкротству" in normalized or "именно по" in normalized or "что там по" in normalized)
+        and "ооо" in normalized
+    )
+
+
 def chunk_document_text(text: str, *, chunk_size: int = 1400, overlap: int = 220) -> list[str]:
     normalized = re.sub(r"\s+", " ", (text or "").strip())
     if not normalized:
@@ -76,10 +95,14 @@ def retrieve_relevant_chunks(
     query: str,
     case: Case | None = None,
     limit: int = 6,
+    min_score: float | None = None,
 ) -> list[tuple[DocumentChunk, float]]:
     query_tokens = tokenize_query(query)
     if not query_tokens:
         return []
+    effective_min_score = min_score
+    if effective_min_score is None:
+        effective_min_score = 2.2 if query_requests_strict_scope(query) else 1.0
     q = db.query(DocumentChunk)
     if case is not None:
         q = q.filter(DocumentChunk.case_id == case.id)
@@ -87,7 +110,7 @@ def retrieve_relevant_chunks(
     ranked: list[tuple[DocumentChunk, float]] = []
     for chunk in chunks:
         score = _score_text(query_tokens, chunk.search_text)
-        if score <= 0:
+        if score < effective_min_score:
             continue
         ranked.append((chunk, score))
     ranked.sort(key=lambda item: item[1], reverse=True)
@@ -100,10 +123,14 @@ def retrieve_relevant_documents(
     query: str,
     case: Case | None = None,
     limit: int = 8,
+    min_score: float | None = None,
 ) -> list[tuple[Document, float]]:
     query_tokens = tokenize_query(query)
     if not query_tokens:
         return []
+    effective_min_score = min_score
+    if effective_min_score is None:
+        effective_min_score = 2.0 if query_requests_strict_scope(query) else 0.9
     q = db.query(Document)
     if case is not None:
         q = q.filter(Document.case_id == case.id)
@@ -112,7 +139,7 @@ def retrieve_relevant_documents(
     for doc in docs:
         haystack = f"{doc.filename}\n{doc.category}\n{doc.extracted_text[:6000]}"
         score = _score_text(query_tokens, haystack)
-        if score <= 0:
+        if score < effective_min_score:
             continue
         ranked.append((doc, score))
     ranked.sort(key=lambda item: item[1], reverse=True)
