@@ -34,6 +34,11 @@ class Settings(BaseSettings):
     llm_app_title: str = "My Assistant"
     owner_token: str = "owner-dev-token"
     member_token: str = "member-dev-token"
+    court_sync_enabled: bool = True
+    court_sync_night_hour: int = 2
+    court_sync_max_docs_per_run: int = 200
+    court_sync_delay_sec: int = 5
+    court_sync_timeout_sec: int = 60
 
     @field_validator("app_port", mode="before")
     @classmethod

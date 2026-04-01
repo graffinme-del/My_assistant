@@ -77,8 +77,14 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+    env_file:
+      - path: .env
+        required: true
+      - path: .env.local
+        required: false
     environment:
       APP_ENV: ${APP_ENV:-development}
+      WORKER_API_BASE: http://api:8000
 
   web:
     image: ghcr.io/graffinme-del/my_assistant/web:main

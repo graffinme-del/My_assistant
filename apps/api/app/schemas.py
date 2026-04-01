@@ -159,3 +159,52 @@ class AssistantSummaryOut(BaseModel):
     case_number: str
     summary: str
     next_hearing_date: date | None
+
+
+class CourtSyncJobOut(BaseModel):
+    id: int
+    watch_profile_id: int | None = None
+    status: str
+    step: str
+    query_type: str
+    query_value: str
+    run_mode: str
+    report_text: str
+
+    class Config:
+        from_attributes = True
+
+
+class CourtSyncClaimOut(BaseModel):
+    job: CourtSyncJobOut | None = None
+
+
+class CourtSyncProgressIn(BaseModel):
+    step: str
+    message: str = ""
+
+
+class CourtSyncCompleteIn(BaseModel):
+    status: str
+    report_text: str = ""
+    result_json: dict = {}
+
+
+class CourtSyncCaseSourceIn(BaseModel):
+    remote_case_id: str
+    case_number: str = ""
+    card_url: str = ""
+    title: str = ""
+    court_name: str = ""
+    participants: list[str] = []
+    linked_case_id: int | None = None
+
+
+class CourtSyncDocumentSourceIn(BaseModel):
+    remote_document_id: str
+    case_source_id: int | None = None
+    local_document_id: int | None = None
+    title: str = ""
+    filename: str = ""
+    file_url: str = ""
+    status: str = "discovered"

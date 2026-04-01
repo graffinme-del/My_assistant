@@ -36,6 +36,22 @@ from .ai_service import (
     parse_case_tag_update,
     parse_hearing_note,
 )
+from .court_kad_search import (
+    looks_like_court_search_command,
+    parse_court_search_request,
+)
+from .court_sync_service import (
+    claim_next_sync_job,
+    complete_sync_job,
+    create_sync_job,
+    create_watch_profile,
+    enqueue_nightly_jobs,
+    format_nightly_report,
+    format_sync_status,
+    update_job_progress,
+    upsert_case_source,
+    upsert_document_source,
+)
 from .config import settings
 from .db import Base, engine, get_db
 from .models import (
@@ -43,6 +59,7 @@ from .models import (
     CaseEvent,
     CaseTag,
     Conversation,
+    CourtSyncJob,
     Document,
     PendingMovePlan,
     Reminder,
@@ -65,6 +82,12 @@ from .schemas import (
     TaskCreate,
     TaskOut,
     BulkIngestOut,
+    CourtSyncCaseSourceIn,
+    CourtSyncClaimOut,
+    CourtSyncCompleteIn,
+    CourtSyncDocumentSourceIn,
+    CourtSyncJobOut,
+    CourtSyncProgressIn,
     AssistantSummaryIn,
     AssistantSummaryOut,
 )
@@ -972,6 +995,107 @@ def global_search(q: str, db: Session = Depends(get_db), _: str = Depends(requir
     }
 
 
+@app.post("/internal/court-sync/claim", response_model=CourtSyncClaimOut)
+def internal_claim_court_sync_job(
+    db: Session = Depends(get_db), user_role: str = Depends(require_user)
+) -> CourtSyncClaimOut:
+    if user_role != "owner":
+        raise HTTPException(status_code=403, detail="Owner token required")
+    job = claim_next_sync_job(db)
+    return CourtSyncClaimOut(job=job)
+
+
+@app.post("/internal/court-sync/nightly-enqueue")
+def internal_enqueue_nightly_sync(
+    db: Session = Depends(get_db), user_role: str = Depends(require_user)
+) -> dict[str, int]:
+    if user_role != "owner":
+        raise HTTPException(status_code=403, detail="Owner token required")
+    return {"enqueued": enqueue_nightly_jobs(db)}
+
+
+@app.post("/internal/court-sync/jobs/{job_id}/progress", response_model=CourtSyncJobOut)
+def internal_update_court_sync_progress(
+    job_id: int,
+    payload: CourtSyncProgressIn,
+    db: Session = Depends(get_db),
+    user_role: str = Depends(require_user),
+) -> CourtSyncJobOut:
+    if user_role != "owner":
+        raise HTTPException(status_code=403, detail="Owner token required")
+    job = update_job_progress(db, job_id, step=payload.step, message=payload.message)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
+
+
+@app.post("/internal/court-sync/jobs/{job_id}/complete", response_model=CourtSyncJobOut)
+def internal_complete_court_sync_job(
+    job_id: int,
+    payload: CourtSyncCompleteIn,
+    db: Session = Depends(get_db),
+    user_role: str = Depends(require_user),
+) -> CourtSyncJobOut:
+    if user_role != "owner":
+        raise HTTPException(status_code=403, detail="Owner token required")
+    job = complete_sync_job(
+        db,
+        job_id,
+        status=payload.status,
+        result=payload.result_json,
+        report_text=payload.report_text,
+    )
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
+
+
+@app.post("/internal/court-sync/jobs/{job_id}/case-source")
+def internal_upsert_case_source(
+    job_id: int,
+    payload: CourtSyncCaseSourceIn,
+    db: Session = Depends(get_db),
+    user_role: str = Depends(require_user),
+) -> dict[str, int]:
+    if user_role != "owner":
+        raise HTTPException(status_code=403, detail="Owner token required")
+    job = db.query(CourtSyncJob).filter(CourtSyncJob.id == job_id).first()
+    source = upsert_case_source(
+        db,
+        remote_case_id=payload.remote_case_id,
+        case_number=payload.case_number,
+        card_url=payload.card_url,
+        title=payload.title,
+        court_name=payload.court_name,
+        participants=payload.participants,
+        watch_profile_id=job.watch_profile_id if job else None,
+        linked_case_id=payload.linked_case_id,
+    )
+    return {"case_source_id": source.id, "job_id": job_id}
+
+
+@app.post("/internal/court-sync/jobs/{job_id}/document-source")
+def internal_upsert_document_source(
+    job_id: int,
+    payload: CourtSyncDocumentSourceIn,
+    db: Session = Depends(get_db),
+    user_role: str = Depends(require_user),
+) -> dict[str, int]:
+    if user_role != "owner":
+        raise HTTPException(status_code=403, detail="Owner token required")
+    source = upsert_document_source(
+        db,
+        remote_document_id=payload.remote_document_id,
+        case_source_id=payload.case_source_id,
+        local_document_id=payload.local_document_id,
+        title=payload.title,
+        filename=payload.filename,
+        file_url=payload.file_url,
+        status=payload.status,
+    )
+    return {"document_source_id": source.id, "job_id": job_id}
+
+
 @app.post("/assistant/summary-from-text", response_model=AssistantSummaryOut)
 async def assistant_summary_from_text(
     payload: AssistantSummaryIn,
@@ -1516,6 +1640,60 @@ def search_documents(case: Case, docs: list[Document], query: str) -> str:
     return "\n".join(lines)
 
 
+def handle_court_sync_chat_command(db: Session, text: str, user_role: str) -> str | None:
+    lowered = text.lower()
+    if "статус синхронизации" in lowered:
+        return format_sync_status(db)
+    if "что нового скачано за ночь" in lowered:
+        return format_nightly_report(db)
+
+    request = parse_court_search_request(text)
+    if not request:
+        return None
+
+    if "поставь на отслеживание" in lowered:
+        profile, created = create_watch_profile(
+            db,
+            profile_type=request.query_type,
+            query_value=request.query_value,
+            title=request.query_value,
+            auto_download=True,
+        )
+        job = create_sync_job(
+            db,
+            query_type=request.query_type,
+            query_value=request.query_value,
+            run_mode="sync",
+            requested_by=user_role,
+            trigger_type="manual",
+            watch_profile_id=profile.id,
+        )
+        return (
+            f'{"Добавил" if created else "Уже отслеживается"} профиль "{request.query_value}" '
+            f'({request.query_type}). Создана задача синхронизации #{job.id}.'
+        )
+
+    run_mode = "download" if "скачай документы" in lowered else "preview"
+    job = create_sync_job(
+        db,
+        query_type=request.query_type,
+        query_value=request.query_value,
+        run_mode=run_mode,
+        requested_by=user_role,
+    )
+    if run_mode == "download":
+        return (
+            f'Поставил задачу на загрузку документов из КАД: #{job.id} '
+            f'для {request.query_type}="{request.query_value}". '
+            "Worker заберет задачу и будет качать материалы в фоновом режиме."
+        )
+    return (
+        f'Поставил задачу на поиск в КАД: #{job.id} '
+        f'для {request.query_type}="{request.query_value}". '
+        "Когда worker обработает задачу, будет доступен статус синхронизации."
+    )
+
+
 @app.post("/assistant/ingest-text", response_model=AssistantIngestOut)
 async def assistant_ingest_text(
     payload: AssistantIngestIn,
@@ -1724,6 +1902,12 @@ async def assistant_ingest_text(
         reply_text = move_documents_by_chat_command(db, text)
         unsorted_case = get_or_create_unsorted_case(db)
         return await finalize_reply(case=unsorted_case, reply_text=reply_text, mode="documents-manual-move")
+
+    if looks_like_court_search_command(text):
+        reply_text = handle_court_sync_chat_command(db, text, _)
+        if reply_text:
+            active_case = conversation.active_case or get_or_create_unsorted_case(db)
+            return await finalize_reply(case=active_case, reply_text=reply_text, mode="court-sync-command")
 
     _command_conversation, command_case = resolve_case_for_conversation(
         db,

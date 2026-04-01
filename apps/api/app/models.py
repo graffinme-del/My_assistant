@@ -154,6 +154,97 @@ class DocumentChunk(Base):
     case: Mapped[Case] = relationship()
 
 
+class CourtWatchProfile(Base):
+    __tablename__ = "court_watch_profiles"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    profile_type: Mapped[str] = mapped_column(String(30), index=True)
+    query_value: Mapped[str] = mapped_column(String(255), index=True)
+    title: Mapped[str] = mapped_column(String(255), default="")
+    is_active: Mapped[bool] = mapped_column(default=True)
+    auto_download: Mapped[bool] = mapped_column(default=True)
+    check_interval_hours: Mapped[int] = mapped_column(default=24)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class CourtSyncJob(Base):
+    __tablename__ = "court_sync_jobs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    watch_profile_id: Mapped[int | None] = mapped_column(
+        ForeignKey("court_watch_profiles.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    trigger_type: Mapped[str] = mapped_column(String(30), default="manual")
+    requested_by: Mapped[str] = mapped_column(String(50), default="owner")
+    query_type: Mapped[str] = mapped_column(String(30), index=True)
+    query_value: Mapped[str] = mapped_column(String(255))
+    run_mode: Mapped[str] = mapped_column(String(30), default="preview")
+    status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
+    step: Mapped[str] = mapped_column(String(100), default="queued")
+    report_text: Mapped[str] = mapped_column(Text, default="")
+    manual_action_note: Mapped[str] = mapped_column(Text, default="")
+    result_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class CourtSyncRun(Base):
+    __tablename__ = "court_sync_runs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    job_id: Mapped[int] = mapped_column(ForeignKey("court_sync_jobs.id", ondelete="CASCADE"), index=True)
+    status: Mapped[str] = mapped_column(String(30), default="running")
+    step: Mapped[str] = mapped_column(String(100), default="started")
+    message: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class CourtCaseSource(Base):
+    __tablename__ = "court_case_sources"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    watch_profile_id: Mapped[int | None] = mapped_column(
+        ForeignKey("court_watch_profiles.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    case_id: Mapped[int | None] = mapped_column(ForeignKey("cases.id", ondelete="SET NULL"), nullable=True, index=True)
+    source_system: Mapped[str] = mapped_column(String(30), default="kad")
+    remote_case_id: Mapped[str] = mapped_column(String(255), index=True)
+    card_url: Mapped[str] = mapped_column(String(1000), default="")
+    case_number: Mapped[str] = mapped_column(String(255), default="", index=True)
+    title: Mapped[str] = mapped_column(String(255), default="")
+    court_name: Mapped[str] = mapped_column(String(255), default="")
+    participants_json: Mapped[str] = mapped_column(Text, default="[]")
+    is_tracked: Mapped[bool] = mapped_column(default=True)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class CourtDocumentSource(Base):
+    __tablename__ = "court_document_sources"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    case_source_id: Mapped[int | None] = mapped_column(
+        ForeignKey("court_case_sources.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    local_document_id: Mapped[int | None] = mapped_column(
+        ForeignKey("documents.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    remote_document_id: Mapped[str] = mapped_column(String(255), index=True)
+    title: Mapped[str] = mapped_column(String(500), default="")
+    filename: Mapped[str] = mapped_column(String(255), default="")
+    file_url: Mapped[str] = mapped_column(String(1000), default="")
+    published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    status: Mapped[str] = mapped_column(String(30), default="discovered")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_downloaded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class CaseEmbedding(Base):
     __tablename__ = "case_embeddings"
 
