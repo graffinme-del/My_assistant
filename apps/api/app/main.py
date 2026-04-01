@@ -212,8 +212,20 @@ def find_duplicate_document(
 
 def looks_like_documents_list_request(text: str) -> bool:
     t = text.lower()
-    return any(noun in t for noun in ["документ", "файл", "архив"]) and any(
-        k in t for k in ["покажи", "список", "какие", "дай"]
+    return any(noun in t for noun in ["документ", "файл", "архив", "перечень", "реестр"]) and any(
+        k in t
+        for k in [
+            "покажи",
+            "список",
+            "какие",
+            "дай",
+            "собери",
+            "собрать",
+            "перечень",
+            "реестр",
+            "все файлы",
+            "все документы",
+        ]
     )
 
 
