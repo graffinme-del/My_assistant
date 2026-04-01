@@ -13,7 +13,10 @@ from xml.etree import ElementTree as ET
 
 import httpx
 from openpyxl import load_workbook
+from PIL import Image
 from pypdf import PdfReader
+import pypdfium2 as pdfium
+import pytesseract
 from sqlalchemy.orm import Session
 
 from .config import settings
@@ -178,7 +181,11 @@ def extract_document_text(file_path: Path, filename: str) -> str:
         chunks: list[str] = []
         for page in reader.pages[:30]:
             chunks.append(page.extract_text() or "")
-        return "\n".join(chunks).strip()
+        text = "\n".join(chunks).strip()
+        if _looks_like_meaningful_text(text):
+            return text
+        ocr_text = _extract_pdf_text_with_ocr(file_path)
+        return ocr_text or text
     if suffix in {"csv", "log"}:
         return file_path.read_text(encoding="utf-8", errors="ignore")
     if suffix == "docx":
@@ -246,7 +253,53 @@ def extract_document_text(file_path: Path, filename: str) -> str:
             if body:
                 chunks.append(str(body))
         return "\n".join(chunks).strip()
+    if suffix in {"jpg", "jpeg", "png", "webp"}:
+        return _extract_image_text_with_ocr(file_path)
     return ""
+
+
+def _looks_like_meaningful_text(text: str, *, min_chars: int = 80) -> bool:
+    compact = re.sub(r"\s+", "", text or "")
+    letters = re.findall(r"[A-Za-zА-Яа-я0-9]", compact)
+    return len(letters) >= min_chars
+
+
+def _ocr_image(image: Image.Image) -> str:
+    if image.mode not in {"L", "RGB"}:
+        image = image.convert("RGB")
+    try:
+        text = pytesseract.image_to_string(image, lang="rus+eng")
+    except Exception:
+        return ""
+    return re.sub(r"\s+\n", "\n", text).strip()
+
+
+def _extract_image_text_with_ocr(file_path: Path) -> str:
+    try:
+        with Image.open(file_path) as img:
+            return _ocr_image(img)
+    except Exception:
+        return ""
+
+
+def _extract_pdf_text_with_ocr(file_path: Path, *, max_pages: int = 12) -> str:
+    try:
+        pdf = pdfium.PdfDocument(str(file_path))
+    except Exception:
+        return ""
+    chunks: list[str] = []
+    page_count = min(len(pdf), max_pages)
+    for page_index in range(page_count):
+        try:
+            page = pdf[page_index]
+            bitmap = page.render(scale=2.0)
+            pil_image = bitmap.to_pil()
+            text = _ocr_image(pil_image)
+            if text:
+                chunks.append(text)
+        except Exception:
+            continue
+    return "\n\n".join(chunks).strip()
 
 
 def classify_document(filename: str, text: str) -> tuple[str, float]:
