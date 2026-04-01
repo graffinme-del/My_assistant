@@ -265,6 +265,22 @@ def looks_like_bulk_folder_from_current_archive_request(text: str) -> bool:
     )
 
 
+def looks_like_followup_current_archive_confirmation(text: str) -> bool:
+    t = text.lower()
+    return looks_like_current_archive_reference(text) and any(
+        k in t
+        for k in [
+            "они все",
+            "они в",
+            "все в",
+            "все из",
+            "да, все",
+            "да все",
+            "именно из",
+        ]
+    )
+
+
 def looks_like_pending_move_confirmation(text: str) -> bool:
     t = text.lower()
     return any(k in t for k in ["да, перенеси", "перенеси все", "подтверждаю", "ок, перенеси", "да перенеси"])
@@ -1151,6 +1167,33 @@ def parse_case_title_from_folder_request(text: str) -> str:
     return quoted[0] if quoted else ""
 
 
+def save_folder_request_context(db: Session, title: str) -> None:
+    if not title:
+        return
+    unsorted_case = get_or_create_unsorted_case(db)
+    db.add(CaseEvent(case_id=unsorted_case.id, event_type="folder_request_context", body=title[:255]))
+    db.commit()
+
+
+def get_recent_folder_request_context(db: Session, *, max_age_minutes: int = 60) -> str | None:
+    unsorted_case = get_or_create_unsorted_case(db)
+    event = (
+        db.query(CaseEvent)
+        .filter(
+            CaseEvent.case_id == unsorted_case.id,
+            CaseEvent.event_type == "folder_request_context",
+        )
+        .order_by(CaseEvent.created_at.desc())
+        .first()
+    )
+    if not event:
+        return None
+    if event.created_at < datetime.utcnow() - timedelta(minutes=max_age_minutes):
+        return None
+    title = (event.body or "").strip()
+    return title or None
+
+
 def get_recent_document_batch(db: Session, *, max_gap_seconds: int = 180, max_age_minutes: int = 30) -> list[Document]:
     docs = db.query(Document).order_by(Document.created_at.desc()).limit(300).all()
     if not docs:
@@ -1559,6 +1602,28 @@ async def assistant_ingest_text(
             reply=reply_text,
         )
 
+    if looks_like_followup_current_archive_confirmation(text):
+        title = get_recent_folder_request_context(db)
+        if not title:
+            reply_text = (
+                "Не вижу, для какой папки продолжать. Напишите еще раз: "
+                'Создай папку "Название дела" и собери туда весь текущий архив'
+            )
+        else:
+            reply_text = preview_collect_recent_archive_to_case(db, title)
+        unsorted_case = get_or_create_unsorted_case(db)
+        db.add(CaseEvent(case_id=unsorted_case.id, event_type="assistant_reply", body=reply_text))
+        db.commit()
+        return AssistantIngestOut(
+            case_id=unsorted_case.id,
+            case_number=unsorted_case.case_number,
+            created_case=False,
+            mode="documents-bulk-move-recent-archive-followup",
+            created_tasks=0,
+            next_hearing_date=unsorted_case.next_hearing_date,
+            reply=reply_text,
+        )
+
     if looks_like_bulk_folder_from_current_archive_request(text):
         title = parse_case_title_from_folder_request(text)
         if not title:
@@ -1567,6 +1632,7 @@ async def assistant_ingest_text(
                 "и собери туда весь текущий архив"
             )
         else:
+            save_folder_request_context(db, title)
             reply_text = preview_collect_recent_archive_to_case(db, title)
         unsorted_case = get_or_create_unsorted_case(db)
         db.add(CaseEvent(case_id=unsorted_case.id, event_type="assistant_reply", body=reply_text))
@@ -1591,6 +1657,7 @@ async def assistant_ingest_text(
             )
         else:
             title, keywords = parsed
+            save_folder_request_context(db, title)
             docs_scope = get_recent_document_batch(db) if looks_like_current_archive_reference(text) else None
             scope_label = "в последнем архиве" if docs_scope is not None else None
             reply_text = preview_bulk_move_documents_to_case_by_keywords(
