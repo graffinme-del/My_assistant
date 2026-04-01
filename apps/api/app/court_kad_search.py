@@ -32,7 +32,18 @@ def parse_court_search_request(text: str) -> CourtSearchRequest | None:
     lowered = raw.lower()
 
     m_case = re.search(r"(?:дел[ауо]?|дела)\s+([АA]\d{1,4}-\d{1,7}/\d{2,4}|\d{1,2}-\d{1,7}/\d{2,4})", raw, flags=re.IGNORECASE)
-    if any(marker in lowered for marker in ["скачай документы дела", "найди дело", "поставь на отслеживание дело"]) and m_case:
+    case_markers = [
+        "скачай документы дела",
+        "скачай все документы дела",
+        "скачай документы по делу",
+        "скачай все документы по делу",
+        "скачай материалы дела",
+        "скачай все материалы дела",
+        "с сайта арбитражного суда",
+        "найди дело",
+        "поставь на отслеживание дело",
+    ]
+    if any(marker in lowered for marker in case_markers) and m_case:
         return CourtSearchRequest(query_type="case_number", query_value=normalize_case_number(m_case.group(1)))
 
     m_inn = re.search(r"\bинн\b[:\s]*([\d\s]{10,15})", lowered, flags=re.IGNORECASE)
@@ -69,6 +80,12 @@ def looks_like_court_search_command(text: str) -> bool:
         marker in lowered
         for marker in [
             "скачай документы дела",
+            "скачай все документы дела",
+            "скачай документы по делу",
+            "скачай все документы по делу",
+            "скачай материалы дела",
+            "скачай все материалы дела",
+            "с сайта арбитражного суда",
             "найди дела по",
             "найди дело",
             "поставь на отслеживание дело",
