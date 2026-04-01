@@ -1,4 +1,4 @@
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 import json
 import re
 import shutil
@@ -231,6 +231,37 @@ def looks_like_bulk_folder_by_keywords_request(text: str) -> bool:
     t = text.lower()
     return any(k in t for k in ["создай папк", "создай дело", "создай папку", "новая папка", "новое дело"]) and any(
         k in t for k in ["отправь туда", "перенеси туда", "все документы", "содержат", "ключевые слова"]
+    )
+
+
+def looks_like_current_archive_reference(text: str) -> bool:
+    t = text.lower()
+    return any(
+        k in t
+        for k in [
+            "этот архив",
+            "текущий архив",
+            "в текущем архиве",
+            "из текущего архива",
+            "из этого архива",
+        ]
+    )
+
+
+def looks_like_bulk_folder_from_current_archive_request(text: str) -> bool:
+    t = text.lower()
+    return any(k in t for k in ["создай папк", "создай папку", "создай дело", "собери в одну папку"]) and any(
+        k in t
+        for k in [
+            "весь архив",
+            "весь текущий архив",
+            "этот архив",
+            "текущий архив",
+            "в текущем архиве",
+            "в одну папку",
+            "все в одну папку",
+            "собери все",
+        ]
     )
 
 
@@ -1112,8 +1143,34 @@ def parse_bulk_folder_request(text: str) -> tuple[str, list[str]] | None:
     return title, deduped
 
 
-def build_bulk_move_candidates(db: Session, keywords: list[str]) -> list[Document]:
-    docs = db.query(Document).order_by(Document.created_at.asc()).all()
+def parse_case_title_from_folder_request(text: str) -> str:
+    m = re.search(r'создай\s+(?:папк[ау]?|дело)\s*[:"«]?\s*([^"\n».]+)', text, flags=re.IGNORECASE)
+    if m:
+        return m.group(1).strip(" .:-\"«»")
+    quoted = [q.strip() for q in re.findall(r'"([^"]+)"|«([^»]+)»', text) for q in q if q.strip()]
+    return quoted[0] if quoted else ""
+
+
+def get_recent_document_batch(db: Session, *, max_gap_seconds: int = 180, max_age_minutes: int = 30) -> list[Document]:
+    docs = db.query(Document).order_by(Document.created_at.desc()).limit(300).all()
+    if not docs:
+        return []
+    latest_ts = docs[0].created_at
+    min_ts = latest_ts - timedelta(minutes=max_age_minutes)
+    batch: list[Document] = []
+    previous_ts = latest_ts
+    for doc in docs:
+        if doc.created_at < min_ts:
+            break
+        if previous_ts and (previous_ts - doc.created_at).total_seconds() > max_gap_seconds and batch:
+            break
+        batch.append(doc)
+        previous_ts = doc.created_at
+    return list(reversed(batch))
+
+
+def build_bulk_move_candidates(db: Session, keywords: list[str], *, docs_scope: list[Document] | None = None) -> list[Document]:
+    docs = docs_scope if docs_scope is not None else db.query(Document).order_by(Document.created_at.asc()).all()
     result: list[Document] = []
     for doc in docs:
         haystack = f"{doc.filename}\n{doc.extracted_text or ''}".lower()
@@ -1122,7 +1179,7 @@ def build_bulk_move_candidates(db: Session, keywords: list[str]) -> list[Documen
     return result
 
 
-def preview_bulk_move_documents_to_case_by_keywords(db: Session, title: str, keywords: list[str]) -> str:
+def ensure_chat_case(db: Session, title: str) -> tuple[Case, bool]:
     case = find_case_by_hint(db.query(Case).all(), title)
     created = False
     if not case:
@@ -1137,6 +1194,13 @@ def preview_bulk_move_documents_to_case_by_keywords(db: Session, title: str, key
         db.commit()
         db.refresh(case)
         created = True
+    return case, created
+
+
+def preview_bulk_move_documents_to_case_by_keywords(
+    db: Session, title: str, keywords: list[str], *, docs_scope: list[Document] | None = None, scope_label: str | None = None
+) -> str:
+    case, created = ensure_chat_case(db, title)
 
     existing_tags = {
         (tag.kind, tag.value.strip().lower())
@@ -1148,7 +1212,7 @@ def preview_bulk_move_documents_to_case_by_keywords(db: Session, title: str, key
             db.add(CaseTag(case_id=case.id, value=word[:255], kind="keyword"))
     db.commit()
 
-    docs = [doc for doc in build_bulk_move_candidates(db, keywords) if doc.case_id != case.id]
+    docs = [doc for doc in build_bulk_move_candidates(db, keywords, docs_scope=docs_scope) if doc.case_id != case.id]
     db.query(PendingMovePlan).filter(PendingMovePlan.case_id == case.id).delete()
     db.add(
         PendingMovePlan(
@@ -1162,7 +1226,7 @@ def preview_bulk_move_documents_to_case_by_keywords(db: Session, title: str, key
     summary = [
         f'{"Создал" if created else "Использовал"} дело "{case.title}" ({case.case_number}).',
         f"Ключевые слова: {', '.join(keywords)}.",
-        f"Нашёл кандидатов на перенос: {len(docs)}.",
+        f"Нашёл кандидатов на перенос{f' ({scope_label})' if scope_label else ''}: {len(docs)}.",
     ]
     if docs:
         summary.append("Проверь список ниже и ответь, например:")
@@ -1174,6 +1238,40 @@ def preview_bulk_move_documents_to_case_by_keywords(db: Session, title: str, key
             summary.append(f"... и еще {len(docs) - 50}.")
     else:
         summary.append("Совпадений по документам не найдено.")
+    return "\n".join(summary)
+
+
+def preview_collect_recent_archive_to_case(db: Session, title: str) -> str:
+    recent_docs = get_recent_document_batch(db)
+    if not recent_docs:
+        return "Не вижу недавней загрузки архива. Сначала загрузите ZIP или уточните документы по ключевым словам."
+    case, created = ensure_chat_case(db, title)
+    docs = [doc for doc in recent_docs if doc.case_id != case.id]
+    db.query(PendingMovePlan).filter(PendingMovePlan.case_id == case.id).delete()
+    db.add(
+        PendingMovePlan(
+            case_id=case.id,
+            title=case.title,
+            keywords_json=json.dumps(["__recent_archive__"], ensure_ascii=False),
+            doc_ids_json=json.dumps([doc.id for doc in docs]),
+        )
+    )
+    db.commit()
+    summary = [
+        f'{"Создал" if created else "Использовал"} дело "{case.title}" ({case.case_number}).',
+        f"Взял документы из последнего загруженного архива: {len(recent_docs)} шт.",
+        f"Кандидатов на перенос: {len(docs)}.",
+    ]
+    if docs:
+        summary.append("Проверь список ниже и ответь, например:")
+        summary.append('`Да, перенеси все` или `Да, перенеси все, кроме 3, 7`')
+        summary.append("Кандидаты:")
+        for idx, doc in enumerate(docs[:50], start=1):
+            summary.append(f"{idx}. [{doc.id}] {doc.filename}")
+        if len(docs) > 50:
+            summary.append(f"... и еще {len(docs) - 50}.")
+    else:
+        summary.append("Все документы из последнего архива уже лежат в этом деле.")
     return "\n".join(summary)
 
 
@@ -1461,6 +1559,28 @@ async def assistant_ingest_text(
             reply=reply_text,
         )
 
+    if looks_like_bulk_folder_from_current_archive_request(text):
+        title = parse_case_title_from_folder_request(text)
+        if not title:
+            reply_text = (
+                'Не вижу название папки/дела. Напишите, например: Создай папку "Банкротство Эй Джи Мануфактуринг" '
+                "и собери туда весь текущий архив"
+            )
+        else:
+            reply_text = preview_collect_recent_archive_to_case(db, title)
+        unsorted_case = get_or_create_unsorted_case(db)
+        db.add(CaseEvent(case_id=unsorted_case.id, event_type="assistant_reply", body=reply_text))
+        db.commit()
+        return AssistantIngestOut(
+            case_id=unsorted_case.id,
+            case_number=unsorted_case.case_number,
+            created_case=False,
+            mode="documents-bulk-move-recent-archive",
+            created_tasks=0,
+            next_hearing_date=unsorted_case.next_hearing_date,
+            reply=reply_text,
+        )
+
     if looks_like_bulk_folder_by_keywords_request(text):
         parsed = parse_bulk_folder_request(text)
         if not parsed:
@@ -1471,7 +1591,15 @@ async def assistant_ingest_text(
             )
         else:
             title, keywords = parsed
-            reply_text = preview_bulk_move_documents_to_case_by_keywords(db, title, keywords)
+            docs_scope = get_recent_document_batch(db) if looks_like_current_archive_reference(text) else None
+            scope_label = "в последнем архиве" if docs_scope is not None else None
+            reply_text = preview_bulk_move_documents_to_case_by_keywords(
+                db,
+                title,
+                keywords,
+                docs_scope=docs_scope,
+                scope_label=scope_label,
+            )
         unsorted_case = get_or_create_unsorted_case(db)
         db.add(CaseEvent(case_id=unsorted_case.id, event_type="assistant_reply", body=reply_text))
         db.commit()
