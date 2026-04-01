@@ -102,7 +102,7 @@ def build_case_summary(case: Case, events: list[CaseEvent], tasks: list[Task]) -
     )
 
 
-async def llm_assistant_chat_reply(user_message: str, case: Case) -> str:
+async def llm_assistant_chat_reply(user_message: str, case: Case, *, prompt_override: str | None = None) -> str:
     """Ответ в стиле чата (не юридическая консультация — организация и краткие пояснения)."""
     if not settings.openai_api_key.strip():
         return (
@@ -110,7 +110,7 @@ async def llm_assistant_chat_reply(user_message: str, case: Case) -> str:
             "нужен ключ API (OPENAI_API_KEY; для OpenRouter также OPENAI_BASE_URL)."
         )
 
-    user_content = (
+    user_content = prompt_override or (
         "Ты личный помощник по организации материалов по судебным делам. "
         "Отвечай по-русски, кратко, уверенно и прикладно, как сильный операционный ассистент. "
         "Сначала говори результат или следующий конкретный шаг, потом 1-3 важных детали. "
@@ -472,9 +472,9 @@ def match_case(db: Session, filename: str, text: str, preferred_case_id: int | N
         if score > best_score:
             best_score = score
             best = case
-    if best:
+    if best and best_score >= 0.45:
         return best, max(0.6, best_score)
-    return cases[0], 0.45
+    return None, 0.0
 
 
 def extract_case_number(text: str) -> str | None:

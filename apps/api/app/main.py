@@ -13,6 +13,13 @@ from fastapi.responses import FileResponse
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
+from .assistant_context import (
+    add_conversation_message,
+    build_grounded_prompt,
+    get_or_create_conversation,
+    refresh_conversation_summary,
+    resolve_case_with_conversation,
+)
 from .ai_service import (
     build_case_summary,
     classify_document,
@@ -31,7 +38,17 @@ from .ai_service import (
 )
 from .config import settings
 from .db import Base, engine, get_db
-from .models import Case, CaseEvent, CaseTag, Document, PendingMovePlan, Reminder, Task
+from .models import (
+    Case,
+    CaseEvent,
+    CaseTag,
+    Conversation,
+    Document,
+    PendingMovePlan,
+    Reminder,
+    Task,
+)
+from .retrieval import sync_document_chunks
 from .schemas import (
     CaseCreate,
     CaseOut,
@@ -140,6 +157,35 @@ def local_storage_path(doc: Document) -> Path | None:
     rel = doc.s3_key.replace("local://", "", 1)
     path = STORAGE_ROOT / rel
     return path if path.exists() else None
+
+
+def conversation_user_key(user_role: str) -> str:
+    return f"default:{user_role}"
+
+
+def index_document_for_retrieval(db: Session, document: Document) -> None:
+    sync_document_chunks(db, document)
+    db.commit()
+
+
+def resolve_case_for_conversation(
+    db: Session,
+    text: str,
+    *,
+    user_role: str,
+    preferred_case_number: str | None = None,
+) -> tuple[Conversation, Case]:
+    conversation = get_or_create_conversation(db, conversation_user_key(user_role))
+    resolved_case = resolve_case_for_chat(db, text, preferred_case_number=preferred_case_number)
+    active_case = resolve_case_with_conversation(conversation=conversation, resolved_case=resolved_case)
+    if active_case is None:
+        active_case = get_or_create_unsorted_case(db)
+    if conversation.active_case_id != active_case.id:
+        conversation.active_case_id = active_case.id
+        db.add(conversation)
+        db.commit()
+        db.refresh(conversation)
+    return conversation, active_case
 
 
 def normalize_document_signature(filename: str, extracted_text: str) -> tuple[str, str]:
@@ -653,6 +699,7 @@ async def ingest_document(
     )
     db.commit()
     db.refresh(doc)
+    index_document_for_retrieval(db, doc)
 
     return DocumentIngestOut(
         document=doc,
@@ -847,6 +894,8 @@ async def bulk_ingest(
                     )
                 )
                 db.commit()
+                db.refresh(doc)
+                index_document_for_retrieval(db, doc)
                 ingested_files += 1
     except zipfile.BadZipFile:
         raise HTTPException(status_code=400, detail="ZIP поврежден или не распаковывается.")
@@ -1465,6 +1514,49 @@ async def assistant_ingest_text(
     if not text:
         raise HTTPException(status_code=400, detail="Empty text")
 
+    conversation = get_or_create_conversation(db, conversation_user_key(_))
+    add_conversation_message(
+        db,
+        conversation=conversation,
+        role="user",
+        content=text,
+        case=conversation.active_case,
+    )
+    db.commit()
+
+    async def finalize_reply(
+        *,
+        case: Case,
+        reply_text: str,
+        mode: str,
+        created_case: bool = False,
+        created_tasks: int = 0,
+        next_hearing_date=None,
+        refresh_summary: bool = False,
+    ) -> AssistantIngestOut:
+        conversation.active_case_id = case.id
+        db.add(conversation)
+        db.add(CaseEvent(case_id=case.id, event_type="assistant_reply", body=reply_text))
+        add_conversation_message(
+            db,
+            conversation=conversation,
+            role="assistant",
+            content=reply_text,
+            case=case,
+        )
+        db.commit()
+        if refresh_summary:
+            await refresh_conversation_summary(db, conversation)
+        return AssistantIngestOut(
+            case_id=case.id,
+            case_number=case.case_number,
+            created_case=created_case,
+            mode=mode,
+            created_tasks=created_tasks,
+            next_hearing_date=next_hearing_date if next_hearing_date is not None else case.next_hearing_date,
+            reply=reply_text,
+        )
+
     cases = db.query(Case).all()
     tag_update = parse_case_tag_update(text)
     if not tag_update and looks_like_case_tag_update(text):
@@ -1522,32 +1614,18 @@ async def assistant_ingest_text(
             f'Добавлено: {", ".join(added) if added else "новых тегов не было"}. '
             f'Всего тегов/алиасов у дела: {len(all_tags)}.'
         )
-        db.add(CaseEvent(case_id=case.id, event_type="assistant_reply", body=reply_text))
-        db.commit()
-        return AssistantIngestOut(
-            case_id=case.id,
-            case_number=case.case_number,
-            created_case=created_case,
+        return await finalize_reply(
+            case=case,
+            reply_text=reply_text,
             mode="case-tags",
-            created_tasks=0,
-            next_hearing_date=case.next_hearing_date,
-            reply=reply_text,
+            created_case=created_case,
+            refresh_summary=True,
         )
 
     if looks_like_group_by_cases_request(text):
         reply_text = render_documents_grouped_by_cases(db)
         unsorted_case = get_or_create_unsorted_case(db)
-        db.add(CaseEvent(case_id=unsorted_case.id, event_type="assistant_reply", body=reply_text))
-        db.commit()
-        return AssistantIngestOut(
-            case_id=unsorted_case.id,
-            case_number=unsorted_case.case_number,
-            created_case=False,
-            mode="documents-grouped-by-case",
-            created_tasks=0,
-            next_hearing_date=unsorted_case.next_hearing_date,
-            reply=reply_text,
-        )
+        return await finalize_reply(case=unsorted_case, reply_text=reply_text, mode="documents-grouped-by-case")
 
     if looks_like_single_doc_summary_request(text):
         ids = [int(x) for x in re.findall(r"\b(\d+)\b", text)]
@@ -1561,47 +1639,17 @@ async def assistant_ingest_text(
                 else f'Суть документа [{doc.id}] "{doc.filename}":\n{summary_text}'
             )
         unsorted_case = get_or_create_unsorted_case(db)
-        db.add(CaseEvent(case_id=unsorted_case.id, event_type="assistant_reply", body=reply_text))
-        db.commit()
-        return AssistantIngestOut(
-            case_id=unsorted_case.id,
-            case_number=unsorted_case.case_number,
-            created_case=False,
-            mode="document-summary-by-id",
-            created_tasks=0,
-            next_hearing_date=unsorted_case.next_hearing_date,
-            reply=reply_text,
-        )
+        return await finalize_reply(case=unsorted_case, reply_text=reply_text, mode="document-summary-by-id")
 
     if looks_like_unsorted_tag_suggestion_request(text):
         unsorted_case = get_or_create_unsorted_case(db)
         reply_text = await suggest_tags_for_unsorted_case(db)
-        db.add(CaseEvent(case_id=unsorted_case.id, event_type="assistant_reply", body=reply_text))
-        db.commit()
-        return AssistantIngestOut(
-            case_id=unsorted_case.id,
-            case_number=unsorted_case.case_number,
-            created_case=False,
-            mode="unsorted-tag-suggestions",
-            created_tasks=0,
-            next_hearing_date=unsorted_case.next_hearing_date,
-            reply=reply_text,
-        )
+        return await finalize_reply(case=unsorted_case, reply_text=reply_text, mode="unsorted-tag-suggestions")
 
     if looks_like_reclassify_unsorted_request(text):
         unsorted_case = get_or_create_unsorted_case(db)
         reply_text = reclassify_unsorted_documents(db)
-        db.add(CaseEvent(case_id=unsorted_case.id, event_type="assistant_reply", body=reply_text))
-        db.commit()
-        return AssistantIngestOut(
-            case_id=unsorted_case.id,
-            case_number=unsorted_case.case_number,
-            created_case=False,
-            mode="unsorted-reclassified",
-            created_tasks=0,
-            next_hearing_date=unsorted_case.next_hearing_date,
-            reply=reply_text,
-        )
+        return await finalize_reply(case=unsorted_case, reply_text=reply_text, mode="unsorted-reclassified")
 
     if looks_like_followup_current_archive_confirmation(text):
         title = get_recent_folder_request_context(db)
@@ -1613,16 +1661,10 @@ async def assistant_ingest_text(
         else:
             reply_text = preview_collect_recent_archive_to_case(db, title)
         unsorted_case = get_or_create_unsorted_case(db)
-        db.add(CaseEvent(case_id=unsorted_case.id, event_type="assistant_reply", body=reply_text))
-        db.commit()
-        return AssistantIngestOut(
-            case_id=unsorted_case.id,
-            case_number=unsorted_case.case_number,
-            created_case=False,
+        return await finalize_reply(
+            case=unsorted_case,
+            reply_text=reply_text,
             mode="documents-bulk-move-recent-archive-followup",
-            created_tasks=0,
-            next_hearing_date=unsorted_case.next_hearing_date,
-            reply=reply_text,
         )
 
     if looks_like_bulk_folder_from_current_archive_request(text):
@@ -1636,17 +1678,7 @@ async def assistant_ingest_text(
             save_folder_request_context(db, title)
             reply_text = preview_collect_recent_archive_to_case(db, title)
         unsorted_case = get_or_create_unsorted_case(db)
-        db.add(CaseEvent(case_id=unsorted_case.id, event_type="assistant_reply", body=reply_text))
-        db.commit()
-        return AssistantIngestOut(
-            case_id=unsorted_case.id,
-            case_number=unsorted_case.case_number,
-            created_case=False,
-            mode="documents-bulk-move-recent-archive",
-            created_tasks=0,
-            next_hearing_date=unsorted_case.next_hearing_date,
-            reply=reply_text,
-        )
+        return await finalize_reply(case=unsorted_case, reply_text=reply_text, mode="documents-bulk-move-recent-archive")
 
     if looks_like_bulk_folder_by_keywords_request(text):
         parsed = parse_bulk_folder_request(text)
@@ -1669,49 +1701,24 @@ async def assistant_ingest_text(
                 scope_label=scope_label,
             )
         unsorted_case = get_or_create_unsorted_case(db)
-        db.add(CaseEvent(case_id=unsorted_case.id, event_type="assistant_reply", body=reply_text))
-        db.commit()
-        return AssistantIngestOut(
-            case_id=unsorted_case.id,
-            case_number=unsorted_case.case_number,
-            created_case=False,
-            mode="documents-bulk-move-by-keywords",
-            created_tasks=0,
-            next_hearing_date=unsorted_case.next_hearing_date,
-            reply=reply_text,
-        )
+        return await finalize_reply(case=unsorted_case, reply_text=reply_text, mode="documents-bulk-move-by-keywords")
 
     if looks_like_pending_move_confirmation(text) or looks_like_pending_move_rejection(text):
         reply_text = apply_pending_move_plan(db, text)
         unsorted_case = get_or_create_unsorted_case(db)
-        db.add(CaseEvent(case_id=unsorted_case.id, event_type="assistant_reply", body=reply_text))
-        db.commit()
-        return AssistantIngestOut(
-            case_id=unsorted_case.id,
-            case_number=unsorted_case.case_number,
-            created_case=False,
-            mode="documents-bulk-move-confirmed",
-            created_tasks=0,
-            next_hearing_date=unsorted_case.next_hearing_date,
-            reply=reply_text,
-        )
+        return await finalize_reply(case=unsorted_case, reply_text=reply_text, mode="documents-bulk-move-confirmed")
 
     if looks_like_manual_move_request(text):
         reply_text = move_documents_by_chat_command(db, text)
         unsorted_case = get_or_create_unsorted_case(db)
-        db.add(CaseEvent(case_id=unsorted_case.id, event_type="assistant_reply", body=reply_text))
-        db.commit()
-        return AssistantIngestOut(
-            case_id=unsorted_case.id,
-            case_number=unsorted_case.case_number,
-            created_case=False,
-            mode="documents-manual-move",
-            created_tasks=0,
-            next_hearing_date=unsorted_case.next_hearing_date,
-            reply=reply_text,
-        )
+        return await finalize_reply(case=unsorted_case, reply_text=reply_text, mode="documents-manual-move")
 
-    command_case = resolve_case_for_chat(db, text, preferred_case_number=payload.preferred_case_number)
+    _command_conversation, command_case = resolve_case_for_conversation(
+        db,
+        text,
+        user_role=_,
+        preferred_case_number=payload.preferred_case_number,
+    )
     command_docs = (
         db.query(Document)
         .filter(Document.case_id == command_case.id)
@@ -1720,61 +1727,21 @@ async def assistant_ingest_text(
     )
     if looks_like_documents_list_request(text):
         reply_text = render_document_list(command_case, command_docs)
-        db.add(CaseEvent(case_id=command_case.id, event_type="assistant_reply", body=reply_text))
-        db.commit()
-        return AssistantIngestOut(
-            case_id=command_case.id,
-            case_number=command_case.case_number,
-            created_case=False,
-            mode="documents-list",
-            created_tasks=0,
-            next_hearing_date=command_case.next_hearing_date,
-            reply=reply_text,
-        )
+        return await finalize_reply(case=command_case, reply_text=reply_text, mode="documents-list")
 
     if looks_like_chronology_request(text):
         reply_text = await summarize_documents_for_case(command_case, command_docs, chronology=True)
-        db.add(CaseEvent(case_id=command_case.id, event_type="assistant_reply", body=reply_text))
-        db.commit()
-        return AssistantIngestOut(
-            case_id=command_case.id,
-            case_number=command_case.case_number,
-            created_case=False,
-            mode="documents-chronology",
-            created_tasks=0,
-            next_hearing_date=command_case.next_hearing_date,
-            reply=reply_text,
-        )
+        return await finalize_reply(case=command_case, reply_text=reply_text, mode="documents-chronology")
 
     if looks_like_documents_analyze_request(text):
         reply_text = await summarize_documents_for_case(command_case, command_docs, chronology=False)
-        db.add(CaseEvent(case_id=command_case.id, event_type="assistant_reply", body=reply_text))
-        db.commit()
-        return AssistantIngestOut(
-            case_id=command_case.id,
-            case_number=command_case.case_number,
-            created_case=False,
-            mode="documents-analyze",
-            created_tasks=0,
-            next_hearing_date=command_case.next_hearing_date,
-            reply=reply_text,
-        )
+        return await finalize_reply(case=command_case, reply_text=reply_text, mode="documents-analyze")
 
     if looks_like_documents_search_request(text):
         query = extract_search_query(text)
         if query:
             reply_text = search_documents(command_case, command_docs, query)
-            db.add(CaseEvent(case_id=command_case.id, event_type="assistant_reply", body=reply_text))
-            db.commit()
-            return AssistantIngestOut(
-                case_id=command_case.id,
-                case_number=command_case.case_number,
-                created_case=False,
-                mode="documents-search",
-                created_tasks=0,
-                next_hearing_date=command_case.next_hearing_date,
-                reply=reply_text,
-            )
+            return await finalize_reply(case=command_case, reply_text=reply_text, mode="documents-search")
 
     extracted_case_number = payload.preferred_case_number or extract_case_number(text)
     created_case = False
@@ -1796,7 +1763,7 @@ async def assistant_ingest_text(
             db.refresh(case)
             created_case = True
     else:
-        case = get_or_create_unsorted_case(db)
+        case = conversation.active_case or get_or_create_unsorted_case(db)
 
     created_tasks = 0
     next_hearing_date = None
@@ -1817,33 +1784,38 @@ async def assistant_ingest_text(
                 )
             except Exception:
                 reply_hearing = " ".join(reply_parts)
-        db.add(CaseEvent(case_id=case.id, event_type="assistant_reply", body=reply_hearing))
-        db.commit()
-        return AssistantIngestOut(
-            case_id=case.id,
-            case_number=case.case_number,
-            created_case=created_case,
+        return await finalize_reply(
+            case=case,
+            reply_text=reply_hearing,
             mode="hearing-parser",
+            created_case=created_case,
             created_tasks=created_tasks,
             next_hearing_date=next_hearing_date,
-            reply=reply_hearing,
+            refresh_summary=True,
         )
 
     db.add(CaseEvent(case_id=case.id, event_type="assistant_message", body=text))
     db.commit()
     mode = "message" if case.case_number != "UNSORTED" else "message-unsorted"
     try:
-        reply_text = await llm_assistant_chat_reply(text, case)
+        prompt, source_docs, citations = build_grounded_prompt(
+            db,
+            conversation=conversation,
+            user_message=text,
+            case=case,
+        )
+        reply_text = await llm_assistant_chat_reply(text, case, prompt_override=prompt)
+        if citations:
+            reply_text = reply_text.rstrip() + "\n\nИсточники:\n- " + "\n- ".join(dict.fromkeys(citations))
+        elif source_docs:
+            fallback_sources = [f"[doc:{doc.id}] {doc.filename}" for doc in source_docs[:5]]
+            reply_text = reply_text.rstrip() + "\n\nСвязанные документы:\n- " + "\n- ".join(fallback_sources)
     except Exception as exc:
         reply_text = f"Сообщение сохранено, но ответ ИИ не получен: {exc}"
-    db.add(CaseEvent(case_id=case.id, event_type="assistant_reply", body=reply_text))
-    db.commit()
-    return AssistantIngestOut(
-        case_id=case.id,
-        case_number=case.case_number,
-        created_case=created_case,
+    return await finalize_reply(
+        case=case,
+        reply_text=reply_text,
         mode=mode,
-        created_tasks=0,
-        next_hearing_date=case.next_hearing_date,
-        reply=reply_text,
+        created_case=created_case,
+        refresh_summary=True,
     )

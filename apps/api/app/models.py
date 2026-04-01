@@ -26,6 +26,7 @@ class Case(Base):
     tasks: Mapped[list["Task"]] = relationship(back_populates="case")
     documents: Mapped[list["Document"]] = relationship(back_populates="case")
     tags: Mapped[list["CaseTag"]] = relationship(back_populates="case", cascade="all, delete-orphan")
+    conversations: Mapped[list["Conversation"]] = relationship(back_populates="active_case")
 
 
 class CaseEvent(Base):
@@ -67,6 +68,7 @@ class Document(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     case: Mapped[Case] = relationship(back_populates="documents")
+    chunks: Mapped[list["DocumentChunk"]] = relationship(back_populates="document", cascade="all, delete-orphan")
 
 
 class Reminder(Base):
@@ -100,6 +102,56 @@ class PendingMovePlan(Base):
     keywords_json: Mapped[str] = mapped_column(Text, default="[]")
     doc_ids_json: Mapped[str] = mapped_column(Text, default="[]")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class Conversation(Base):
+    __tablename__ = "conversations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_key: Mapped[str] = mapped_column(String(50), unique=True, index=True)
+    title: Mapped[str] = mapped_column(String(255), default="Основной чат")
+    active_case_id: Mapped[int | None] = mapped_column(ForeignKey("cases.id", ondelete="SET NULL"), nullable=True)
+    rolling_summary: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+    active_case: Mapped[Case | None] = relationship(back_populates="conversations")
+    messages: Mapped[list["ConversationMessage"]] = relationship(
+        back_populates="conversation", cascade="all, delete-orphan"
+    )
+
+
+class ConversationMessage(Base):
+    __tablename__ = "conversation_messages"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    conversation_id: Mapped[int] = mapped_column(ForeignKey("conversations.id", ondelete="CASCADE"), index=True)
+    role: Mapped[str] = mapped_column(String(20), index=True)
+    case_id: Mapped[int | None] = mapped_column(ForeignKey("cases.id", ondelete="SET NULL"), nullable=True)
+    content: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    conversation: Mapped[Conversation] = relationship(back_populates="messages")
+    case: Mapped[Case | None] = relationship()
+
+
+class DocumentChunk(Base):
+    __tablename__ = "document_chunks"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    document_id: Mapped[int] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"), index=True)
+    case_id: Mapped[int] = mapped_column(ForeignKey("cases.id", ondelete="CASCADE"), index=True)
+    chunk_index: Mapped[int] = mapped_column(index=True)
+    page_hint: Mapped[str] = mapped_column(String(50), default="")
+    chunk_text: Mapped[str] = mapped_column(Text)
+    search_text: Mapped[str] = mapped_column(Text, default="")
+    score: Mapped[float] = mapped_column(Float, default=0.0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    document: Mapped[Document] = relationship(back_populates="chunks")
+    case: Mapped[Case] = relationship()
 
 
 class CaseEmbedding(Base):
