@@ -23,6 +23,7 @@ RUN apt-get update \
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 RUN playwright install chromium
+COPY parser_api_client.py /app/parser_api_client.py
 COPY worker.py /app/worker.py
 
 CMD ["python", "/app/worker.py"]

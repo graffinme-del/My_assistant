@@ -10,6 +10,14 @@ import httpx
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
+from parser_api_client import (
+    case_dict_from_parser_case,
+    extract_kad_pdf_urls_from_details,
+    parser_details_by_id,
+    parser_details_by_number,
+    parser_pdf_download,
+    parser_search,
+)
 
 API_BASE = os.getenv("WORKER_API_BASE", "http://api:8000").rstrip("/")
 OWNER_TOKEN = os.getenv("OWNER_TOKEN", "owner-dev-token")
@@ -18,6 +26,12 @@ COURT_SYNC_NIGHT_HOUR = int(os.getenv("COURT_SYNC_NIGHT_HOUR", "2"))
 COURT_SYNC_MAX_DOCS_PER_RUN = int(os.getenv("COURT_SYNC_MAX_DOCS_PER_RUN", "200"))
 COURT_SYNC_DELAY_SEC = int(os.getenv("COURT_SYNC_DELAY_SEC", "5"))
 COURT_SYNC_TIMEOUT_SEC = int(os.getenv("COURT_SYNC_TIMEOUT_SEC", "120"))
+# Загрузка дел через Parser-API (HTTP) вместо Playwright, если задан PARSER_API_KEY.
+_COURT_SYNC_PARSER_RAW = os.getenv("COURT_SYNC_USE_PARSER_API", "").strip().lower()
+if _COURT_SYNC_PARSER_RAW:
+    COURT_SYNC_USE_PARSER_API = _COURT_SYNC_PARSER_RAW not in ("0", "false", "no")
+else:
+    COURT_SYNC_USE_PARSER_API = bool(os.getenv("PARSER_API_KEY", "").strip())
 
 KAD_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -264,6 +278,63 @@ def search_cases_via_browser(query_type: str, query_value: str, job_id: int | No
                 time.sleep(3)
                 continue
             raise
+
+
+def _normalize_inn_digits(value: str) -> str:
+    return re.sub(r"\D+", "", value or "")
+
+
+def try_parser_search_cases(query_type: str, query_value: str, job_id: int | None) -> list[dict] | None:
+    """Если Parser-API доступен — пробуем поиск/детали без браузера. None = fallback на Playwright."""
+    if not COURT_SYNC_USE_PARSER_API:
+        return None
+    try:
+        if query_type == "card_url":
+            url = _normalize_kad_card_url(query_value)
+            rid = url.rstrip("/").split("/")[-1]
+            if not re.fullmatch(r"[a-fA-F0-9\-]+", rid):
+                return None
+            if job_id is not None:
+                report_progress(job_id, "searching", "Parser-API: детали дела по ссылке на карточку…")
+            d = parser_details_by_id(rid)
+            if d.get("Success") != 1:
+                return []
+            cases = d.get("Cases") or []
+            return [case_dict_from_parser_case(c, card_url_hint=url) for c in cases[:20]]
+
+        if query_type == "case_number":
+            qn = re.sub(r"\s+", "", (query_value or "").replace("\\", ""))
+            if job_id is not None:
+                report_progress(job_id, "searching", "Parser-API: детали по номеру дела…")
+            d = parser_details_by_number(qn)
+            if d.get("Success") != 1:
+                return []
+            cases = d.get("Cases") or []
+            return [case_dict_from_parser_case(c) for c in cases[:20]]
+
+        if query_type == "inn":
+            inn = _normalize_inn_digits(query_value)
+            if not inn:
+                return None
+            if job_id is not None:
+                report_progress(job_id, "searching", "Parser-API: поиск дел по ИНН…")
+            d = parser_search(inn=inn, inn_type="Any", page=1)
+            if d.get("Success") != 1:
+                return []
+            cases = d.get("Cases") or []
+            return [case_dict_from_parser_case(c) for c in cases[:25]]
+
+        return None
+    except Exception as exc:
+        print(f"[worker] Parser-API search fallback to browser: {exc}")
+        return None
+
+
+def search_cases_for_job(query_type: str, query_value: str, job_id: int | None = None) -> list[dict]:
+    parsed = try_parser_search_cases(query_type, query_value, job_id)
+    if parsed is not None:
+        return parsed
+    return search_cases_via_browser(query_type, query_value, job_id=job_id)
 
 
 def is_kad_junk_url(url: str) -> bool:
@@ -618,6 +689,105 @@ def download_document_via_context(context, file_url: str, _depth: int = 0) -> Pa
     return target
 
 
+def download_documents_via_parser(
+    job_id: int,
+    target_cases: list[dict],
+    preview_lines: list[str],
+    results: list[dict],
+    preferred_case_id: int | None,
+) -> tuple[int, int, int, list[str]]:
+    """Скачивание PDF по URL из ответа Parser-API (pdf_download), без Playwright."""
+    downloaded = 0
+    discovered = 0
+    failures = 0
+    lines = preview_lines[:]
+
+    for case_data in target_cases:
+        case_source_id = register_case_source(job_id, case_data)
+        rid = (case_data.get("remote_case_id") or "").strip()
+        num = (case_data.get("case_number") or "").strip()
+        card_url = case_data.get("card_url") or ""
+        report_progress(
+            job_id,
+            "opening_case",
+            f"Parser-API: запрос деталей дела {num or rid or card_url}",
+        )
+        try:
+            if rid:
+                details = parser_details_by_id(rid)
+            elif num:
+                details = parser_details_by_number(re.sub(r"\s+", "", num.replace("\\", "")))
+            else:
+                lines.append(f"- Нет CaseId/номера для {card_url}, пропуск.")
+                failures += 1
+                continue
+        except Exception as exc:
+            failures += 1
+            lines.append(f"- Parser-API details: {exc}")
+            continue
+
+        if details.get("Success") != 1:
+            failures += 1
+            lines.append(f"- Parser-API: Success != 1 для {num or rid}")
+            continue
+
+        urls = extract_kad_pdf_urls_from_details(details)
+        discovered += len(urls)
+        if not urls:
+            lines.append(
+                f"- У дела {num or rid} по Parser-API не найдено PDF-ссылок в карточке "
+                f"(возможна структура без PdfDocument в ответе)."
+            )
+            continue
+
+        effective_preferred_id = preferred_case_id
+        if not effective_preferred_id and num:
+            cid = ensure_case_id(num)
+            if cid:
+                effective_preferred_id = cid
+
+        for doc_url in urls[:COURT_SYNC_MAX_DOCS_PER_RUN]:
+            try:
+                report_progress(job_id, "downloading", f"Parser-API pdf_download: {doc_url[:120]}…")
+                raw = parser_pdf_download(doc_url)
+                fn = doc_url.rstrip("/").split("/")[-1] or f"kad-{int(time.time())}.pdf"
+                if not fn.lower().endswith(".pdf"):
+                    fn = f"{fn}.pdf"
+                safe_name = re.sub(r"[^\w.\-а-яА-Я]", "_", fn)
+                target = Path(tempfile.mkdtemp()) / safe_name
+                target.write_bytes(raw)
+                ingest_result = ingest_downloaded_file_to_case(target, effective_preferred_id)
+                local_document = ingest_result.get("document") or {}
+                doc = {
+                    "remote_document_id": doc_url[:500],
+                    "case_source_id": case_source_id,
+                    "local_document_id": local_document.get("id"),
+                    "title": fn,
+                    "filename": local_document.get("filename") or target.name,
+                    "file_url": doc_url,
+                    "status": "downloaded",
+                }
+                register_document_source(job_id, doc)
+                downloaded += 1
+            except Exception as exc:
+                failures += 1
+                register_document_source(
+                    job_id,
+                    {
+                        "remote_document_id": doc_url[:500],
+                        "case_source_id": case_source_id,
+                        "title": doc_url[:200],
+                        "filename": "",
+                        "file_url": doc_url,
+                        "status": "failed",
+                    },
+                )
+                lines.append(f"- Не удалось скачать через Parser-API {doc_url[:100]}: {exc}")
+            time.sleep(max(1, COURT_SYNC_DELAY_SEC))
+
+    return downloaded, discovered, failures, lines
+
+
 def process_job(job: dict) -> None:
     job_id = int(job["id"])
     query_type = str(job["query_type"])
@@ -625,7 +795,7 @@ def process_job(job: dict) -> None:
     run_mode = str(job["run_mode"])
     report_progress(job_id, "searching", f'Ищу в КАД: {query_type}="{query_value}"')
     try:
-        results = search_cases_via_browser(query_type, query_value, job_id=job_id)
+        results = search_cases_for_job(query_type, query_value, job_id=job_id)
     except PlaywrightTimeoutError:
         complete_job(job_id, "needs_manual_step", "КАД не ответил вовремя. Нужен повторный запуск или ручная проверка.")
         return
@@ -677,6 +847,37 @@ def process_job(job: dict) -> None:
     discovered = 0
     failures = 0
     lines = preview_lines[:]
+
+    if COURT_SYNC_USE_PARSER_API and run_mode == "download":
+        downloaded, discovered, failures, lines = download_documents_via_parser(
+            job_id, target_cases, preview_lines, results, preferred_case_id
+        )
+        lines.append(
+            f"Итог: найдено дел {len(results)}, найдено документов {discovered}, "
+            f"скачано {downloaded}, ошибок {failures} (режим Parser-API)."
+        )
+        if run_mode != "preview" and downloaded == 0:
+            lines.append(
+                "Автоскачивание через Parser-API не принесло файлов. "
+                "Проверьте лимит ключа, статус сервиса arbitr или отключите COURT_SYNC_USE_PARSER_API для режима браузера."
+            )
+            final_status = "needs_manual_step"
+        else:
+            final_status = "done" if failures == 0 else "needs_manual_step"
+        complete_job(
+            job_id,
+            final_status,
+            "\n".join(lines),
+            {
+                "cases_found": len(results),
+                "documents_found": discovered,
+                "downloaded": downloaded,
+                "failures": failures,
+                "backend": "parser_api",
+            },
+        )
+        return
+
     nav_ms = max(60_000, COURT_SYNC_TIMEOUT_SEC * 1000)
     for case_data in target_cases:
         case_source_id = register_case_source(job_id, case_data)
@@ -763,6 +964,7 @@ def process_job(job: dict) -> None:
 def main() -> None:
     env = os.getenv("APP_ENV", "development")
     print(f"Worker started in {env} mode.")
+    print(f"COURT_SYNC_USE_PARSER_API={COURT_SYNC_USE_PARSER_API} (скачивание без Playwright, если true и задан PARSER_API_KEY).")
     last_nightly_date = None
     while True:
         try:
