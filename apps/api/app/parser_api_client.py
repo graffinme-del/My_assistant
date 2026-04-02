@@ -105,11 +105,18 @@ def _request(endpoint: str, params: dict[str, Any]) -> dict[str, Any]:
 
 
 def parser_usage_stat() -> dict[str, Any]:
-    """Текущий лимит и расход запросов (JSON по ключу)."""
+    """Текущий лимит и расход запросов (JSON по ключу).
+
+    Провайдер иногда отдаёт массив (например [] для нового ключа) — оборачиваем в dict,
+    чтобы FastAPI не падал на аннотации ответа.
+    """
     with httpx.Client(timeout=30.0) as client:
         r = client.get(STAT_URL, params={"key": _api_key()})
         r.raise_for_status()
-        return r.json()
+        data = r.json()
+    if isinstance(data, dict):
+        return data
+    return {"stat": data}
 
 
 def parser_service_status_json() -> dict[str, Any]:

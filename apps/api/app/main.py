@@ -1,5 +1,6 @@
 from datetime import datetime, time, timedelta
 import json
+from typing import Any
 import re
 import shutil
 from pathlib import Path
@@ -1187,7 +1188,7 @@ def internal_parser_api_test(
 
 
 @app.get("/internal/parser-api/usage")
-def internal_parser_api_usage(user_role: str = Depends(require_user)) -> dict:
+def internal_parser_api_usage(user_role: str = Depends(require_user)) -> dict[str, Any]:
     """Расход лимита Parser-API (как https://parser-api.com/stat/?key=...). Только owner."""
     if user_role != "owner":
         raise HTTPException(status_code=403, detail="Owner token required")
