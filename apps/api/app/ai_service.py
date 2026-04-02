@@ -19,6 +19,7 @@ import pypdfium2 as pdfium
 import pytesseract
 from sqlalchemy.orm import Session
 
+from .case_number import normalize_arbitr_case_number
 from .config import settings
 from .models import Case, CaseEvent, CaseTag, Task
 
@@ -493,7 +494,7 @@ def extract_case_number(text: str) -> str | None:
             raw = m.group(1) if m.lastindex else m.group(0)
             raw = raw.replace(" ", "").replace("\n", "")
             raw = raw.replace("\\", "")
-            return raw
+            return normalize_arbitr_case_number(raw)
     return None
 
 

@@ -33,10 +33,10 @@ from .ai_service import (
     find_case_by_hint,
     looks_like_hearing_note,
     looks_like_case_tag_update,
-    normalize_arbitr_case_number,
     parse_case_tag_update,
     parse_hearing_note,
 )
+from .case_number import normalize_arbitr_case_number
 from .court_kad_search import (
     looks_like_court_download_status_question,
     looks_like_court_search_command,

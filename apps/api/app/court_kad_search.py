@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from .ai_service import normalize_arbitr_case_number
+from .case_number import normalize_arbitr_case_number
 
 
 @dataclass
