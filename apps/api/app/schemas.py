@@ -179,6 +179,10 @@ class CourtSyncClaimOut(BaseModel):
     job: CourtSyncJobOut | None = None
 
 
+class CourtSyncGetOut(BaseModel):
+    job: CourtSyncJobOut
+
+
 class CourtSyncProgressIn(BaseModel):
     step: str
     message: str = ""

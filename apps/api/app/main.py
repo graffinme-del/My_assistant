@@ -84,6 +84,7 @@ from .schemas import (
     BulkIngestOut,
     CourtSyncCaseSourceIn,
     CourtSyncClaimOut,
+    CourtSyncGetOut,
     CourtSyncCompleteIn,
     CourtSyncDocumentSourceIn,
     CourtSyncJobOut,
@@ -1005,6 +1006,44 @@ def internal_claim_court_sync_job(
     return CourtSyncClaimOut(job=job)
 
 
+@app.get("/internal/court-sync/jobs/{job_id}", response_model=CourtSyncGetOut)
+def internal_get_court_sync_job(
+    job_id: int,
+    db: Session = Depends(get_db),
+    user_role: str = Depends(require_user),
+) -> CourtSyncGetOut:
+    if user_role != "owner":
+        raise HTTPException(status_code=403, detail="Owner token required")
+    job = db.query(CourtSyncJob).filter(CourtSyncJob.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return CourtSyncGetOut(job=job)
+
+
+@app.post("/internal/court-sync/ensure-case")
+def internal_ensure_case_for_number(
+    case_number: str = Form(...),
+    db: Session = Depends(get_db),
+    user_role: str = Depends(require_user),
+) -> dict[str, int]:
+    if user_role != "owner":
+        raise HTTPException(status_code=403, detail="Owner token required")
+    normalized = case_number.replace(" ", "").replace("\n", "")
+    case = db.query(Case).filter(Case.case_number == normalized).first()
+    if not case:
+        case = Case(
+            title=f"Дело {normalized}",
+            court_name="неизвестно",
+            case_number=normalized,
+            status="analysis",
+            stage="analysis",
+        )
+        db.add(case)
+        db.commit()
+        db.refresh(case)
+    return {"case_id": case.id}
+
+
 @app.post("/internal/court-sync/nightly-enqueue")
 def internal_enqueue_nightly_sync(
     db: Session = Depends(get_db), user_role: str = Depends(require_user)
@@ -1646,6 +1685,14 @@ def handle_court_sync_chat_command(db: Session, text: str, user_role: str) -> st
         return format_sync_status(db)
     if "что нового скачано за ночь" in lowered:
         return format_nightly_report(db)
+    m_job = re.search(r"(?:отчет|отчёт)\s+(?:по\s+)?(?:задач[еаи])\s*#?(\d+)", lowered)
+    if m_job:
+        job_id = int(m_job.group(1))
+        job = db.query(CourtSyncJob).filter(CourtSyncJob.id == job_id).first()
+        if not job:
+            return f"Задача #{job_id} не найдена."
+        text = job.report_text.strip() or "(отчет пуст)"
+        return f"Отчет по задаче #{job.id} ({job.status}, шаг: {job.step}):\n{text}"
 
     request = parse_court_search_request(text)
     if not request:

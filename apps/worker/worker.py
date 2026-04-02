@@ -84,6 +84,26 @@ def ingest_downloaded_file(path: Path) -> dict:
         return api_post("/documents/ingest", files={"file": (path.name, f, "application/octet-stream")})
 
 
+def ensure_case_id(case_number: str) -> int | None:
+    try:
+        resp = api_post("/internal/court-sync/ensure-case", data={"case_number": case_number})
+        return int(resp.get("case_id"))
+    except Exception:
+        return None
+
+
+def ingest_downloaded_file_to_case(path: Path, case_id: int | None) -> dict:
+    data = {}
+    if case_id:
+        data["preferred_case_id"] = str(case_id)
+    with path.open("rb") as f:
+        return api_post(
+            "/documents/ingest",
+            files={"file": (path.name, f, "application/octet-stream")},
+            data=data,
+        )
+
+
 def _fill_search_input(page, label_text: str, value: str) -> bool:
     candidates = [
         f"text={label_text}",
@@ -259,12 +279,14 @@ def process_job(job: dict) -> None:
 
     target_cases = results
     if query_type == "case_number":
+        preferred_case_id = ensure_case_id(query_value)
         exact = [item for item in results if item.get("case_number", "").replace(" ", "").lower() == query_value.lower()]
         if exact:
             target_cases = exact
         else:
             target_cases = results[:1]
     else:
+        preferred_case_id = None
         target_cases = results[:10]
 
     downloaded = 0
@@ -288,7 +310,7 @@ def process_job(job: dict) -> None:
             try:
                 report_progress(job_id, "downloading", f'Скачиваю: {doc.get("title") or doc.get("file_url")}')
                 path = download_document(doc["file_url"])
-                ingest_result = ingest_downloaded_file(path)
+                ingest_result = ingest_downloaded_file_to_case(path, preferred_case_id)
                 local_document = ingest_result.get("document") or {}
                 doc["case_source_id"] = case_source_id
                 doc["local_document_id"] = local_document.get("id")
@@ -313,7 +335,11 @@ def process_job(job: dict) -> None:
             time.sleep(max(1, COURT_SYNC_DELAY_SEC))
 
     lines.append(f"Итог: найдено дел {len(results)}, найдено документов {discovered}, скачано {downloaded}, ошибок {failures}.")
-    final_status = "done" if failures == 0 else "needs_manual_step"
+    if run_mode != "preview" and downloaded == 0:
+        lines.append("Автоскачивание не принесло файлов. Скорее всего, КАД требует ручной шаг (капча/подтверждение) или структура документов не распознана.")
+        final_status = "needs_manual_step"
+    else:
+        final_status = "done" if failures == 0 else "needs_manual_step"
     complete_job(
         job_id,
         final_status,
