@@ -266,6 +266,40 @@ def search_cases_via_browser(query_type: str, query_value: str, job_id: int | No
             raise
 
 
+def is_kad_junk_url(url: str) -> bool:
+    """Статика, капча, шрифты — не судебные документы (иначе «скачиваются» pravocaptcha.css и т.п.)."""
+    u = (url or "").lower()
+    if not u:
+        return True
+    junk = (
+        "pravocaptcha",
+        "captcha",
+        "/favicon",
+        ".css",
+        ".js",
+        ".map",
+        ".woff",
+        ".woff2",
+        ".ttf",
+        "/fonts/",
+        "/bundles/",
+        "fingerprint",
+        "jquery",
+        "bootstrap",
+        "metrika",
+        "analytics",
+        "yastatic",
+        "/static/",
+        "/scripts/",
+        "/content/scripts",
+    )
+    if any(s in u for s in junk):
+        return True
+    if re.search(r"\.(png|gif|jpg|jpeg|svg|ico|webp)(\?|$|#)", u):
+        return True
+    return False
+
+
 def extract_case_number_from_page(page) -> str | None:
     try:
         html = page.content()
@@ -280,30 +314,39 @@ def extract_case_number_from_page(page) -> str | None:
 def _href_looks_like_kad_document(href: str) -> bool:
     if not href or href.startswith("#") or href.lower().startswith("javascript:"):
         return False
+    if is_kad_junk_url(href):
+        return False
     h = href.lower()
     if re.search(r"/card/[a-f0-9\-]{30,}/?$", h) and "pdf" not in h and "document" not in h:
         return False
+    # Не использовать общее «kad/» — на домене полно статики; только признаки выдачи/файла дела.
     return any(
         k in h
         for k in (
             "pdf",
-            "document",
-            "download",
             "pdfdocument",
             "getpdf",
-            "getfile",
+            "document",
+            "download",
             "viewdocument",
             "attachment",
-            "content",
-            "file",
-            "kad/",
-            "показать",
+            "getfile",
             "showdocument",
-            "handler",
-            "aspx",
+            "content",
             "/pdf/",
             "electronic",
             "электрон",
+            "судебн",
+            "определен",
+            "постановлен",
+            "handler",
+            ".pdf",
+            ".doc",
+            ".docx",
+            ".xls",
+            ".xlsx",
+            ".rtf",
+            "aspx",
         )
     )
 
@@ -352,6 +395,8 @@ def _append_anchor_docs_from_root(root, card_url: str, seen: set[str], docs: lis
         if not (_href_looks_like_kad_document(href) or _anchor_text_hints_document(text)):
             continue
         full_url = urljoin(card_url, href)
+        if is_kad_junk_url(full_url):
+            continue
         if full_url in seen:
             continue
         seen.add(full_url)
@@ -371,6 +416,8 @@ def extract_kad_document_urls_from_html(html: str, card_url: str) -> list[dict]:
     out: list[dict] = []
     for m in re.finditer(r"(https://kad\.arbitr\.ru/[^\"\'\s<>]+)", html, flags=re.IGNORECASE):
         u = m.group(1).rstrip("\\.,);")
+        if is_kad_junk_url(u):
+            continue
         if not _href_looks_like_kad_document(u):
             continue
         if u in seen:
@@ -382,6 +429,8 @@ def extract_kad_document_urls_from_html(html: str, card_url: str) -> list[dict]:
         html,
     ):
         u = urljoin("https://kad.arbitr.ru", m.group(1))
+        if is_kad_junk_url(u):
+            continue
         if not _href_looks_like_kad_document(u):
             continue
         if u in seen:
@@ -444,6 +493,8 @@ def open_kad_card_and_collect_docs(page, card_url: str, nav_ms: int) -> list[dic
 
 def download_document_via_context(context, file_url: str) -> Path:
     """Тот же storage state, что и у страницы КАД — иначе часто 403 без сессии."""
+    if is_kad_junk_url(file_url):
+        raise RuntimeError("URL отфильтрован как статика/капча, не документ дела")
     response = context.request.get(
         file_url,
         timeout=max(30_000, COURT_SYNC_TIMEOUT_SEC * 1000),
@@ -451,6 +502,13 @@ def download_document_via_context(context, file_url: str) -> Path:
     )
     if not response.ok:
         raise RuntimeError(f"Не удалось скачать файл: HTTP {response.status}")
+    body = response.body()
+    ctype = (response.headers.get("content-type") or "").split(";")[0].strip().lower()
+    if ctype in ("text/css", "text/javascript", "application/javascript", "application/x-javascript"):
+        raise RuntimeError(f"Вместо документа пришёл {ctype} (статика)")
+    head = body[:80].lower().lstrip()
+    if head.startswith(b"<!doctype") or head.startswith(b"<html"):
+        raise RuntimeError("Вместо файла пришла HTML-страница (капча или редирект)")
     filename = ""
     cd = response.headers.get("content-disposition", "")
     match = re.search(r'filename="?([^";]+)"?', cd)
@@ -458,9 +516,14 @@ def download_document_via_context(context, file_url: str) -> Path:
         filename = match.group(1)
     if not filename:
         filename = file_url.rstrip("/").split("/")[-1] or f"kad-{int(time.time())}.bin"
+    if is_kad_junk_url(filename):
+        raise RuntimeError("Имя файла похоже на статику, не на документ")
+    fn_low = filename.lower()
+    if fn_low.endswith((".css", ".js", ".map", ".woff", ".woff2")):
+        raise RuntimeError("Подозрительное расширение файла (не документ дела)")
     safe_name = re.sub(r"[^\w.\-а-яА-Я]", "_", filename)
     target = Path(tempfile.mkdtemp()) / safe_name
-    target.write_bytes(response.body())
+    target.write_bytes(body)
     return target
 
 
