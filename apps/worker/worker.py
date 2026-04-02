@@ -463,6 +463,59 @@ def collect_document_links_from_playwright_page(page, card_url: str) -> list[dic
 KAD_TAB_LABELS = ("Документы", "Судебные акты", "Электронное дело", "Материалы", "Ход дела")
 
 
+def merge_popup_pdf_urls(page, card_url: str, nav_ms: int, seen: set[str], docs: list[dict], max_clicks: int = 22) -> None:
+    """КАД часто открывает PDF в новой вкладке — перехватываем URL после клика по ссылке."""
+    clicks = 0
+    for frame in page.frames:
+        try:
+            anchors = frame.locator("a")
+            n = min(anchors.count(), 120)
+        except Exception:
+            continue
+        for i in range(n):
+            if clicks >= max_clicks:
+                return
+            link = anchors.nth(i)
+            try:
+                href = (link.get_attribute("href") or "").strip()
+                target = (link.get_attribute("target") or "").lower()
+                text = (link.inner_text() or "").strip()
+            except Exception:
+                continue
+            if not href or href.startswith("#") or "javascript:" in href.lower():
+                continue
+            if is_kad_junk_url(href):
+                continue
+            if not (target == "_blank" or _anchor_text_hints_document(text) or _href_looks_like_kad_document(href)):
+                continue
+            full_url = urljoin(card_url, href)
+            if full_url in seen:
+                continue
+            try:
+                with page.expect_popup(timeout=8000) as pop_ev:
+                    link.click(timeout=4000)
+                popup = pop_ev.value
+                popup.wait_for_load_state("domcontentloaded", timeout=nav_ms)
+                popup.wait_for_timeout(2000)
+                final = (popup.url or "").strip()
+                popup.close()
+            except Exception:
+                continue
+            if not final or is_kad_junk_url(final) or final in seen:
+                continue
+            seen.add(final)
+            docs.append(
+                {
+                    "remote_document_id": final[:500],
+                    "title": text[:500] or final,
+                    "filename": "",
+                    "file_url": final,
+                }
+            )
+            clicks += 1
+            page.wait_for_timeout(600)
+
+
 def open_kad_card_and_collect_docs(page, card_url: str, nav_ms: int) -> list[dict]:
     """По очереди открываем вкладки карточки и собираем ссылки (раньше кликали только по первой удачной)."""
     merged: list[dict] = []
@@ -479,6 +532,7 @@ def open_kad_card_and_collect_docs(page, card_url: str, nav_ms: int) -> list[dic
                 if u not in seen:
                     seen.add(u)
                     merged.append(d)
+            merge_popup_pdf_urls(page, card_url, nav_ms, seen, merged)
         except Exception:
             continue
     if not merged:
@@ -486,15 +540,36 @@ def open_kad_card_and_collect_docs(page, card_url: str, nav_ms: int) -> list[dic
             page.goto(card_url, wait_until="domcontentloaded", timeout=nav_ms)
             page.wait_for_timeout(5000)
             merged = collect_document_links_from_playwright_page(page, card_url)
+            seen = {d["file_url"] for d in merged}
+            merge_popup_pdf_urls(page, card_url, nav_ms, seen, merged)
         except Exception:
             merged = []
     return merged
 
 
-def download_document_via_context(context, file_url: str) -> Path:
+def _extract_pdf_url_from_viewer_html(html: str) -> str | None:
+    """Если пришла HTML-страница просмотрщика — пробуем вытащить прямую ссылку на PDF."""
+    chunk = html[:300000]
+    patterns = (
+        r'src="(https://kad\.arbitr\.ru[^"]+\.pdf[^"]*)"',
+        r'href="(https://kad\.arbitr\.ru[^"]+\.pdf[^"]*)"',
+        r"src='(https://kad\.arbitr\.ru[^']+\.pdf[^']*)'",
+        r'"(https://kad\.arbitr\.ru/[Pp]df[^"]+)"',
+        r"url\s*:\s*['\"](https://kad\.arbitr\.ru[^'\"]+)['\"]",
+    )
+    for p in patterns:
+        m = re.search(p, chunk, flags=re.IGNORECASE)
+        if m and not is_kad_junk_url(m.group(1)):
+            return m.group(1)
+    return None
+
+
+def download_document_via_context(context, file_url: str, _depth: int = 0) -> Path:
     """Тот же storage state, что и у страницы КАД — иначе часто 403 без сессии."""
     if is_kad_junk_url(file_url):
         raise RuntimeError("URL отфильтрован как статика/капча, не документ дела")
+    if _depth > 3:
+        raise RuntimeError("Слишком много переходов по вложенным ссылкам")
     response = context.request.get(
         file_url,
         timeout=max(30_000, COURT_SYNC_TIMEOUT_SEC * 1000),
@@ -504,11 +579,27 @@ def download_document_via_context(context, file_url: str) -> Path:
         raise RuntimeError(f"Не удалось скачать файл: HTTP {response.status}")
     body = response.body()
     ctype = (response.headers.get("content-type") or "").split(";")[0].strip().lower()
+
+    if len(body) >= 4 and body[:4] == b"%PDF":
+        filename = file_url.rstrip("/").split("/")[-1] or f"kad-{int(time.time())}.pdf"
+        if not filename.lower().endswith(".pdf"):
+            filename = f"{filename}.pdf"
+        safe_name = re.sub(r"[^\w.\-а-яА-Я]", "_", filename)
+        target = Path(tempfile.mkdtemp()) / safe_name
+        target.write_bytes(body)
+        return target
+
     if ctype in ("text/css", "text/javascript", "application/javascript", "application/x-javascript"):
         raise RuntimeError(f"Вместо документа пришёл {ctype} (статика)")
-    head = body[:80].lower().lstrip()
+
+    head = body[:120].lower().lstrip()
     if head.startswith(b"<!doctype") or head.startswith(b"<html"):
-        raise RuntimeError("Вместо файла пришла HTML-страница (капча или редирект)")
+        if _depth < 3:
+            nested = _extract_pdf_url_from_viewer_html(body.decode("utf-8", errors="ignore"))
+            if nested and nested != file_url:
+                return download_document_via_context(context, nested, _depth + 1)
+        raise RuntimeError("Вместо файла пришла HTML без распознанной ссылки на PDF (просмотрщик или капча)")
+
     filename = ""
     cd = response.headers.get("content-disposition", "")
     match = re.search(r'filename="?([^";]+)"?', cd)
