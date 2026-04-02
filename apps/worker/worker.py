@@ -17,7 +17,7 @@ COURT_SYNC_ENABLED = os.getenv("COURT_SYNC_ENABLED", "true").lower() == "true"
 COURT_SYNC_NIGHT_HOUR = int(os.getenv("COURT_SYNC_NIGHT_HOUR", "2"))
 COURT_SYNC_MAX_DOCS_PER_RUN = int(os.getenv("COURT_SYNC_MAX_DOCS_PER_RUN", "200"))
 COURT_SYNC_DELAY_SEC = int(os.getenv("COURT_SYNC_DELAY_SEC", "5"))
-COURT_SYNC_TIMEOUT_SEC = int(os.getenv("COURT_SYNC_TIMEOUT_SEC", "60"))
+COURT_SYNC_TIMEOUT_SEC = int(os.getenv("COURT_SYNC_TIMEOUT_SEC", "120"))
 
 
 def api_post(path: str, json_payload: dict | None = None, files=None, data=None) -> dict:
@@ -137,6 +137,38 @@ def _fill_search_input(page, label_text: str, value: str) -> bool:
     return False
 
 
+def _normalize_kad_card_url(value: str) -> str:
+    raw = (value or "").strip().split("?")[0].rstrip("/")
+    if not raw:
+        return ""
+    if not raw.lower().startswith("http"):
+        raw = "https://" + raw.lstrip("/")
+    return raw
+
+
+def parse_direct_card_url(text: str) -> str | None:
+    """Если в строке есть ссылка на карточку дела КАД — вернуть нормализованный URL."""
+    m = re.search(r"(https?://kad\.arbitr\.ru/Card/[a-fA-F0-9\-]+)", (text or "").strip())
+    return _normalize_kad_card_url(m.group(1)) if m else None
+
+
+def result_list_from_card_url(card_url: str) -> list[dict]:
+    card_url = _normalize_kad_card_url(card_url)
+    if not card_url or "/Card/" not in card_url:
+        return []
+    rid = card_url.rstrip("/").split("/")[-1]
+    return [
+        {
+            "remote_case_id": rid,
+            "card_url": card_url,
+            "case_number": "",
+            "title": f"Карточка {rid}",
+            "court_name": "",
+            "participants": [],
+        }
+    ]
+
+
 def _collect_case_results(page) -> list[dict]:
     links = page.locator("a[href*='/Card/']")
     seen: set[str] = set()
@@ -165,11 +197,24 @@ def _collect_case_results(page) -> list[dict]:
     return results
 
 
-def search_cases_via_browser(query_type: str, query_value: str) -> list[dict]:
+def _wait_for_kad_search_results(page, timeout_ms: int) -> None:
+    """КАД — SPA; networkidle часто не наступает. Ждём появления ссылок на карточки или запасной таймаут."""
+    try:
+        page.wait_for_selector("a[href*='/Card/']", timeout=timeout_ms)
+    except PlaywrightTimeoutError:
+        try:
+            page.wait_for_load_state("load", timeout=min(timeout_ms, 60_000))
+        except PlaywrightTimeoutError:
+            pass
+        page.wait_for_timeout(4000)
+
+
+def _search_cases_once(query_type: str, query_value: str) -> list[dict]:
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
-        page.goto("https://kad.arbitr.ru/", wait_until="domcontentloaded", timeout=COURT_SYNC_TIMEOUT_SEC * 1000)
+        nav_timeout = max(60_000, COURT_SYNC_TIMEOUT_SEC * 1000)
+        page.goto("https://kad.arbitr.ru/", wait_until="domcontentloaded", timeout=nav_timeout)
         page.wait_for_timeout(2500)
         if query_type == "case_number":
             ok = _fill_search_input(page, "Номер дела", query_value)
@@ -179,19 +224,37 @@ def search_cases_via_browser(query_type: str, query_value: str) -> list[dict]:
             browser.close()
             raise RuntimeError("Не удалось найти поле поиска на странице КАД.")
         page.get_by_text("Найти").first.click()
-        page.wait_for_timeout(5000)
-        page.wait_for_load_state("networkidle", timeout=COURT_SYNC_TIMEOUT_SEC * 1000)
+        page.wait_for_timeout(2000)
+        _wait_for_kad_search_results(page, nav_timeout)
         results = _collect_case_results(page)
         browser.close()
         return results
 
 
+def search_cases_via_browser(query_type: str, query_value: str) -> list[dict]:
+    if query_type == "card_url":
+        return result_list_from_card_url(query_value)
+    direct = parse_direct_card_url(query_value)
+    if direct:
+        return result_list_from_card_url(direct)
+
+    for attempt in range(2):
+        try:
+            return _search_cases_once(query_type, query_value)
+        except PlaywrightTimeoutError:
+            if attempt == 0:
+                time.sleep(3)
+                continue
+            raise
+
+
 def collect_case_documents(card_url: str) -> list[dict]:
+    nav_ms = max(60_000, COURT_SYNC_TIMEOUT_SEC * 1000)
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(accept_downloads=True)
         page = context.new_page()
-        page.goto(card_url, wait_until="domcontentloaded", timeout=COURT_SYNC_TIMEOUT_SEC * 1000)
+        page.goto(card_url, wait_until="domcontentloaded", timeout=nav_ms)
         page.wait_for_timeout(3500)
         for tab_label in ["Документы", "Судебные акты", "Электронное дело"]:
             try:

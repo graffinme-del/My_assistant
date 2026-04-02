@@ -1720,7 +1720,11 @@ def handle_court_sync_chat_command(db: Session, text: str, user_role: str) -> st
             f'({request.query_type}). Создана задача синхронизации #{job.id}.'
         )
 
-    run_mode = "download" if "скачай документы" in lowered else "preview"
+    run_mode = (
+        "download"
+        if ("скачай документы" in lowered or request.query_type == "card_url")
+        else "preview"
+    )
     job = create_sync_job(
         db,
         query_type=request.query_type,

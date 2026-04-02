@@ -31,6 +31,10 @@ def parse_court_search_request(text: str) -> CourtSearchRequest | None:
     raw = normalize_query_value(text)
     lowered = raw.lower()
 
+    m_card_url = re.search(r"(https?://kad\.arbitr\.ru/Card/[a-fA-F0-9\-]+)", raw, flags=re.IGNORECASE)
+    if m_card_url:
+        return CourtSearchRequest(query_type="card_url", query_value=m_card_url.group(1).split("?")[0].rstrip("/"))
+
     m_case = re.search(r"(?:дел[ауо]?|дела)\s+([АA]\d{1,4}-\d{1,7}/\d{2,4}|\d{1,2}-\d{1,7}/\d{2,4})", raw, flags=re.IGNORECASE)
     case_markers = [
         "скачай документы дела",
@@ -76,6 +80,8 @@ def parse_court_search_request(text: str) -> CourtSearchRequest | None:
 
 def looks_like_court_search_command(text: str) -> bool:
     lowered = text.lower()
+    if "kad.arbitr.ru" in lowered and "/card/" in lowered:
+        return True
     return any(
         marker in lowered
         for marker in [
