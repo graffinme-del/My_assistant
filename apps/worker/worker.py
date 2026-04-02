@@ -298,6 +298,12 @@ def _href_looks_like_kad_document(href: str) -> bool:
             "file",
             "kad/",
             "показать",
+            "showdocument",
+            "handler",
+            "aspx",
+            "/pdf/",
+            "electronic",
+            "электрон",
         )
     )
 
@@ -321,22 +327,17 @@ def _anchor_text_hints_document(text: str) -> bool:
     )
 
 
-def collect_document_links_from_page(page, card_url: str) -> list[dict]:
+def _append_anchor_docs_from_root(root, card_url: str, seen: set[str], docs: list[dict]) -> None:
+    """root — Page или Frame."""
     try:
-        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        root.evaluate("window.scrollTo(0, document.body.scrollHeight)")
     except Exception:
         pass
-    page.wait_for_timeout(2000)
     try:
-        page.evaluate("window.scrollTo(0, 0)")
+        anchors = root.locator("a")
+        n = min(anchors.count(), 800)
     except Exception:
-        pass
-    page.wait_for_timeout(1500)
-
-    anchors = page.locator("a")
-    docs: list[dict] = []
-    seen: set[str] = set()
-    n = min(anchors.count(), 800)
+        return
     for idx in range(n):
         link = anchors.nth(idx)
         try:
@@ -362,7 +363,83 @@ def collect_document_links_from_page(page, card_url: str) -> list[dict]:
                 "file_url": full_url,
             }
         )
+
+
+def extract_kad_document_urls_from_html(html: str, card_url: str) -> list[dict]:
+    """Дополнительно вытаскиваем ссылки из разметки/скриптов (часть UI КАД не в обычных <a>)."""
+    seen: set[str] = set()
+    out: list[dict] = []
+    for m in re.finditer(r"(https://kad\.arbitr\.ru/[^\"\'\s<>]+)", html, flags=re.IGNORECASE):
+        u = m.group(1).rstrip("\\.,);")
+        if not _href_looks_like_kad_document(u):
+            continue
+        if u in seen:
+            continue
+        seen.add(u)
+        out.append({"remote_document_id": u[:500], "title": "", "filename": "", "file_url": u})
+    for m in re.finditer(
+        r'(?:href|src)=["\'](/[^"\']*(?:[Pp]df|[Dd]ocument|[Dd]ownload|[Cc]ontent|[Ff]ile|[Kk]ad)[^"\']*)["\']',
+        html,
+    ):
+        u = urljoin("https://kad.arbitr.ru", m.group(1))
+        if not _href_looks_like_kad_document(u):
+            continue
+        if u in seen:
+            continue
+        seen.add(u)
+        out.append({"remote_document_id": u[:500], "title": "", "filename": "", "file_url": u})
+    return out
+
+
+def collect_document_links_from_playwright_page(page, card_url: str) -> list[dict]:
+    """Все фреймы (в т.ч. iframe) + вырезка URL из HTML."""
+    seen: set[str] = set()
+    docs: list[dict] = []
+    for frame in page.frames:
+        try:
+            _append_anchor_docs_from_root(frame, card_url, seen, docs)
+        except Exception:
+            continue
+    try:
+        html = page.content()
+        for item in extract_kad_document_urls_from_html(html, card_url):
+            if item["file_url"] not in seen:
+                seen.add(item["file_url"])
+                docs.append(item)
+    except Exception:
+        pass
     return docs
+
+
+KAD_TAB_LABELS = ("Документы", "Судебные акты", "Электронное дело", "Материалы", "Ход дела")
+
+
+def open_kad_card_and_collect_docs(page, card_url: str, nav_ms: int) -> list[dict]:
+    """По очереди открываем вкладки карточки и собираем ссылки (раньше кликали только по первой удачной)."""
+    merged: list[dict] = []
+    seen: set[str] = set()
+    for label in KAD_TAB_LABELS:
+        try:
+            page.goto(card_url, wait_until="domcontentloaded", timeout=nav_ms)
+            page.wait_for_timeout(2000)
+            page.get_by_text(label, exact=False).first.click(timeout=5000)
+            page.wait_for_timeout(4000)
+            chunk = collect_document_links_from_playwright_page(page, card_url)
+            for d in chunk:
+                u = d["file_url"]
+                if u not in seen:
+                    seen.add(u)
+                    merged.append(d)
+        except Exception:
+            continue
+    if not merged:
+        try:
+            page.goto(card_url, wait_until="domcontentloaded", timeout=nav_ms)
+            page.wait_for_timeout(5000)
+            merged = collect_document_links_from_playwright_page(page, card_url)
+        except Exception:
+            merged = []
+    return merged
 
 
 def download_document_via_context(context, file_url: str) -> Path:
@@ -403,7 +480,16 @@ def process_job(job: dict) -> None:
         return
 
     if not results:
-        complete_job(job_id, "done", f'По запросу {query_type}="{query_value}" дела не найдены.', {"cases_found": 0})
+        msg = f'По запросу {query_type}="{query_value}" дела не найдены в выдаче КАД.'
+        if run_mode == "download":
+            complete_job(
+                job_id,
+                "needs_manual_step",
+                msg + " Проверьте номер дела на сайте kad.arbitr.ru или откройте карточку по прямой ссылке.",
+                {"cases_found": 0},
+            )
+        else:
+            complete_job(job_id, "done", msg, {"cases_found": 0})
         return
 
     preview_lines = [f'Найдено дел: {len(results)} по запросу {query_type}="{query_value}".']
@@ -444,7 +530,10 @@ def process_job(job: dict) -> None:
         report_progress(job_id, "opening_case", f"Открываю карточку (одна сессия для страницы и скачивания): {card_url}")
         effective_preferred_id = preferred_case_id
         with sync_playwright() as pw:
-            browser = pw.chromium.launch(headless=True)
+            browser = pw.chromium.launch(
+                headless=True,
+                args=["--disable-blink-features=AutomationControlled"],
+            )
             context = browser.new_context(
                 accept_downloads=True,
                 user_agent=KAD_USER_AGENT,
@@ -454,20 +543,13 @@ def process_job(job: dict) -> None:
             page = context.new_page()
             try:
                 page.goto(card_url, wait_until="domcontentloaded", timeout=nav_ms)
-                page.wait_for_timeout(3500)
-                for tab_label in ["Документы", "Судебные акты", "Электронное дело", "Материалы"]:
-                    try:
-                        page.get_by_text(tab_label, exact=False).first.click(timeout=3500)
-                        page.wait_for_timeout(3000)
-                        break
-                    except Exception:
-                        continue
+                page.wait_for_timeout(2000)
                 case_hint = extract_case_number_from_page(page)
                 if case_hint and not effective_preferred_id:
                     cid = ensure_case_id(case_hint)
                     if cid:
                         effective_preferred_id = cid
-                docs = collect_document_links_from_page(page, card_url)
+                docs = open_kad_card_and_collect_docs(page, card_url, nav_ms)
             except Exception as exc:
                 failures += 1
                 lines.append(f'- Не удалось открыть карточку {case_data.get("case_number") or ""}: {exc}')
