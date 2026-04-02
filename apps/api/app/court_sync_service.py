@@ -220,6 +220,33 @@ def enqueue_nightly_jobs(db: Session) -> int:
     return count
 
 
+def format_recent_download_jobs_status(db: Session, *, limit: int = 5) -> str:
+    """Краткий статус последних задач загрузки из КАД — для вопросов «ты скачал?», без RAG по документам."""
+    jobs = (
+        db.query(CourtSyncJob)
+        .filter(CourtSyncJob.run_mode == "download")
+        .order_by(CourtSyncJob.id.desc())
+        .limit(limit)
+        .all()
+    )
+    if not jobs:
+        return "Задач загрузки из КАД пока не было."
+    lines = [
+        "Статус фоновых задач КАД (это не список файлов в «текущем деле» в чате):",
+        "",
+    ]
+    for j in jobs:
+        lines.append(f"Задача #{j.id} — {j.status}, шаг: {j.step}")
+        rep = (j.report_text or "").strip()
+        if rep:
+            if len(rep) > 900:
+                rep = rep[:900] + "\n…"
+            lines.append(rep)
+        lines.append("")
+    lines.append('Точный отчёт по одной задаче: «отчёт по задаче #N».')
+    return "\n".join(lines).strip()
+
+
 def format_sync_status(db: Session, *, limit: int = 8) -> str:
     jobs = db.query(CourtSyncJob).order_by(CourtSyncJob.created_at.desc()).limit(limit).all()
     if not jobs:

@@ -33,10 +33,12 @@ from .ai_service import (
     find_case_by_hint,
     looks_like_hearing_note,
     looks_like_case_tag_update,
+    normalize_arbitr_case_number,
     parse_case_tag_update,
     parse_hearing_note,
 )
 from .court_kad_search import (
+    looks_like_court_download_status_question,
     looks_like_court_search_command,
     parse_court_search_request,
 )
@@ -47,6 +49,7 @@ from .court_sync_service import (
     create_watch_profile,
     enqueue_nightly_jobs,
     format_nightly_report,
+    format_recent_download_jobs_status,
     format_sync_status,
     update_job_progress,
     upsert_case_source,
@@ -148,14 +151,14 @@ def resolve_case_for_chat(
 ) -> Case:
     cases = db.query(Case).all()
     if preferred_case_number:
-        normalized_case_number = preferred_case_number.replace(" ", "").replace("\n", "")
+        normalized_case_number = normalize_arbitr_case_number(preferred_case_number)
         case = db.query(Case).filter(Case.case_number == normalized_case_number).first()
         if case:
             return case
 
     extracted_case_number = extract_case_number(text)
     if extracted_case_number:
-        normalized_case_number = extracted_case_number.replace(" ", "").replace("\n", "")
+        normalized_case_number = normalize_arbitr_case_number(extracted_case_number)
         case = db.query(Case).filter(Case.case_number == normalized_case_number).first()
         if case:
             return case
@@ -647,6 +650,11 @@ async def ingest_document(
     matched_case = None
     case_confidence = 0.0
     llm_note = ""
+    if preferred_case_id:
+        matched_case = db.query(Case).filter(Case.id == preferred_case_id).first()
+        if matched_case:
+            case_confidence = 0.99
+
     if llm_route:
         llm_case_number = str(llm_route.get("case_number", "")).strip()
         llm_category = str(llm_route.get("category", "")).strip()
@@ -654,9 +662,12 @@ async def ingest_document(
         llm_note = str(llm_route.get("short_note", "")).strip()
         if llm_category:
             category = llm_category
-        if llm_case_number:
-            matched_case = db.query(Case).filter(Case.case_number == llm_case_number).first()
-        if matched_case:
+        if not matched_case and llm_case_number:
+            ln = normalize_arbitr_case_number(llm_case_number)
+            matched_case = db.query(Case).filter(Case.case_number == ln).first()
+            if not matched_case:
+                matched_case = db.query(Case).filter(Case.case_number == llm_case_number).first()
+        if matched_case and case_confidence < 0.99:
             case_confidence = max(0.7, llm_confidence)
         class_confidence = max(class_confidence, llm_confidence)
     used_llm = llm_route is not None
@@ -784,7 +795,7 @@ async def bulk_ingest(
 
     preferred_case_id = None
     if preferred_case_number:
-        normalized = preferred_case_number.replace(" ", "").replace("\n", "")
+        normalized = normalize_arbitr_case_number(preferred_case_number)
         preferred_case_id = db.query(Case).filter(Case.case_number == normalized).first()
         preferred_case_id = preferred_case_id.id if preferred_case_id else None
 
@@ -1028,7 +1039,7 @@ def internal_ensure_case_for_number(
 ) -> dict[str, int]:
     if user_role != "owner":
         raise HTTPException(status_code=403, detail="Owner token required")
-    normalized = case_number.replace(" ", "").replace("\n", "")
+    normalized = normalize_arbitr_case_number(case_number)
     case = db.query(Case).filter(Case.case_number == normalized).first()
     if not case:
         case = Case(
@@ -1681,6 +1692,8 @@ def search_documents(case: Case, docs: list[Document], query: str) -> str:
 
 def handle_court_sync_chat_command(db: Session, text: str, user_role: str) -> str | None:
     lowered = text.lower()
+    if looks_like_court_download_status_question(text):
+        return format_recent_download_jobs_status(db)
     if "статус синхронизации" in lowered:
         return format_sync_status(db)
     if "что нового скачано за ночь" in lowered:

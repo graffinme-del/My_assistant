@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from .ai_service import normalize_arbitr_case_number
+
 
 @dataclass
 class CourtSearchRequest:
@@ -16,7 +18,8 @@ def normalize_query_value(value: str) -> str:
 
 
 def normalize_case_number(value: str) -> str:
-    return normalize_query_value(value).replace(" ", "").replace("\\", "")
+    raw = normalize_query_value(value).replace(" ", "").replace("\\", "")
+    return normalize_arbitr_case_number(raw)
 
 
 def normalize_inn(value: str) -> str:
@@ -78,7 +81,36 @@ def parse_court_search_request(text: str) -> CourtSearchRequest | None:
     return None
 
 
+def looks_like_court_download_status_question(text: str) -> bool:
+    """Вопросы о результате загрузки из КАД — маршрутизировать в отчёт по задачам, не в RAG по документам."""
+    lowered = (text or "").lower()
+    if "скачай" in lowered or "найди дел" in lowered or "поставь на отслеживание" in lowered:
+        return False
+    if any(
+        p in lowered
+        for p in (
+            "ты скачал",
+            "скачал ли ты",
+            "скачал ли",
+            "загрузил ли",
+            "получилось скачать",
+            "удалось скачать",
+            "что с загрузкой",
+            "документы скачались",
+            "скачались ли",
+            "бот скачал",
+            "воркер скачал",
+        )
+    ):
+        return True
+    if "?" in lowered and "документ" in lowered and ("кад" in lowered or "суд" in lowered or "задач" in lowered):
+        return True
+    return False
+
+
 def looks_like_court_search_command(text: str) -> bool:
+    if looks_like_court_download_status_question(text):
+        return True
     lowered = text.lower()
     if "kad.arbitr.ru" in lowered and "/card/" in lowered:
         return True
