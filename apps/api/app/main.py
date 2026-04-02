@@ -1146,6 +1146,74 @@ def internal_upsert_document_source(
     return {"document_source_id": source.id, "job_id": job_id}
 
 
+@app.get("/internal/parser-api/test")
+def internal_parser_api_test(
+    case_number: str = Query(..., description="Номер дела, например А40-97353/2020"),
+    try_first_pdf: bool = Query(default=False, description="Попробовать pdf_download по первому URL из ответа"),
+    user_role: str = Depends(require_user),
+) -> dict:
+    """Проверка ключа Parser-API: детали по номеру дела и опционально скачивание первого PDF."""
+    if user_role != "owner":
+        raise HTTPException(status_code=403, detail="Owner token required")
+    from .parser_api_client import (
+        extract_kad_pdf_urls_from_details,
+        parser_details_by_number,
+        parser_pdf_download,
+    )
+
+    try:
+        details = parser_details_by_number(case_number)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Parser-API: {e}") from e
+
+    success = details.get("Success")
+    pdf_urls = extract_kad_pdf_urls_from_details(details)
+    out: dict = {
+        "parser_success": success,
+        "cases_in_response": len(details.get("Cases") or []),
+        "kad_pdf_urls_found": len(pdf_urls),
+        "first_pdf_url": pdf_urls[0] if pdf_urls else None,
+    }
+    if try_first_pdf and pdf_urls:
+        try:
+            raw = parser_pdf_download(pdf_urls[0])
+            out["first_pdf_download_bytes"] = len(raw)
+            out["first_pdf_starts_with_pdf"] = raw[:4] == b"%PDF"
+        except Exception as e:
+            out["first_pdf_error"] = str(e)[:500]
+    return out
+
+
+@app.get("/internal/parser-api/usage")
+def internal_parser_api_usage(user_role: str = Depends(require_user)) -> dict:
+    """Расход лимита Parser-API (как https://parser-api.com/stat/?key=...). Только owner."""
+    if user_role != "owner":
+        raise HTTPException(status_code=403, detail="Owner token required")
+    from .parser_api_client import parser_usage_stat
+
+    try:
+        return parser_usage_stat()
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Parser-API stat: {e}") from e
+
+
+@app.get("/internal/parser-api/service-status")
+def internal_parser_api_service_status(user_role: str = Depends(require_user)) -> dict:
+    """Статус сервисов Parser-API (публичный JSON). Только owner."""
+    if user_role != "owner":
+        raise HTTPException(status_code=403, detail="Owner token required")
+    from .parser_api_client import parser_service_status_json
+
+    try:
+        return parser_service_status_json()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Parser-API status: {e}") from e
+
+
 @app.post("/assistant/summary-from-text", response_model=AssistantSummaryOut)
 async def assistant_summary_from_text(
     payload: AssistantSummaryIn,

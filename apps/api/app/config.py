@@ -40,6 +40,11 @@ class Settings(BaseSettings):
     court_sync_delay_sec: int = 5
     court_sync_timeout_sec: int = 60
 
+    # Parser-API (kad.arbitr.ru): https://www.parser-api.com/ — заявка на ключ на сайте
+    parser_api_key: str = ""
+    parser_api_base_url: str = "https://parser-api.com/parser/arbitr_api"
+    parser_api_timeout_sec: int = 120
+
     @field_validator("app_port", mode="before")
     @classmethod
     def _coerce_app_port(cls, v: object) -> object:
