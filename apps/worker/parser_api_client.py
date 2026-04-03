@@ -6,6 +6,7 @@ Parser-API в worker: те же методы, что в apps/api/app/parser_api_
 from __future__ import annotations
 
 import base64
+import json
 import os
 import re
 from datetime import date, datetime
@@ -81,7 +82,9 @@ def parser_search(
 def parser_pdf_download(pdf_url: str) -> bytes:
     data = _request("pdf_download", {"url": pdf_url})
     if data.get("Success") != 1:
-        err = data.get("error") or data.get("Error") or "unknown"
+        err = data.get("error") or data.get("Error")
+        if not err:
+            err = json.dumps(data, ensure_ascii=False)[:900]
         raise RuntimeError(f"Parser-API pdf_download: {err}")
     b64 = data.get("pdfContent")
     if not b64:
