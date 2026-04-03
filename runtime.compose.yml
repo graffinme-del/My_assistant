@@ -73,6 +73,8 @@ services:
     image: ghcr.io/graffinme-del/my_assistant/worker:main
     restart: unless-stopped
     depends_on:
+      api:
+        condition: service_healthy
       redis:
         condition: service_healthy
       postgres:
