@@ -2,7 +2,7 @@ import os
 import re
 import tempfile
 import time
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import urljoin
 
@@ -12,7 +12,8 @@ from playwright.sync_api import sync_playwright
 
 from parser_api_client import (
     case_dict_from_parser_case,
-    extract_kad_pdf_urls_from_details,
+    extract_kad_pdf_url_entries_with_dates,
+    filter_pdf_urls_by_date_range,
     parser_details_by_id,
     parser_details_by_number,
     parser_pdf_download,
@@ -32,6 +33,45 @@ if _COURT_SYNC_PARSER_RAW:
     COURT_SYNC_USE_PARSER_API = _COURT_SYNC_PARSER_RAW not in ("0", "false", "no")
 else:
     COURT_SYNC_USE_PARSER_API = bool(os.getenv("PARSER_API_KEY", "").strip())
+
+
+def _parser_pdf_date_bounds() -> tuple[date | None, date | None]:
+    """Границы дат для pdf_download (только Parser-API). Пусто = без фильтра."""
+    raw_from = os.getenv("PARSER_DOWNLOAD_DATE_FROM", "").strip()
+    raw_to = os.getenv("PARSER_DOWNLOAD_DATE_TO", "").strip()
+    y_min = os.getenv("PARSER_DOWNLOAD_YEAR_MIN", "").strip()
+    y_max = os.getenv("PARSER_DOWNLOAD_YEAR_MAX", "").strip()
+
+    if not raw_from and y_min:
+        try:
+            raw_from = f"{int(y_min)}-01-01"
+        except ValueError:
+            pass
+    if not raw_to and y_max:
+        try:
+            raw_to = f"{int(y_max)}-12-31"
+        except ValueError:
+            pass
+    elif not raw_to and y_min and not y_max:
+        try:
+            raw_to = f"{int(y_min)}-12-31"
+        except ValueError:
+            pass
+
+    d_from: date | None = None
+    d_to: date | None = None
+    if raw_from:
+        try:
+            d_from = datetime.strptime(raw_from[:10], "%Y-%m-%d").date()
+        except ValueError:
+            pass
+    if raw_to:
+        try:
+            d_to = datetime.strptime(raw_to[:10], "%Y-%m-%d").date()
+        except ValueError:
+            pass
+    return d_from, d_to
+
 
 KAD_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -731,13 +771,27 @@ def download_documents_via_parser(
             lines.append(f"- Parser-API: Success != 1 для {num or rid}")
             continue
 
-        urls = extract_kad_pdf_urls_from_details(details)
+        entries = extract_kad_pdf_url_entries_with_dates(details)
+        d_lo, d_hi = _parser_pdf_date_bounds()
+        urls, skipped_no_date = filter_pdf_urls_by_date_range(entries, d_lo, d_hi)
+        if d_lo or d_hi:
+            lines.append(
+                f"- Фильтр PDF по датам событий: с {d_lo or '—'} по {d_hi or '—'}; "
+                f"всего ссылок {len(entries)}, после фильтра {len(urls)}, "
+                f"без даты события (отброшено) {skipped_no_date}."
+            )
         discovered += len(urls)
         if not urls:
-            lines.append(
-                f"- У дела {num or rid} по Parser-API не найдено PDF-ссылок в карточке "
-                f"(возможна структура без PdfDocument в ответе)."
-            )
+            if entries and (d_lo or d_hi):
+                lines.append(
+                    f"- У дела {num or rid} ни один PDF не попал в выбранный период "
+                    f"(или у событий нет даты — см. отчёт выше)."
+                )
+            else:
+                lines.append(
+                    f"- У дела {num or rid} по Parser-API не найдено PDF-ссылок в карточке "
+                    f"(возможна структура без PdfDocument в ответе)."
+                )
             continue
 
         effective_preferred_id = preferred_case_id

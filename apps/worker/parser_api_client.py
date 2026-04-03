@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import base64
 import os
+import re
+from datetime import date, datetime
 from typing import Any
 
 import httpx
@@ -87,28 +89,95 @@ def parser_pdf_download(pdf_url: str) -> bytes:
     return base64.b64decode(b64)
 
 
-def extract_kad_pdf_urls_from_details(data: dict[str, Any]) -> list[str]:
-    urls: list[str] = []
+def _parse_event_date(raw: str | None) -> date | None:
+    """Дата события из JSON Parser-API (часто YYYY-MM-DD, иногда DD.MM.YYYY в DisplayDate)."""
+    if not raw or not isinstance(raw, str):
+        return None
+    s = raw.strip()
+    m = re.search(r"(\d{4}-\d{2}-\d{2})", s)
+    if m:
+        try:
+            return datetime.strptime(m.group(1), "%Y-%m-%d").date()
+        except ValueError:
+            pass
+    m = re.search(r"(\d{2}\.\d{2}\.\d{4})", s)
+    if m:
+        try:
+            return datetime.strptime(m.group(1), "%d.%m.%Y").date()
+        except ValueError:
+            pass
+    return None
+
+
+def extract_kad_pdf_url_entries_with_dates(data: dict[str, Any]) -> list[tuple[str, date | None]]:
+    """Пары (url, дата документа по событию; для File инстанции — по макс. дате событий)."""
+    out: list[tuple[str, date | None]] = []
     seen: set[str] = set()
 
-    def add(u: str | None) -> None:
+    def add(u: str | None, d: date | None) -> None:
         if not u or not isinstance(u, str) or not u.startswith("http"):
             return
         if u in seen:
             return
         seen.add(u)
-        urls.append(u)
+        out.append((u, d))
 
     for case in data.get("Cases") or []:
         for inst in case.get("CaseInstances") or []:
+            event_dates: list[date] = []
+            for ev in inst.get("InstanceEvents") or []:
+                dt_raw = ev.get("Date") or ev.get("PublishDate") or ev.get("DisplayDate")
+                ev_d = _parse_event_date(dt_raw if isinstance(dt_raw, str) else None)
+                if ev_d:
+                    event_dates.append(ev_d)
+                ev_file = ev.get("File")
+                if isinstance(ev_file, str):
+                    add(ev_file, ev_d)
+
+            ref_inst: date | None = max(event_dates) if event_dates else None
+
             f = inst.get("File")
             if isinstance(f, dict):
-                add(f.get("URL"))
+                add(f.get("URL"), ref_inst)
             elif isinstance(f, str):
-                add(f)
-            for ev in inst.get("InstanceEvents") or []:
-                add(ev.get("File") if isinstance(ev.get("File"), str) else None)
-    return urls
+                add(f, ref_inst)
+    return out
+
+
+def extract_kad_pdf_urls_from_details(data: dict[str, Any]) -> list[str]:
+    return [u for u, _ in extract_kad_pdf_url_entries_with_dates(data)]
+
+
+def filter_pdf_urls_by_date_range(
+    entries: list[tuple[str, date | None]],
+    date_from: date | None,
+    date_to: date | None,
+) -> tuple[list[str], int]:
+    """
+    Оставляет URL, у которых дата попадает в [date_from; date_to].
+    Если задан фильтр, а у URL нет даты — URL отбрасывается.
+    Возвращает (urls, skipped_no_date_count).
+    """
+    if date_from is None and date_to is None:
+        return [u for u, _ in entries], 0
+
+    skipped = 0
+    out: list[str] = []
+    seen: set[str] = set()
+    lo = date_from or date.min
+    hi = date_to or date.max
+
+    for u, d in entries:
+        if u in seen:
+            continue
+        if d is None:
+            skipped += 1
+            continue
+        if d < lo or d > hi:
+            continue
+        seen.add(u)
+        out.append(u)
+    return out, skipped
 
 
 def case_dict_from_parser_case(case: dict[str, Any], card_url_hint: str | None = None) -> dict[str, Any]:
