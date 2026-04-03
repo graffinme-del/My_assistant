@@ -11,6 +11,8 @@ class CourtSearchRequest:
     query_type: str
     query_value: str
     run_mode: str = "preview"
+    parser_year_min: int | None = None
+    parser_year_max: int | None = None
 
 
 def normalize_query_value(value: str) -> str:
@@ -30,15 +32,57 @@ def normalize_ogrn(value: str) -> str:
     return re.sub(r"\D+", "", value or "")
 
 
+def parse_parser_year_range_from_text(text: str) -> tuple[int | None, int | None]:
+    """
+    Извлекает период лет из фраз вроде «за 2026 год», «с 2024 по 2026», «2026 год».
+    Возвращает (min_year, max_year) или (None, None).
+    """
+    raw = text or ""
+    m = re.search(r"с\s+(\d{4})\s+по\s+(\d{4})", raw, flags=re.IGNORECASE)
+    if m:
+        y1, y2 = int(m.group(1)), int(m.group(2))
+        return (min(y1, y2), max(y1, y2))
+    m = re.search(r"(?:за|в)\s+(\d{4})\s*г?", raw, flags=re.IGNORECASE)
+    if m:
+        y = int(m.group(1))
+        return (y, y)
+    m = re.search(r"(\d{4})\s*год[ау]?", raw, flags=re.IGNORECASE)
+    if m:
+        y = int(m.group(1))
+        return (y, y)
+    return (None, None)
+
+
+def _with_years(req: CourtSearchRequest, text: str) -> CourtSearchRequest:
+    ymin, ymax = parse_parser_year_range_from_text(text)
+    if ymin is None:
+        return req
+    y2 = ymax if ymax is not None else ymin
+    return CourtSearchRequest(
+        query_type=req.query_type,
+        query_value=req.query_value,
+        run_mode=req.run_mode,
+        parser_year_min=ymin,
+        parser_year_max=y2,
+    )
+
+
 def parse_court_search_request(text: str) -> CourtSearchRequest | None:
     raw = normalize_query_value(text)
     lowered = raw.lower()
 
     m_card_url = re.search(r"(https?://kad\.arbitr\.ru/Card/[a-fA-F0-9\-]+)", raw, flags=re.IGNORECASE)
     if m_card_url:
-        return CourtSearchRequest(query_type="card_url", query_value=m_card_url.group(1).split("?")[0].rstrip("/"))
+        return _with_years(
+            CourtSearchRequest(query_type="card_url", query_value=m_card_url.group(1).split("?")[0].rstrip("/")),
+            raw,
+        )
 
-    m_case = re.search(r"(?:дел[ауо]?|дела)\s+([АA]\d{1,4}-\d{1,7}/\d{2,4}|\d{1,2}-\d{1,7}/\d{2,4})", raw, flags=re.IGNORECASE)
+    m_case = re.search(
+        r"(?:дел[ауо]?|дела)\s+№?\s*([АA]\d{1,4}-\d{1,7}/\d{2,4}|\d{1,2}-\d{1,7}/\d{2,4})",
+        raw,
+        flags=re.IGNORECASE,
+    )
     case_markers = [
         "скачай документы дела",
         "скачай все документы дела",
@@ -46,20 +90,46 @@ def parse_court_search_request(text: str) -> CourtSearchRequest | None:
         "скачай все документы по делу",
         "скачай материалы дела",
         "скачай все материалы дела",
+        "скачай все файлы",
+        "скачай файлы",
+        "файлы дела",
+        "файлы по делу",
         "с сайта арбитражного суда",
         "найди дело",
         "поставь на отслеживание дело",
     ]
     if any(marker in lowered for marker in case_markers) and m_case:
-        return CourtSearchRequest(query_type="case_number", query_value=normalize_case_number(m_case.group(1)))
+        return _with_years(
+            CourtSearchRequest(query_type="case_number", query_value=normalize_case_number(m_case.group(1))),
+            raw,
+        )
+
+    # «Скачай файлы … А40-…/2020 за 2026» (номер без слова «дело»)
+    if "скачай" in lowered and re.search(r"(?:за|в)\s+\d{4}", raw, flags=re.IGNORECASE):
+        m_num = re.search(
+            r"№?\s*([АA]\d{1,4}-\d{1,7}/\d{2,4}|\d{1,2}-\d{1,7}/\d{2,4})",
+            raw,
+            flags=re.IGNORECASE,
+        )
+        if m_num:
+            return _with_years(
+                CourtSearchRequest(query_type="case_number", query_value=normalize_case_number(m_num.group(1))),
+                raw,
+            )
 
     m_inn = re.search(r"\bинн\b[:\s]*([\d\s]{10,15})", lowered, flags=re.IGNORECASE)
     if m_inn:
-        return CourtSearchRequest(query_type="inn", query_value=normalize_inn(m_inn.group(1)))
+        return _with_years(
+            CourtSearchRequest(query_type="inn", query_value=normalize_inn(m_inn.group(1))),
+            raw,
+        )
 
     m_ogrn = re.search(r"\bогрн\b[:\s]*([\d\s]{12,18})", lowered, flags=re.IGNORECASE)
     if m_ogrn:
-        return CourtSearchRequest(query_type="ogrn", query_value=normalize_ogrn(m_ogrn.group(1)))
+        return _with_years(
+            CourtSearchRequest(query_type="ogrn", query_value=normalize_ogrn(m_ogrn.group(1))),
+            raw,
+        )
 
     org_markers = [
         "по организации",
@@ -77,7 +147,10 @@ def parse_court_search_request(text: str) -> CourtSearchRequest | None:
                 candidate = raw[idx + len(marker):].strip(" :.-\"«»")
                 break
         if candidate:
-            return CourtSearchRequest(query_type="organization_name", query_value=candidate)
+            return _with_years(
+                CourtSearchRequest(query_type="organization_name", query_value=candidate),
+                raw,
+            )
     return None
 
 
@@ -123,6 +196,10 @@ def looks_like_court_search_command(text: str) -> bool:
             "скачай все документы по делу",
             "скачай материалы дела",
             "скачай все материалы дела",
+            "скачай все файлы",
+            "скачай файлы",
+            "файлы дела",
+            "файлы по делу",
             "с сайта арбитражного суда",
             "найди дела по",
             "найди дело",

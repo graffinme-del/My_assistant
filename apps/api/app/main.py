@@ -11,7 +11,7 @@ import zipfile
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from sqlalchemy import or_
+from sqlalchemy import inspect, or_, text
 from sqlalchemy.orm import Session
 
 from .assistant_context import (
@@ -98,6 +98,22 @@ from .schemas import (
 )
 
 Base.metadata.create_all(bind=engine)
+
+
+def _ensure_court_sync_job_parser_year_columns() -> None:
+    """Добавляет колонки в существующую БД без Alembic (PostgreSQL)."""
+    insp = inspect(engine)
+    if "court_sync_jobs" not in insp.get_table_names():
+        return
+    cols = {c["name"] for c in insp.get_columns("court_sync_jobs")}
+    with engine.begin() as conn:
+        if "parser_year_min" not in cols:
+            conn.execute(text("ALTER TABLE court_sync_jobs ADD COLUMN parser_year_min INTEGER"))
+        if "parser_year_max" not in cols:
+            conn.execute(text("ALTER TABLE court_sync_jobs ADD COLUMN parser_year_max INTEGER"))
+
+
+_ensure_court_sync_job_parser_year_columns()
 
 app = FastAPI(title="My Assistant API", version="0.1.0")
 app.add_middleware(
@@ -1796,28 +1812,41 @@ def handle_court_sync_chat_command(db: Session, text: str, user_role: str) -> st
             requested_by=user_role,
             trigger_type="manual",
             watch_profile_id=profile.id,
+            parser_year_min=request.parser_year_min,
+            parser_year_max=request.parser_year_max,
         )
         return (
             f'{"Добавил" if created else "Уже отслеживается"} профиль "{request.query_value}" '
             f'({request.query_type}). Создана задача синхронизации #{job.id}.'
         )
 
-    run_mode = (
-        "download"
-        if ("скачай документы" in lowered or request.query_type == "card_url")
-        else "preview"
-    )
+    def _wants_kad_download(qt: str, low: str) -> bool:
+        if qt == "card_url":
+            return True
+        if any(p in low for p in ("не скачай", "не скачивай", "не надо скачивать")):
+            return False
+        return "скачай" in low or "скачайте" in low
+
+    run_mode = "download" if _wants_kad_download(request.query_type, lowered) else "preview"
     job = create_sync_job(
         db,
         query_type=request.query_type,
         query_value=request.query_value,
         run_mode=run_mode,
         requested_by=user_role,
+        parser_year_min=request.parser_year_min,
+        parser_year_max=request.parser_year_max,
     )
+    period = ""
+    if request.parser_year_min is not None:
+        if request.parser_year_max is not None and request.parser_year_max != request.parser_year_min:
+            period = f" (только документы за {request.parser_year_min}–{request.parser_year_max} г.)"
+        else:
+            period = f" (только документы за {request.parser_year_min} г.)"
     if run_mode == "download":
         return (
             f'Поставил задачу на загрузку документов из КАД: #{job.id} '
-            f'для {request.query_type}="{request.query_value}". '
+            f'для {request.query_type}="{request.query_value}"{period}. '
             "Worker заберет задачу и будет качать материалы в фоновом режиме."
         )
     return (

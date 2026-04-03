@@ -73,6 +73,20 @@ def _parser_pdf_date_bounds() -> tuple[date | None, date | None]:
     return d_from, d_to
 
 
+def _parser_pdf_date_bounds_for_job(job: dict) -> tuple[date | None, date | None]:
+    """Период из задачи (чат) важнее, чем .env — для коммерческого сценария «за 2026 год»."""
+    ymin = job.get("parser_year_min")
+    ymax = job.get("parser_year_max")
+    if ymin is not None:
+        try:
+            y1 = int(ymin)
+            y2 = int(ymax) if ymax is not None else y1
+        except (TypeError, ValueError):
+            return _parser_pdf_date_bounds()
+        return date(y1, 1, 1), date(y2, 12, 31)
+    return _parser_pdf_date_bounds()
+
+
 KAD_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
@@ -730,13 +744,14 @@ def download_document_via_context(context, file_url: str, _depth: int = 0) -> Pa
 
 
 def download_documents_via_parser(
-    job_id: int,
+    job: dict,
     target_cases: list[dict],
     preview_lines: list[str],
     results: list[dict],
     preferred_case_id: int | None,
 ) -> tuple[int, int, int, list[str]]:
     """Скачивание PDF по URL из ответа Parser-API (pdf_download), без Playwright."""
+    job_id = int(job["id"])
     downloaded = 0
     discovered = 0
     failures = 0
@@ -772,11 +787,12 @@ def download_documents_via_parser(
             continue
 
         entries = extract_kad_pdf_url_entries_with_dates(details)
-        d_lo, d_hi = _parser_pdf_date_bounds()
+        d_lo, d_hi = _parser_pdf_date_bounds_for_job(job)
         urls, skipped_no_date = filter_pdf_urls_by_date_range(entries, d_lo, d_hi)
         if d_lo or d_hi:
+            src = "задача (чат)" if job.get("parser_year_min") is not None else ".env"
             lines.append(
-                f"- Фильтр PDF по датам событий: с {d_lo or '—'} по {d_hi or '—'}; "
+                f"- Фильтр PDF по датам событий ({src}): с {d_lo or '—'} по {d_hi or '—'}; "
                 f"всего ссылок {len(entries)}, после фильтра {len(urls)}, "
                 f"без даты события (отброшено) {skipped_no_date}."
             )
@@ -904,7 +920,7 @@ def process_job(job: dict) -> None:
 
     if COURT_SYNC_USE_PARSER_API and run_mode == "download":
         downloaded, discovered, failures, lines = download_documents_via_parser(
-            job_id, target_cases, preview_lines, results, preferred_case_id
+            job, target_cases, preview_lines, results, preferred_case_id
         )
         lines.append(
             f"Итог: найдено дел {len(results)}, найдено документов {discovered}, "

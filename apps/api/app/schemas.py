@@ -170,6 +170,8 @@ class CourtSyncJobOut(BaseModel):
     query_value: str
     run_mode: str
     report_text: str
+    parser_year_min: int | None = None
+    parser_year_max: int | None = None
 
     class Config:
         from_attributes = True

@@ -1,6 +1,6 @@
 from datetime import date, datetime
 
-from sqlalchemy import Date, DateTime, Float, ForeignKey, String, Text
+from sqlalchemy import Date, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
@@ -186,6 +186,8 @@ class CourtSyncJob(Base):
     report_text: Mapped[str] = mapped_column(Text, default="")
     manual_action_note: Mapped[str] = mapped_column(Text, default="")
     result_json: Mapped[str] = mapped_column(Text, default="{}")
+    parser_year_min: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    parser_year_max: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

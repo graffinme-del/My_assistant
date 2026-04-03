@@ -59,6 +59,8 @@ def create_sync_job(
     requested_by: str,
     trigger_type: str = "manual",
     watch_profile_id: int | None = None,
+    parser_year_min: int | None = None,
+    parser_year_max: int | None = None,
 ) -> CourtSyncJob:
     job = CourtSyncJob(
         query_type=query_type,
@@ -67,6 +69,8 @@ def create_sync_job(
         requested_by=requested_by,
         trigger_type=trigger_type,
         watch_profile_id=watch_profile_id,
+        parser_year_min=parser_year_min,
+        parser_year_max=parser_year_max,
         status="pending",
         step="queued",
     )
