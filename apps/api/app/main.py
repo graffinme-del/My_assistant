@@ -332,7 +332,38 @@ def looks_like_manual_move_request(text: str) -> bool:
 def looks_like_bulk_folder_by_keywords_request(text: str) -> bool:
     t = text.lower()
     return any(k in t for k in ["создай папк", "создай дело", "создай папку", "новая папка", "новое дело"]) and any(
-        k in t for k in ["отправь туда", "перенеси туда", "все документы", "содержат", "ключевые слова"]
+        k in t
+        for k in [
+            "отправь туда",
+            "перенеси туда",
+            "все документы",
+            "содержат",
+            "содерж",  # содержащие, содержит
+            "ключевые слова",
+            "собери",
+        ]
+    )
+
+
+def looks_like_move_all_from_active_case_to_folder(text: str) -> bool:
+    """«Собери все документы в папку …», «в отдельную папку», без «Создай папку … содержащие:»."""
+    t = text.lower()
+    if "создай папк" in t or "создай дело" in t:
+        return False
+    if ("папк" not in t and "дело" not in t) or not any(k in t for k in ["документ", "файл", "материал"]):
+        return False
+    return any(
+        k in t
+        for k in [
+            "собери",
+            "соберите",
+            "в отдельную папку",
+            "все эти",
+            "все документы",
+            "перенеси все",
+            "назови",
+            "назовите",
+        ]
     )
 
 
@@ -1639,6 +1670,71 @@ def preview_collect_recent_archive_to_case(db: Session, title: str) -> str:
     return "\n".join(summary)
 
 
+def parse_collect_folder_title(text: str) -> str:
+    """Название новой папки из «…», \"…\", '…' или после «назови (её)»."""
+    for pat in (r"«([^»]+)»", r'"([^"]+)"', r"'([^']+)'"):
+        m = re.search(pat, text)
+        if m:
+            return m.group(1).strip()
+    m = re.search(r"назови(?:те)?\s+(?:ее|её)?\s*[:\s,]*([^\n.!?]+?)(?:\s*$|[.!?])", text, flags=re.IGNORECASE)
+    if m:
+        return m.group(1).strip(" \t\"'«»")
+    return ""
+
+
+def preview_move_all_documents_from_active_case_to_folder(
+    db: Session, conversation: Conversation, title: str
+) -> str:
+    if not title:
+        return (
+            'Не вижу название папки в кавычках. Пример: Собери все документы в отдельную папку «Сделка по Гримме» '
+            "или: Создай папку «Сделка по Гримме» и перенеси туда все документы, содержащие: A40-97353"
+        )
+    if not conversation.active_case_id:
+        return (
+            "Нет активного дела в чате. Сначала откройте дело (например «покажи документы по делу …»), "
+            "затем повторите запрос."
+        )
+    src = db.query(Case).filter(Case.id == conversation.active_case_id).first()
+    if not src:
+        return "Не удалось определить текущее дело."
+    if src.case_number == "UNSORTED":
+        return (
+            "Текущее дело — «Неразобранное». Для него используйте «Создай папку …» и ключевые слова в тексте документов."
+        )
+
+    docs = db.query(Document).filter(Document.case_id == src.id).order_by(Document.created_at.asc()).all()
+    if not docs:
+        return f'В деле «{src.title}» ({src.case_number}) пока нет документов для переноса.'
+
+    case, created = ensure_chat_case(db, title)
+    if case.id == src.id:
+        return "Новая папка совпадает с текущим делом — перенос не нужен."
+
+    db.query(PendingMovePlan).filter(PendingMovePlan.case_id == case.id).delete()
+    db.add(
+        PendingMovePlan(
+            case_id=case.id,
+            title=case.title,
+            keywords_json=json.dumps(["__from_active_case__"], ensure_ascii=False),
+            doc_ids_json=json.dumps([doc.id for doc in docs]),
+        )
+    )
+    db.commit()
+    summary = [
+        f'{"Создал" if created else "Использую"} дело «{case.title}» ({case.case_number}).',
+        f"Документы из текущего дела «{src.title}» ({src.case_number}): {len(docs)} шт.",
+        "Проверьте список и ответьте, например:",
+        "`Да, перенеси все` или `Да, перенеси все, кроме 3, 7`",
+        "Кандидаты:",
+    ]
+    for idx, doc in enumerate(docs[:50], start=1):
+        summary.append(f"{idx}. [{doc.id}] {doc.filename}")
+    if len(docs) > 50:
+        summary.append(f"... и еще {len(docs) - 50}.")
+    return "\n".join(summary)
+
+
 def apply_pending_move_plan(db: Session, text: str) -> str:
     plan = db.query(PendingMovePlan).order_by(PendingMovePlan.created_at.desc()).first()
     if not plan:
@@ -2031,6 +2127,15 @@ async def assistant_ingest_text(
             reply_text = preview_collect_recent_archive_to_case(db, title)
         unsorted_case = get_or_create_unsorted_case(db)
         return await finalize_reply(case=unsorted_case, reply_text=reply_text, mode="documents-bulk-move-recent-archive")
+
+    if looks_like_move_all_from_active_case_to_folder(text):
+        title = parse_collect_folder_title(text)
+        if not title:
+            title = parse_case_title_from_folder_request(text)
+        save_folder_request_context(db, title or "")
+        reply_text = preview_move_all_documents_from_active_case_to_folder(db, conversation, title)
+        unsorted_case = get_or_create_unsorted_case(db)
+        return await finalize_reply(case=unsorted_case, reply_text=reply_text, mode="documents-bulk-move-active-case")
 
     if looks_like_bulk_folder_by_keywords_request(text):
         parsed = parse_bulk_folder_request(text)
