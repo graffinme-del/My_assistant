@@ -1707,12 +1707,9 @@ def preview_move_all_documents_from_active_case_to_folder(
     src = db.query(Case).filter(Case.id == conversation.active_case_id).first()
     if not src:
         return "Не удалось определить текущее дело.", None
-    if src.case_number == "UNSORTED":
-        return (
-            "Текущее дело — «Неразобранное». Для него используйте «Создай папку …» и ключевые слова в тексте документов.",
-            None,
-        )
 
+    # Активное дело может быть «Неразобранное»: тогда «собери всё в папку …» означает
+    # перенос всех документов из входящего ящика в новое дело — то же самое, что и для другого дела.
     docs = db.query(Document).filter(Document.case_id == src.id).order_by(Document.created_at.asc()).all()
     if not docs:
         return f'В деле «{src.title}» ({src.case_number}) пока нет документов для переноса.', None
