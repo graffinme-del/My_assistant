@@ -18,7 +18,7 @@ cd c:\Users\job\Desktop\My_assistant\tools\telegram_dump
 2. Скопируйте `.env` и заполните:
 
 ```bash
-copy .env.example .env
+copy env.example .env
 ```
 
 Обязательно: `TG_API_ID`, `TG_API_HASH`, `TG_PHONE`, `TG_CHAT`, `ASSISTANT_API_BASE`, `ASSISTANT_API_TOKEN`.

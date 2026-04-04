@@ -11,7 +11,7 @@ node_modules/
 # Env and secrets
 .env
 .env.*
-!.env.example
+# Локальный .env.example (со точкой) не в репо — шаблон в env.example, чтобы git pull на сервере не ломался из-за правок
 !.env.local.example
 
 # OS/editor

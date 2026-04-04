@@ -14,7 +14,7 @@ Use official Docker instructions for your Ubuntu version.
 
 ## 3) Create `.env`
 
-Copy `.env.example` to `.env` and fill values.
+Copy `env.example` to `.env` and fill values.
 
 ## 4) First run
 

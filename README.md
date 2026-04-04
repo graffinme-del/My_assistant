@@ -24,7 +24,7 @@ Web-first MVP for a personal legal process assistant.
 ## Quick start (local)
 
 1. Create env file:
-   - PowerShell: `copy .env.example .env`
+   - PowerShell: `copy env.example .env`
 2. Start stack:
    - `docker compose up --build`
 3. Open:
