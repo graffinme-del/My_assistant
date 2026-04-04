@@ -359,8 +359,11 @@ def looks_like_move_all_from_active_case_to_folder(text: str) -> bool:
             "соберите",
             "в отдельную папку",
             "все эти",
+            "эти документы",
+            "в папку",
             "все документы",
             "перенеси все",
+            "перенеси",
             "назови",
             "назовите",
         ]
@@ -2069,6 +2072,17 @@ async def assistant_ingest_text(
             created_case=created_case,
             refresh_summary=True,
         )
+
+    if settings.chat_tools_router_enabled and settings.openai_api_key.strip():
+        try:
+            from .chat_tools import run_chat_tools_router
+
+            routed = await run_chat_tools_router(db, conversation, text, user_role=_)
+            if routed is not None:
+                reply_text, routed_case, mode = routed
+                return await finalize_reply(case=routed_case, reply_text=reply_text, mode=mode)
+        except Exception:
+            pass
 
     if looks_like_group_by_cases_request(text):
         reply_text = render_documents_grouped_by_cases(db)

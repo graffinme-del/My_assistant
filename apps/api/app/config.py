@@ -45,6 +45,9 @@ class Settings(BaseSettings):
     parser_api_base_url: str = "https://parser-api.com/parser/arbitr_api"
     parser_api_timeout_sec: int = 120
 
+    # Маршрутизация части команд через LLM + tools (см. chat_tools.py). Отключить: CHAT_TOOLS_ROUTER=0
+    chat_tools_router_enabled: bool = True
+
     @field_validator("app_port", mode="before")
     @classmethod
     def _coerce_app_port(cls, v: object) -> object:
@@ -72,6 +75,13 @@ class Settings(BaseSettings):
         raw = (os.environ.get("OPENAI_API_KEY") or "").strip()
         if raw and not (self.openai_api_key or "").strip():
             return self.model_copy(update={"openai_api_key": raw})
+        return self
+
+    @model_validator(mode="after")
+    def chat_tools_router_from_env(self) -> "Settings":
+        raw = (os.environ.get("CHAT_TOOLS_ROUTER") or "").strip().lower()
+        if raw in ("0", "false", "no", "off"):
+            return self.model_copy(update={"chat_tools_router_enabled": False})
         return self
 
     @property

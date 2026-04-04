@@ -546,3 +546,53 @@ async def llm_document_routing(
         return json.loads(raw)
     except Exception:
         return None
+
+
+async def llm_chat_with_tool_choice(
+    *,
+    system: str,
+    user_message: str,
+    tools: list[dict[str, Any]],
+    timeout: float = 45.0,
+) -> tuple[str | None, list[dict[str, Any]]]:
+    """
+    Один вызов chat/completions с tools. Возвращает (content, tool_calls),
+    где tool_calls — список {id, name, arguments: dict}.
+    """
+    payload: dict[str, Any] = {
+        "model": settings.openai_model,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_message},
+        ],
+        "tools": tools,
+        "tool_choice": "auto",
+    }
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.post(_chat_completions_url(), headers=_llm_headers(), json=payload)
+    try:
+        resp.raise_for_status()
+    except httpx.HTTPStatusError:
+        return None, []
+    data = resp.json()
+    choices = data.get("choices") or []
+    if not choices:
+        return None, []
+    msg = (choices[0].get("message") or {})
+    content = msg.get("content")
+    if content is not None:
+        content = str(content).strip() or None
+    raw_calls = msg.get("tool_calls") or []
+    out: list[dict[str, Any]] = []
+    for tc in raw_calls:
+        fn = tc.get("function") or {}
+        name = fn.get("name") or ""
+        raw_args = fn.get("arguments") or "{}"
+        try:
+            args = json.loads(raw_args) if isinstance(raw_args, str) else (raw_args or {})
+        except json.JSONDecodeError:
+            args = {}
+        if not isinstance(args, dict):
+            args = {}
+        out.append({"id": tc.get("id") or "", "name": name, "arguments": args})
+    return content, out
