@@ -239,8 +239,16 @@ def format_recent_download_jobs_status(db: Session, *, limit: int = 5) -> str:
         "Статус фоновых задач КАД (это не список файлов в «текущем деле» в чате):",
         "",
     ]
+    now = datetime.utcnow()
     for j in jobs:
         lines.append(f"Задача #{j.id} — {j.status}, шаг: {j.step}")
+        if j.status == "running" and j.started_at:
+            age = now - j.started_at.replace(tzinfo=None) if j.started_at.tzinfo else now - j.started_at
+            if age > timedelta(minutes=45):
+                lines.append(
+                    f"(Долго в статусе running, прошло ~{int(age.total_seconds() // 60)} мин — "
+                    "проверьте логи worker и что контейнер worker запущен; при сбое можно сбросить задачу в pending.)"
+                )
         rep = (j.report_text or "").strip()
         if rep:
             if len(rep) > 900:
