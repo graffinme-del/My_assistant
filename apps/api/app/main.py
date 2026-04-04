@@ -1598,7 +1598,7 @@ def ensure_chat_case(db: Session, title: str) -> tuple[Case, bool]:
 
 def preview_bulk_move_documents_to_case_by_keywords(
     db: Session, title: str, keywords: list[str], *, docs_scope: list[Document] | None = None, scope_label: str | None = None
-) -> str:
+) -> tuple[str, Case | None]:
     case, created = ensure_chat_case(db, title)
 
     existing_tags = {
@@ -1637,13 +1637,16 @@ def preview_bulk_move_documents_to_case_by_keywords(
             summary.append(f"... и еще {len(docs) - 50}.")
     else:
         summary.append("Совпадений по документам не найдено.")
-    return "\n".join(summary)
+    return "\n".join(summary), case
 
 
-def preview_collect_recent_archive_to_case(db: Session, title: str) -> str:
+def preview_collect_recent_archive_to_case(db: Session, title: str) -> tuple[str, Case | None]:
     recent_docs = get_recent_document_batch(db)
     if not recent_docs:
-        return "Не вижу недавней загрузки архива. Сначала загрузите ZIP или уточните документы по ключевым словам."
+        return (
+            "Не вижу недавней загрузки архива. Сначала загрузите ZIP или уточните документы по ключевым словам.",
+            None,
+        )
     case, created = ensure_chat_case(db, title)
     docs = [doc for doc in recent_docs if doc.case_id != case.id]
     db.query(PendingMovePlan).filter(PendingMovePlan.case_id == case.id).delete()
@@ -1671,7 +1674,7 @@ def preview_collect_recent_archive_to_case(db: Session, title: str) -> str:
             summary.append(f"... и еще {len(docs) - 50}.")
     else:
         summary.append("Все документы из последнего архива уже лежат в этом деле.")
-    return "\n".join(summary)
+    return "\n".join(summary), case
 
 
 def parse_collect_folder_title(text: str) -> str:
@@ -1688,32 +1691,35 @@ def parse_collect_folder_title(text: str) -> str:
 
 def preview_move_all_documents_from_active_case_to_folder(
     db: Session, conversation: Conversation, title: str
-) -> str:
+) -> tuple[str, Case | None]:
     if not title:
         return (
             'Не вижу название папки в кавычках. Пример: Собери все документы в отдельную папку «Сделка по Гримме» '
-            "или: Создай папку «Сделка по Гримме» и перенеси туда все документы, содержащие: A40-97353"
+            "или: Создай папку «Сделка по Гримме» и перенеси туда все документы, содержащие: A40-97353",
+            None,
         )
     if not conversation.active_case_id:
         return (
             "Нет активного дела в чате. Сначала откройте дело (например «покажи документы по делу …»), "
-            "затем повторите запрос."
+            "затем повторите запрос.",
+            None,
         )
     src = db.query(Case).filter(Case.id == conversation.active_case_id).first()
     if not src:
-        return "Не удалось определить текущее дело."
+        return "Не удалось определить текущее дело.", None
     if src.case_number == "UNSORTED":
         return (
-            "Текущее дело — «Неразобранное». Для него используйте «Создай папку …» и ключевые слова в тексте документов."
+            "Текущее дело — «Неразобранное». Для него используйте «Создай папку …» и ключевые слова в тексте документов.",
+            None,
         )
 
     docs = db.query(Document).filter(Document.case_id == src.id).order_by(Document.created_at.asc()).all()
     if not docs:
-        return f'В деле «{src.title}» ({src.case_number}) пока нет документов для переноса.'
+        return f'В деле «{src.title}» ({src.case_number}) пока нет документов для переноса.', None
 
     case, created = ensure_chat_case(db, title)
     if case.id == src.id:
-        return "Новая папка совпадает с текущим делом — перенос не нужен."
+        return "Новая папка совпадает с текущим делом — перенос не нужен.", None
 
     db.query(PendingMovePlan).filter(PendingMovePlan.case_id == case.id).delete()
     db.add(
@@ -1736,16 +1742,16 @@ def preview_move_all_documents_from_active_case_to_folder(
         summary.append(f"{idx}. [{doc.id}] {doc.filename}")
     if len(docs) > 50:
         summary.append(f"... и еще {len(docs) - 50}.")
-    return "\n".join(summary)
+    return "\n".join(summary), case
 
 
-def apply_pending_move_plan(db: Session, text: str) -> str:
+def apply_pending_move_plan(db: Session, text: str) -> tuple[str, Case | None]:
     plan = db.query(PendingMovePlan).order_by(PendingMovePlan.created_at.desc()).first()
     if not plan:
-        return "Нет активного списка на перенос. Сначала попросите создать папку и подобрать документы."
+        return "Нет активного списка на перенос. Сначала попросите создать папку и подобрать документы.", None
     target_case = db.query(Case).filter(Case.id == plan.case_id).first()
     if not target_case:
-        return "Не нашёл дело для активного списка переноса."
+        return "Не нашёл дело для активного списка переноса.", None
     planned_ids = json.loads(plan.doc_ids_json or "[]")
     all_cases = db.query(Case).all()
     alternate_moves: dict[int, Case] = {}
@@ -1824,7 +1830,7 @@ def apply_pending_move_plan(db: Session, text: str) -> str:
     if rerouted:
         lines.append("Что перенесено в другие дела по вашему уточнению:")
         lines.extend(rerouted)
-    return "\n".join(lines)
+    return "\n".join(lines), target_case
 
 
 async def summarize_documents_for_case(case: Case, docs: list[Document], *, chronology: bool) -> str:
@@ -2116,22 +2122,24 @@ async def assistant_ingest_text(
 
     if looks_like_followup_current_archive_confirmation(text):
         title = get_recent_folder_request_context(db)
+        target_case: Case | None = None
         if not title:
             reply_text = (
                 "Не вижу, для какой папки продолжать. Напишите еще раз: "
                 'Создай папку "Название дела" и собери туда весь текущий архив'
             )
         else:
-            reply_text = preview_collect_recent_archive_to_case(db, title)
-        unsorted_case = get_or_create_unsorted_case(db)
+            reply_text, target_case = preview_collect_recent_archive_to_case(db, title)
+        case_for_reply = target_case if target_case is not None else get_or_create_unsorted_case(db)
         return await finalize_reply(
-            case=unsorted_case,
+            case=case_for_reply,
             reply_text=reply_text,
             mode="documents-bulk-move-recent-archive-followup",
         )
 
     if looks_like_bulk_folder_from_current_archive_request(text):
         title = parse_case_title_from_folder_request(text)
+        target_case = None
         if not title:
             reply_text = (
                 'Не вижу название папки/дела. Напишите, например: Создай папку "Банкротство Эй Джи Мануфактуринг" '
@@ -2139,21 +2147,22 @@ async def assistant_ingest_text(
             )
         else:
             save_folder_request_context(db, title)
-            reply_text = preview_collect_recent_archive_to_case(db, title)
-        unsorted_case = get_or_create_unsorted_case(db)
-        return await finalize_reply(case=unsorted_case, reply_text=reply_text, mode="documents-bulk-move-recent-archive")
+            reply_text, target_case = preview_collect_recent_archive_to_case(db, title)
+        case_for_reply = target_case if target_case is not None else get_or_create_unsorted_case(db)
+        return await finalize_reply(case=case_for_reply, reply_text=reply_text, mode="documents-bulk-move-recent-archive")
 
     if looks_like_move_all_from_active_case_to_folder(text):
         title = parse_collect_folder_title(text)
         if not title:
             title = parse_case_title_from_folder_request(text)
         save_folder_request_context(db, title or "")
-        reply_text = preview_move_all_documents_from_active_case_to_folder(db, conversation, title)
-        unsorted_case = get_or_create_unsorted_case(db)
-        return await finalize_reply(case=unsorted_case, reply_text=reply_text, mode="documents-bulk-move-active-case")
+        reply_text, target_case = preview_move_all_documents_from_active_case_to_folder(db, conversation, title)
+        case_for_reply = target_case if target_case is not None else get_or_create_unsorted_case(db)
+        return await finalize_reply(case=case_for_reply, reply_text=reply_text, mode="documents-bulk-move-active-case")
 
     if looks_like_bulk_folder_by_keywords_request(text):
         parsed = parse_bulk_folder_request(text)
+        target_case = None
         if not parsed:
             reply_text = (
                 'Не смог понять команду. Пример: Создай папку "Сделка Grimme". '
@@ -2165,20 +2174,20 @@ async def assistant_ingest_text(
             save_folder_request_context(db, title)
             docs_scope = get_recent_document_batch(db) if looks_like_current_archive_reference(text) else None
             scope_label = "в последнем архиве" if docs_scope is not None else None
-            reply_text = preview_bulk_move_documents_to_case_by_keywords(
+            reply_text, target_case = preview_bulk_move_documents_to_case_by_keywords(
                 db,
                 title,
                 keywords,
                 docs_scope=docs_scope,
                 scope_label=scope_label,
             )
-        unsorted_case = get_or_create_unsorted_case(db)
-        return await finalize_reply(case=unsorted_case, reply_text=reply_text, mode="documents-bulk-move-by-keywords")
+        case_for_reply = target_case if target_case is not None else get_or_create_unsorted_case(db)
+        return await finalize_reply(case=case_for_reply, reply_text=reply_text, mode="documents-bulk-move-by-keywords")
 
     if looks_like_pending_move_confirmation(text) or looks_like_pending_move_rejection(text):
-        reply_text = apply_pending_move_plan(db, text)
-        unsorted_case = get_or_create_unsorted_case(db)
-        return await finalize_reply(case=unsorted_case, reply_text=reply_text, mode="documents-bulk-move-confirmed")
+        reply_text, target_case = apply_pending_move_plan(db, text)
+        case_for_reply = target_case if target_case is not None else get_or_create_unsorted_case(db)
+        return await finalize_reply(case=case_for_reply, reply_text=reply_text, mode="documents-bulk-move-confirmed")
 
     if looks_like_manual_move_request(text):
         reply_text = move_documents_by_chat_command(db, text)

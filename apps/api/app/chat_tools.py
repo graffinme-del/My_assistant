@@ -155,7 +155,8 @@ async def run_chat_tools_router(
         if not title:
             title = parse_collect_folder_title(user_message)
         save_folder_request_context(db, title or "")
-        reply = preview_move_all_documents_from_active_case_to_folder(db, conversation, title)
-        return reply, get_or_create_unsorted_case(db), "chat-tools-collect-folder"
+        reply, target_case = preview_move_all_documents_from_active_case_to_folder(db, conversation, title)
+        case_for_reply = target_case if target_case is not None else get_or_create_unsorted_case(db)
+        return reply, case_for_reply, "chat-tools-collect-folder"
 
     return None
