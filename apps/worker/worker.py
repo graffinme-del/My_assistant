@@ -34,6 +34,13 @@ if _COURT_SYNC_PARSER_RAW:
 else:
     COURT_SYNC_USE_PARSER_API = bool(os.getenv("PARSER_API_KEY", "").strip())
 
+# После ошибки Parser-API pdf_download — одна попытка скачать тем же способом, что и в режиме браузера.
+_PARSER_FB_RAW = os.getenv("PARSER_PDF_FALLBACK_BROWSER", "").strip().lower()
+if _PARSER_FB_RAW:
+    PARSER_PDF_FALLBACK_BROWSER = _PARSER_FB_RAW not in ("0", "false", "no")
+else:
+    PARSER_PDF_FALLBACK_BROWSER = True
+
 
 def _parser_pdf_date_bounds() -> tuple[date | None, date | None]:
     """Границы дат для pdf_download (только Parser-API). Пусто = без фильтра."""
@@ -743,6 +750,41 @@ def download_document_via_context(context, file_url: str, _depth: int = 0) -> Pa
     return target
 
 
+def _session_url_for_kad_download(case_data: dict) -> str:
+    """Страница карточки для cookies/referer; иначе КАД часто отдаёт 403 на прямой GET по ссылке файла."""
+    u = (case_data.get("card_url") or "").strip()
+    if u:
+        return _normalize_kad_card_url(u)
+    rid = (case_data.get("remote_case_id") or "").strip()
+    if rid:
+        return f"https://kad.arbitr.ru/Card/{rid}"
+    return "https://kad.arbitr.ru/"
+
+
+def download_kad_file_via_browser_fallback(file_url: str, case_data: dict) -> Path:
+    """Playwright + тот же download_document_via_context, что и в полном браузерном режиме."""
+    session_url = _session_url_for_kad_download(case_data)
+    nav_ms = max(60_000, COURT_SYNC_TIMEOUT_SEC * 1000)
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(
+            headless=True,
+            args=["--disable-blink-features=AutomationControlled"],
+        )
+        try:
+            context = browser.new_context(
+                accept_downloads=True,
+                user_agent=KAD_USER_AGENT,
+                locale="ru-RU",
+                viewport={"width": 1280, "height": 900},
+            )
+            page = context.new_page()
+            page.goto(session_url, wait_until="domcontentloaded", timeout=nav_ms)
+            page.wait_for_timeout(2000)
+            return download_document_via_context(context, file_url)
+        finally:
+            browser.close()
+
+
 def download_documents_via_parser(
     job: dict,
     target_cases: list[dict],
@@ -750,7 +792,7 @@ def download_documents_via_parser(
     results: list[dict],
     preferred_case_id: int | None,
 ) -> tuple[int, int, int, list[str]]:
-    """Скачивание PDF по URL из ответа Parser-API (pdf_download), без Playwright."""
+    """Скачивание PDF по URL из ответа Parser-API; при сбое pdf_download — опционально Playwright."""
     job_id = int(job["id"])
     downloaded = 0
     discovered = 0
@@ -817,15 +859,65 @@ def download_documents_via_parser(
                 effective_preferred_id = cid
 
         for doc_url in urls[:COURT_SYNC_MAX_DOCS_PER_RUN]:
+            target: Path | None = None
+            fn = doc_url.rstrip("/").split("/")[-1] or f"kad-{int(time.time())}.pdf"
+            if not fn.lower().endswith(".pdf"):
+                fn = f"{fn}.pdf"
             try:
                 report_progress(job_id, "downloading", f"Parser-API pdf_download: {doc_url[:120]}…")
                 raw = parser_pdf_download(doc_url)
-                fn = doc_url.rstrip("/").split("/")[-1] or f"kad-{int(time.time())}.pdf"
-                if not fn.lower().endswith(".pdf"):
-                    fn = f"{fn}.pdf"
                 safe_name = re.sub(r"[^\w.\-а-яА-Я]", "_", fn)
                 target = Path(tempfile.mkdtemp()) / safe_name
                 target.write_bytes(raw)
+            except Exception as exc:
+                parser_err = str(exc)
+                if PARSER_PDF_FALLBACK_BROWSER:
+                    try:
+                        report_progress(
+                            job_id,
+                            "downloading",
+                            f"Playwright fallback (после ошибки Parser-API): {doc_url[:120]}…",
+                        )
+                        target = download_kad_file_via_browser_fallback(doc_url, case_data)
+                        fn = target.name
+                    except Exception as fb_exc:
+                        failures += 1
+                        register_document_source(
+                            job_id,
+                            {
+                                "remote_document_id": doc_url[:500],
+                                "case_source_id": case_source_id,
+                                "title": doc_url[:200],
+                                "filename": "",
+                                "file_url": doc_url,
+                                "status": "failed",
+                            },
+                        )
+                        lines.append(
+                            f"- Не удалось скачать {doc_url[:100]}: Parser-API: {parser_err}; "
+                            f"fallback: {fb_exc}"
+                        )
+                        time.sleep(max(1, COURT_SYNC_DELAY_SEC))
+                        continue
+                else:
+                    failures += 1
+                    register_document_source(
+                        job_id,
+                        {
+                            "remote_document_id": doc_url[:500],
+                            "case_source_id": case_source_id,
+                            "title": doc_url[:200],
+                            "filename": "",
+                            "file_url": doc_url,
+                            "status": "failed",
+                        },
+                    )
+                    lines.append(f"- Не удалось скачать через Parser-API {doc_url[:100]}: {exc}")
+                    time.sleep(max(1, COURT_SYNC_DELAY_SEC))
+                    continue
+
+            assert target is not None
+            try:
                 ingest_result = ingest_downloaded_file_to_case(target, effective_preferred_id)
                 local_document = ingest_result.get("document") or {}
                 doc = {
@@ -852,7 +944,7 @@ def download_documents_via_parser(
                         "status": "failed",
                     },
                 )
-                lines.append(f"- Не удалось скачать через Parser-API {doc_url[:100]}: {exc}")
+                lines.append(f"- Не удалось сохранить документ после скачивания {doc_url[:100]}: {exc}")
             time.sleep(max(1, COURT_SYNC_DELAY_SEC))
 
     return downloaded, discovered, failures, lines
