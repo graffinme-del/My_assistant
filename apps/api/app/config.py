@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     # Маршрутизация части команд через LLM + tools (см. chat_tools.py). Отключить: CHAT_TOOLS_ROUTER=0
     chat_tools_router_enabled: bool = True
 
+    # Автосводка длинных сообщений в чат по делу (переписка юристов и т.д.). Отключить: CASE_NOTE_DIGEST=0
+    case_note_digest_enabled: bool = True
+    case_note_digest_min_chars: int = 200
+
     @field_validator("app_port", mode="before")
     @classmethod
     def _coerce_app_port(cls, v: object) -> object:
@@ -82,6 +86,13 @@ class Settings(BaseSettings):
         raw = (os.environ.get("CHAT_TOOLS_ROUTER") or "").strip().lower()
         if raw in ("0", "false", "no", "off"):
             return self.model_copy(update={"chat_tools_router_enabled": False})
+        return self
+
+    @model_validator(mode="after")
+    def case_note_digest_from_env(self) -> "Settings":
+        raw = (os.environ.get("CASE_NOTE_DIGEST") or "").strip().lower()
+        if raw in ("0", "false", "no", "off"):
+            return self.model_copy(update={"case_note_digest_enabled": False})
         return self
 
     @property

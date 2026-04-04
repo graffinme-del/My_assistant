@@ -26,6 +26,7 @@ from .ai_service import (
     classify_document,
     extract_document_text,
     llm_assistant_chat_reply,
+    llm_digest_incoming_case_note,
     llm_parse_case_tag_update,
     llm_document_routing,
     llm_summary,
@@ -2272,6 +2273,18 @@ async def assistant_ingest_text(
         )
 
     db.add(CaseEvent(case_id=case.id, event_type="assistant_message", body=text))
+    if (
+        settings.case_note_digest_enabled
+        and case.case_number != "UNSORTED"
+        and len(text) >= settings.case_note_digest_min_chars
+        and settings.openai_api_key.strip()
+    ):
+        try:
+            digest = await llm_digest_incoming_case_note(text, case.title)
+            if digest:
+                db.add(CaseEvent(case_id=case.id, event_type="case_note_digest", body=digest[:4000]))
+        except Exception:
+            pass
     db.commit()
     mode = "message" if case.case_number != "UNSORTED" else "message-unsorted"
     try:

@@ -141,6 +141,22 @@ async def llm_summary(prompt: str) -> str:
     return text or "Не удалось получить ответ модели."
 
 
+async def llm_digest_incoming_case_note(text: str, case_title: str) -> str:
+    """Структурированная выжимка пересланного сообщения / заметки для «памяти» по делу."""
+    if not settings.openai_api_key.strip():
+        return ""
+    user_content = (
+        "Ты помощник для организации материалов по делу. Ниже — заметка, пересланное сообщение или текст от юристов.\n"
+        "Выдели только факты и операционные детали. Не давай юридических консультаций и не оценивай перспективы.\n"
+        "Верни 4–10 пунктов, каждый с новой строки, начинай с «- ». В каждом пункте одна мысль: факты, даты, стороны, "
+        "суммы, сроки, следующие шаги, что от нас ждут или что предложили. Если даты в тексте нет — не выдумывай.\n"
+        "Если в тексте нет содержательных фактов — верни одну строку: «Содержательных фактов не извлечено».\n\n"
+        f"Дело (контекст): {case_title}\n\n"
+        f"Текст:\n{text[:8000]}"
+    )
+    return (await _llm_chat(user_content, timeout=75.0)).strip()
+
+
 def parse_hearing_note(db: Session, case: Case, text: str) -> tuple[CaseEvent, list[Task], date | None]:
     extracted_date = _extract_date(text)
     if extracted_date:

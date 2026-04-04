@@ -23,6 +23,24 @@ def get_or_create_conversation(db: Session, user_key: str) -> Conversation:
     return conversation
 
 
+def _conversation_messages_for_prompt(
+    db: Session, conversation: Conversation, case: Case | None
+) -> list[ConversationMessage]:
+    """История для промпта: по активному делу — до 40 сообщений с привязкой к делу; иначе последние 12 общих."""
+    q = db.query(ConversationMessage).filter(ConversationMessage.conversation_id == conversation.id)
+    if case is not None and case.case_number != "UNSORTED":
+        rows = (
+            q.filter(ConversationMessage.case_id == case.id)
+            .order_by(ConversationMessage.created_at.desc())
+            .limit(40)
+            .all()
+        )
+    else:
+        rows = q.order_by(ConversationMessage.created_at.desc()).limit(12).all()
+    rows.reverse()
+    return rows
+
+
 def add_conversation_message(
     db: Session,
     *,
@@ -97,14 +115,7 @@ def build_grounded_prompt(
                     sync_document_chunks(db, doc)
             db.commit()
 
-    recent_messages = (
-        db.query(ConversationMessage)
-        .filter(ConversationMessage.conversation_id == conversation.id)
-        .order_by(ConversationMessage.created_at.desc())
-        .limit(12)
-        .all()
-    )
-    recent_messages.reverse()
+    recent_messages = _conversation_messages_for_prompt(db, conversation, case)
     docs_with_scores = retrieve_relevant_documents(
         db,
         query=user_message,
@@ -127,6 +138,19 @@ def build_grounded_prompt(
         events = db.query(CaseEvent).filter(CaseEvent.case_id == case.id).order_by(CaseEvent.created_at.desc()).limit(6).all()
         tasks = db.query(Task).filter(Task.case_id == case.id).order_by(Task.created_at.desc()).limit(6).all()
         case_block = build_case_summary(case, events, tasks)
+        if case.case_number != "UNSORTED":
+            digests = (
+                db.query(CaseEvent)
+                .filter(CaseEvent.case_id == case.id, CaseEvent.event_type == "case_note_digest")
+                .order_by(CaseEvent.created_at.desc())
+                .limit(12)
+                .all()
+            )
+            if digests:
+                digest_text = "\n---\n".join(reversed([d.body[:2000] for d in digests]))
+                case_block += (
+                    "\n\nСводки переписки и пересланных сообщений (по делу, последние записи):\n" + digest_text
+                )
 
     chunk_lines: list[str] = []
     citations: list[str] = []
@@ -154,7 +178,9 @@ def build_grounded_prompt(
         "Не подтягивай соседний контекст, если связь слабая. "
         "Не повторяй одни и те же мысли разными словами. "
         "Если пользователь просит список, перечень, реестр или собрать все файлы по делу, не рассуждай общими фразами: "
-        "верни именно список документов или прямо скажи, что список неполный.\n\n"
+        "верни именно список документов или прямо скажи, что список неполный. "
+        "Если спрашивают «что по делу», «какой статус», «что с сделкой» — опирайся на сводки переписки, последние сообщения "
+        "и документы; сведи в одну связную картину.\n\n"
         f"Режим отбора: {'строгий, только текущее дело и только сильные совпадения' if strict_scope else 'обычный, внутри активного дела'}.\n\n"
         f"Рабочая память беседы:\n{conversation.rolling_summary or 'нет'}\n\n"
         f"Активное дело:\n{case_block}\n\n"
