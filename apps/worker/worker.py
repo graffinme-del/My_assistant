@@ -174,6 +174,16 @@ def normalize_case_for_match(value: str) -> str:
     return s.lower()
 
 
+def normalize_case_number_for_parser(value: str) -> str:
+    """Как normalize_arbitr_case_number в API: латинская A, без пробелов — для Parser-API details_by_number."""
+    s = (value or "").replace(" ", "").replace("\n", "").replace("\\", "")
+    if len(s) >= 3 and s[0] in ("\u0410", "\u0430"):
+        s = "A" + s[1:]
+    elif len(s) >= 3 and s[0] in ("A", "a"):
+        s = "A" + s[1:]
+    return s
+
+
 def ensure_case_id(case_number: str) -> int | None:
     try:
         resp = api_post("/internal/court-sync/ensure-case", data={"case_number": case_number})
@@ -194,7 +204,33 @@ def ingest_downloaded_file_to_case(path: Path, case_id: int | None) -> dict:
         )
 
 
+def _kad_activate_participant_tab(page) -> None:
+    """Переключение на вкладку/режим «Участник», если главная открыта в режиме «Номер дела»."""
+    try:
+        tab = page.get_by_text(re.compile(r"Участник\s+дела", re.IGNORECASE)).first
+        tab.click(timeout=5000)
+        page.wait_for_timeout(900)
+    except Exception:
+        try:
+            page.locator("a,button,span,div").filter(has_text=re.compile(r"^\s*Участник дела\s*$")).first.click(
+                timeout=3000
+            )
+            page.wait_for_timeout(800)
+        except Exception:
+            pass
+
+
 def _fill_search_input(page, label_text: str, value: str) -> bool:
+    fill_value = value
+    if (
+        label_text.lower().startswith("участник")
+        and value
+        and " " in value.strip()
+        and not (value.strip().startswith(('"', "«", "'")))
+    ):
+        # Рекомендация КАД для фраз из нескольких слов
+        fill_value = f'"{value.strip()}"'
+
     candidates = [
         f"text={label_text}",
         f"text={label_text[:8]}",
@@ -204,7 +240,7 @@ def _fill_search_input(page, label_text: str, value: str) -> bool:
             anchor = page.locator(selector).first
             target = anchor.locator("xpath=following::input[1]").first
             target.fill("")
-            target.fill(value)
+            target.fill(fill_value)
             return True
         except Exception:
             continue
@@ -214,13 +250,13 @@ def _fill_search_input(page, label_text: str, value: str) -> bool:
             candidate = inputs.nth(idx)
             placeholder = (candidate.get_attribute("placeholder") or "").lower()
             if label_text.lower()[:5] in placeholder:
-                candidate.fill(value)
+                candidate.fill(fill_value)
                 return True
         if label_text.lower().startswith("участник"):
-            inputs.nth(0).fill(value)
+            inputs.nth(0).fill(fill_value)
             return True
         if "номер" in label_text.lower() and inputs.count() >= 3:
-            inputs.nth(2).fill(value)
+            inputs.nth(2).fill(fill_value)
             return True
     except Exception:
         return False
@@ -310,6 +346,7 @@ def _search_cases_once(query_type: str, query_value: str, job_id: int | None = N
         if query_type == "case_number":
             ok = _fill_search_input(page, "Номер дела", query_value)
         else:
+            _kad_activate_participant_tab(page)
             ok = _fill_search_input(page, "Участник дела", query_value)
         if not ok:
             browser.close()
@@ -364,7 +401,7 @@ def try_parser_search_cases(query_type: str, query_value: str, job_id: int | Non
             return [case_dict_from_parser_case(c, card_url_hint=url) for c in cases[:20]]
 
         if query_type == "case_number":
-            qn = re.sub(r"\s+", "", (query_value or "").replace("\\", ""))
+            qn = normalize_case_number_for_parser(query_value)
             if job_id is not None:
                 report_progress(job_id, "searching", "Parser-API: детали по номеру дела…")
             d = parser_details_by_number(qn)
@@ -382,6 +419,23 @@ def try_parser_search_cases(query_type: str, query_value: str, job_id: int | Non
             d = parser_search(inn=inn, inn_type="Any", page=1)
             if d.get("Success") != 1:
                 return []
+            cases = d.get("Cases") or []
+            return [case_dict_from_parser_case(c) for c in cases[:25]]
+
+        # Parser-API: параметр Inn = «ИНН или наименование участника» (см. openapi kad-arbitr).
+        if query_type in ("participant_name", "organization_name"):
+            qv = (query_value or "").strip()
+            if not qv:
+                return None
+            if job_id is not None:
+                report_progress(
+                    job_id,
+                    "searching",
+                    "Parser-API: поиск дел по участнику (ФИО / наименование)…",
+                )
+            d = parser_search(inn=qv, inn_type="Any", page=1)
+            if d.get("Success") != 1:
+                return None
             cases = d.get("Cases") or []
             return [case_dict_from_parser_case(c) for c in cases[:25]]
 
