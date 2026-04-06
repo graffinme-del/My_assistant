@@ -173,6 +173,32 @@ def get_or_create_unsorted_case(db: Session) -> Case:
     return case
 
 
+def extract_case_hint_from_folder_phrase(text: str) -> str:
+    """Название папки/дела из «в папке …», «по делу …» — кавычки не обязательны."""
+    head = (text or "").split("\n", 1)[0].strip()
+    if not head:
+        return ""
+    for pat in (
+        r'(?:в|во)\s+папк[еиу]\s+(?:«([^»]+)»|"([^"]+)"|\'([^\']+)\')',
+        r'по\s+делу\s+(?:«([^»]+)»|"([^"]+)"|\'([^\']+)\')',
+    ):
+        m = re.search(pat, head, flags=re.IGNORECASE)
+        if m:
+            hint = next((g for g in m.groups() if g and g.strip()), "")
+            if hint:
+                return hint.strip()
+    for pat in (
+        r'(?:в|во)\s+папк[еиу]\s+(.+?)(?:\s*[.!?]|$)',
+        r'по\s+делу\s+(.+?)(?:\s*[.!?]|$)',
+    ):
+        m = re.search(pat, head, flags=re.IGNORECASE)
+        if m:
+            hint = m.group(1).strip().strip('"\'«»')
+            if hint and len(hint) >= 2:
+                return hint
+    return ""
+
+
 def resolve_case_for_chat(
     db: Session,
     text: str,
@@ -192,6 +218,12 @@ def resolve_case_for_chat(
         case = db.query(Case).filter(Case.case_number == normalized_case_number).first()
         if case:
             return case
+
+    folder_hint = extract_case_hint_from_folder_phrase(text)
+    if folder_hint:
+        hinted = find_case_by_hint(cases, folder_hint)
+        if hinted:
+            return hinted
 
     hinted = find_case_by_hint(cases, text)
     if hinted:
@@ -410,9 +442,40 @@ def extract_saved_message_body_for_case(text: str) -> str:
     return text.strip()
 
 
+def looks_like_show_documents_in_folder_only(text: str) -> bool:
+    """Просмотр списка («покажи документы в папке …»), не перенос из активного дела."""
+    t = (text or "").lower()
+    if not any(n in t for n in ["документ", "файл", "архив", "материал"]):
+        return False
+    if any(k in t for k in ["собери", "соберите", "перенеси все", "создай папк", "создай дело", "назови", "назовите"]):
+        return False
+    if "перенеси" in t or "перенести" in t:
+        return False
+    if any(
+        k in t
+        for k in [
+            "покажи",
+            "покажите",
+            "список",
+            "какие документ",
+            "какие файлы",
+            "выведи",
+            "перечисли",
+            "перечень",
+            "дай список",
+        ]
+    ):
+        return True
+    if ("все документы" in t or "все файлы" in t) and ("папк" in t or "по делу" in t):
+        return True
+    return False
+
+
 def looks_like_move_all_from_active_case_to_folder(text: str) -> bool:
     """«Собери все документы в папку …», «в отдельную папку», без «Создай папку … содержащие:»."""
     if looks_like_save_message_to_case_request(text):
+        return False
+    if looks_like_show_documents_in_folder_only(text):
         return False
     t = text.lower()
     if "создай папк" in t or "создай дело" in t:
@@ -1361,14 +1424,18 @@ async def assistant_summary_from_text(
 
 def render_document_list(case: Case, docs: list[Document]) -> str:
     if not docs:
-        return f'По делу "{case.title}" пока нет загруженных документов.'
-    lines = [f'Документы по делу "{case.title}" ({len(docs)} шт.):']
+        return f'В папке «{case.title}» пока нет загруженных документов.'
+    lines = [
+        f'В папке «{case.title}» сейчас {len(docs)} документ(ов). Ниже первые 20; при необходимости сузим поиск.',
+        "",
+    ]
     for doc in docs[:20]:
         lines.append(
-            f'- [{doc.id}] {doc.filename} | {doc.category} | скачать: /api/documents/{doc.id}/download'
+            f'- [{doc.id}] {doc.filename} ({doc.category}) — скачать: /api/documents/{doc.id}/download'
         )
     if len(docs) > 20:
-        lines.append(f"... и еще {len(docs) - 20}. Уточните запрос, если нужен отбор.")
+        lines.append("")
+        lines.append(f"… и ещё {len(docs) - 20}. Напишите, например: найди в этой папке …")
     return "\n".join(lines)
 
 
@@ -1744,7 +1811,7 @@ def preview_collect_recent_archive_to_case(db: Session, title: str) -> tuple[str
 
 
 def parse_collect_folder_title(text: str) -> str:
-    """Название новой папки из «…», \"…\", '…' или после «назови (её)»."""
+    """Название новой папки из «…», \"…\", '…', «в папке …» или после «назови (её)»."""
     for pat in (r"«([^»]+)»", r'"([^"]+)"', r"'([^']+)'"):
         m = re.search(pat, text)
         if m:
@@ -1752,6 +1819,9 @@ def parse_collect_folder_title(text: str) -> str:
     m = re.search(r"назови(?:те)?\s+(?:ее|её)?\s*[:\s,]*([^\n.!?]+?)(?:\s*$|[.!?])", text, flags=re.IGNORECASE)
     if m:
         return m.group(1).strip(" \t\"'«»")
+    unquoted = extract_case_hint_from_folder_phrase(text)
+    if unquoted:
+        return unquoted
     return ""
 
 
@@ -2196,6 +2266,22 @@ async def assistant_ingest_text(
         if reply_text:
             active_case = conversation.active_case or get_or_create_unsorted_case(db)
             return await finalize_reply(case=active_case, reply_text=reply_text, mode="court-sync-command")
+
+    if looks_like_show_documents_in_folder_only(text):
+        _lc, command_case = resolve_case_for_conversation(
+            db,
+            text,
+            user_role=_,
+            preferred_case_number=payload.preferred_case_number,
+        )
+        command_docs = (
+            db.query(Document)
+            .filter(Document.case_id == command_case.id)
+            .order_by(Document.created_at.desc())
+            .all()
+        )
+        reply_text = render_document_list(command_case, command_docs)
+        return await finalize_reply(case=command_case, reply_text=reply_text, mode="documents-list")
 
     if settings.chat_tools_router_enabled and settings.openai_api_key.strip():
         try:
