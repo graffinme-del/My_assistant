@@ -40,7 +40,8 @@ services:
 
   api:
     build:
-      context: apps/api
+      # Пути относительно каталога этого файла (infra/); иначе Docker ищет infra/apps/api.
+      context: ../apps/api
       dockerfile: Dockerfile
     restart: unless-stopped
     depends_on:
@@ -71,7 +72,7 @@ services:
 
   worker:
     build:
-      context: apps/worker
+      context: ../apps/worker
       dockerfile: Dockerfile
     restart: unless-stopped
     depends_on:
@@ -90,7 +91,7 @@ services:
 
   web:
     build:
-      context: apps/web
+      context: ../apps/web
       dockerfile: Dockerfile
     restart: unless-stopped
     depends_on:
