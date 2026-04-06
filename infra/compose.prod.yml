@@ -1,8 +1,15 @@
 # Прод: деплой ВСЕГДА через этот файл (-f infra/compose.prod.yml).
 # Веб снаружи :8080. API снаружи: HOST_API_PORT (по умолчанию 8000); внутри контейнера api всегда 8000.
-# Если ошибка «Bind 8000 already allocated» — на хосте уже другой контейнер на 8000: остановите лишний стек
-# или задайте в .env HOST_API_PORT=8001 и обновите прокси/nginx на новый порт.
-# build.context apps/* — только вместе с --project-directory = корень репо (см. deploy_on_server.sh).
+#
+# ВАЖНО: без явного --env-file корень репо Compose по умолчанию подставляет переменные из infra/.env,
+# а не из ../.env — HOST_API_PORT из корневого .env игнорируется, порт остаётся 8000.
+# Запуск из корня репозитория (/opt/my_assistant):
+#   docker compose --env-file .env -f infra/compose.prod.yml up -d --build api
+# или одной строкой с абсолютным путём к .env:
+#   docker compose --env-file /opt/my_assistant/.env -f infra/compose.prod.yml up -d --build api
+#
+# Если ошибка «Bind 8000 already allocated» — в корневом .env: HOST_API_PORT=8001 и команда выше с --env-file.
+# build.context apps/* — относительно infra/; см. deploy_on_server.sh.
 services:
   postgres:
     image: postgres:16-alpine
