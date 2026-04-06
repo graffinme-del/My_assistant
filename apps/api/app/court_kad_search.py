@@ -205,8 +205,74 @@ def parse_court_search_request(text: str) -> CourtSearchRequest | None:
     return None
 
 
+def looks_like_court_download_count_question(text: str) -> bool:
+    """«Сколько скачали» — короткий ответ по факту, не простыня по задачам."""
+    lowered = (text or "").lower()
+    if "скачай" in lowered or "найди дел" in lowered or "поставь на отслеживание" in lowered:
+        return False
+    return any(
+        p in lowered
+        for p in (
+            "сколько документ",
+            "сколько файлов",
+            "сколько скачано",
+            "сколько удалось",
+            "сколько успешно",
+            "сколько всего скачал",
+            "сколько уже скачал",
+        )
+    )
+
+
+def looks_like_kad_downloaded_documents_list(text: str) -> bool:
+    """Пользователь просит список/названия файлов, сохранённых из КАД — не статус задач."""
+    lowered = (text or "").lower()
+    if "скачай" in lowered or "найди дел" in lowered or "поставь на отслеживание" in lowered:
+        return False
+    list_intent = any(
+        p in lowered
+        for p in (
+            "покажи",
+            "покажите",
+            "выведи",
+            "перечисли",
+            "список",
+            "какие документы",
+            "какие файлы",
+            "все документы",
+            "все файлы",
+            "названия файлов",
+            "реестр",
+            "перечень",
+            "открой список",
+        )
+    )
+    if not list_intent:
+        return False
+    kad_context = any(
+        k in lowered
+        for k in (
+            "кад",
+            "kad.arbitr",
+            "арбитраж",
+            "картотек",
+            "из кад",
+            "с кад",
+            "скачан",
+            "скачанн",
+            "удалось скачать",
+            "удалось сохранить",
+            "фонов",
+            "загрузк",
+        )
+    )
+    return kad_context
+
+
 def looks_like_court_download_status_question(text: str) -> bool:
-    """Вопросы о результате загрузки из КАД — маршрутизировать в отчёт по задачам, не в RAG по документам."""
+    """Вопросы о ходе/ошибках фоновой загрузки из КАД — развёрнутый статус по задачам."""
+    if looks_like_court_download_count_question(text) or looks_like_kad_downloaded_documents_list(text):
+        return False
     lowered = (text or "").lower()
     if "скачай" in lowered or "найди дел" in lowered or "поставь на отслеживание" in lowered:
         return False
@@ -242,6 +308,10 @@ def looks_like_court_download_status_question(text: str) -> bool:
 
 
 def looks_like_court_search_command(text: str) -> bool:
+    if looks_like_kad_downloaded_documents_list(text):
+        return True
+    if looks_like_court_download_count_question(text):
+        return True
     if looks_like_court_download_status_question(text):
         return True
     lowered = text.lower()

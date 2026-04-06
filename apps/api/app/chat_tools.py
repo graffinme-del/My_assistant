@@ -13,7 +13,8 @@ from sqlalchemy.orm import Session
 
 from .ai_service import llm_chat_with_tool_choice
 from .config import settings
-from .court_sync_service import format_recent_download_jobs_status
+from .court_kad_search import looks_like_court_download_count_question, looks_like_kad_downloaded_documents_list
+from .court_sync_service import format_kad_downloaded_documents_list, format_recent_download_jobs_status
 from .models import Case, Conversation
 
 # OpenAI-compatible tools (function calling)
@@ -55,8 +56,21 @@ CHAT_TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "kad_download_jobs_status",
             "description": (
-                "Пользователь спрашивает статус фоновых задач скачивания документов с kad.arbitr.ru (КАД), "
-                "воркер, «ты скачал», «статус скачивания». Не для списка файлов внутри дела."
+                "Только общий ход фоновой загрузки из kad.arbitr.ru (КАД): «как там скачивание», «статус загрузки», "
+                "ошибки воркера, что по задаче №N в целом. "
+                "НЕ вызывай, если пользователь просит число («сколько файлов скачали») — это другой инструмент. "
+                "НЕ вызывай, если просят показать список имён файлов, перечень PDF, «все документы которые скачали» — это kad_downloaded_files_list."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "kad_downloaded_files_list",
+            "description": (
+                "Пользователь хочет увидеть конкретные сохранённые файлы из картотеки: названия, список, «покажи документы», "
+                "«какие pdf скачались», перечень после загрузки из КАД. Не для статуса задачи и не для документов только текущей папки без упоминания КАД/скачивания."
             ),
             "parameters": {"type": "object", "properties": {}},
         },
@@ -69,6 +83,8 @@ def _might_use_chat_tools(text: str) -> bool:
     if len(text) > 2500:
         return False
     t = text.lower()
+    if looks_like_kad_downloaded_documents_list(text) or looks_like_court_download_count_question(text):
+        return False
     return any(
         k in t
         for k in (
@@ -79,8 +95,9 @@ def _might_use_chat_tools(text: str) -> bool:
             "отдельную папку",
             "статус скачивания",
             "статус загрузки",
-            "скачал",
-            "загрузил",
+            "ты скачал",
+            "скачал ли",
+            "загрузил ли",
             "воркер",
             "фонов",
             "kad.arbitr",
@@ -144,6 +161,12 @@ async def run_chat_tools_router(
         from .main import get_or_create_unsorted_case
 
         return reply, get_or_create_unsorted_case(db), "chat-tools-kad-status"
+
+    if name == "kad_downloaded_files_list":
+        reply = format_kad_downloaded_documents_list(db)
+        from .main import get_or_create_unsorted_case
+
+        return reply, get_or_create_unsorted_case(db), "chat-tools-kad-files-list"
 
     if name == "collect_documents_into_folder":
         from .main import (

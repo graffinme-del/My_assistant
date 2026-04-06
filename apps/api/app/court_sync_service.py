@@ -16,6 +16,7 @@ from .models import (
     CourtSyncJob,
     CourtSyncRun,
     CourtWatchProfile,
+    Document,
 )
 
 
@@ -275,6 +276,8 @@ def _report_snippet_for_user(report: str, *, max_chars: int = 240) -> str:
         low = s.lower()
         if "parser-api pdf_download" in low:
             continue
+        if "participant_name=" in low or "query_type=" in low or "run_mode=" in low:
+            continue
         if "playwright fallback" in low and not fallback_note:
             fallback_note = "Часть файлов качалась запасным способом (браузер), когда API не смог скачать PDF."
             continue
@@ -335,6 +338,86 @@ def _job_stats_narrative(result_json_raw: str | None) -> str | None:
     if not parts:
         return None
     return "По цифрам: " + "; ".join(parts) + "."
+
+
+def format_kad_download_count_answer(db: Session) -> str:
+    """Один ответ на «сколько скачали»: факт в базе + кратко по последней задаче."""
+    n_saved = db.query(CourtDocumentSource).filter(CourtDocumentSource.local_document_id.isnot(None)).count()
+    latest = (
+        db.query(CourtSyncJob)
+        .filter(CourtSyncJob.run_mode == "download")
+        .order_by(CourtSyncJob.id.desc())
+        .first()
+    )
+    head = (
+        f"В приложении сейчас сохранено файлов, пришедших из картотеки: {n_saved} "
+        "(это реально лежащие в хранилище документы, не просто строки в отчёте задачи)."
+    )
+    if not latest:
+        return head
+    try:
+        rj = json.loads(latest.result_json or "{}")
+    except Exception:
+        rj = {}
+    dl = rj.get("downloaded")
+    if latest.status == "running":
+        return (
+            f"{head} Последняя загрузка (№{latest.id}) ещё выполняется — число выше будет расти по мере сохранения файлов."
+        )
+    if latest.status == "pending":
+        return f"{head} Последняя поставленная загрузка (№{latest.id}) ещё в очереди."
+    extra = ""
+    if isinstance(dl, int):
+        extra = f" По отчёту последней завершённой задачи №{latest.id} в выгрузке было новых файлов: {dl}."
+    elif latest.status in ("failed", "needs_manual_step"):
+        st_ru = _STATUS_RU.get(latest.status, latest.status)
+        extra = f" Последняя задача №{latest.id} завершилась с пометкой «{st_ru}» — детали: «отчёт по задаче #{latest.id}»."
+    return head + extra
+
+
+def format_kad_downloaded_documents_list(db: Session, *, limit: int = 80) -> str:
+    """Имена файлов, реально сохранённых из КАД (есть локальный Document)."""
+    rows = (
+        db.query(CourtDocumentSource)
+        .filter(CourtDocumentSource.local_document_id.isnot(None))
+        .order_by(CourtDocumentSource.last_downloaded_at.desc().nulls_last(), CourtDocumentSource.id.desc())
+        .limit(limit)
+        .all()
+    )
+    if not rows:
+        return (
+            "Пока нет сохранённых в приложении файлов из картотеки (или загрузка ещё не успела их записать). "
+            "Когда фоновая загрузка завершится, список появится здесь; краткий ход процесса — по фразе «статус загрузки»."
+        )
+    doc_ids = [r.local_document_id for r in rows if r.local_document_id]
+    docs = {d.id: d for d in db.query(Document).filter(Document.id.in_(doc_ids)).all()}
+    case_ids = list({d.case_id for d in docs.values()})
+    cases = {c.id: c for c in db.query(Case).filter(Case.id.in_(case_ids)).all()} if case_ids else {}
+    cs_ids = [r.case_source_id for r in rows if r.case_source_id]
+    case_sources = {
+        cs.id: cs for cs in db.query(CourtCaseSource).filter(CourtCaseSource.id.in_(cs_ids)).all()
+    } if cs_ids else {}
+    lines = [
+        f"Вот сохранённые из картотеки файлы (показано до {limit} шт., от новых к старым):",
+        "",
+    ]
+    for ds in rows:
+        doc = docs.get(ds.local_document_id) if ds.local_document_id else None
+        fn = (doc.filename if doc else None) or ds.filename or ds.title or f"документ {ds.remote_document_id}"
+        doc_id = ds.local_document_id
+        folder = ""
+        if doc and doc.case_id in cases:
+            c = cases[doc.case_id]
+            folder = f' — в папке «{c.title}»' if c.title else ""
+        cs = case_sources.get(ds.case_source_id) if ds.case_source_id else None
+        case_hint = ""
+        if cs and (cs.case_number or cs.title):
+            case_hint = f" (дело в КАД: {cs.case_number or cs.title})"
+        lines.append(f"• [{doc_id}] {fn}{folder}{case_hint} — скачать: /api/documents/{doc_id}/download")
+    if len(rows) >= limit:
+        lines.append("")
+        lines.append(f"Показан лимит {limit}; если файлов больше, уточните по делу или откройте папку в интерфейсе.")
+    return "\n".join(lines)
 
 
 def format_recent_download_jobs_status(db: Session, *, limit: int = 5) -> str:

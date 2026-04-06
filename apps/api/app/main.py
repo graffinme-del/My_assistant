@@ -40,8 +40,10 @@ from .ai_service import (
 )
 from .case_number import normalize_arbitr_case_number
 from .court_kad_search import (
+    looks_like_court_download_count_question,
     looks_like_court_download_status_question,
     looks_like_court_search_command,
+    looks_like_kad_downloaded_documents_list,
     parse_court_search_request,
 )
 from .court_sync_service import (
@@ -50,6 +52,8 @@ from .court_sync_service import (
     create_sync_job,
     create_watch_profile,
     enqueue_nightly_jobs,
+    format_kad_download_count_answer,
+    format_kad_downloaded_documents_list,
     format_nightly_report,
     format_recent_download_jobs_status,
     format_sync_status,
@@ -1942,6 +1946,10 @@ def search_documents(case: Case, docs: list[Document], query: str) -> str:
 
 def handle_court_sync_chat_command(db: Session, text: str, user_role: str) -> str | None:
     lowered = text.lower()
+    if looks_like_kad_downloaded_documents_list(text):
+        return format_kad_downloaded_documents_list(db)
+    if looks_like_court_download_count_question(text):
+        return format_kad_download_count_answer(db)
     if looks_like_court_download_status_question(text):
         return format_recent_download_jobs_status(db)
     if "статус синхронизации" in lowered:
@@ -2010,14 +2018,13 @@ def handle_court_sync_chat_command(db: Session, text: str, user_role: str) -> st
             period = f" (только документы за {request.parser_year_min} г.)"
     if run_mode == "download":
         return (
-            f'Поставил задачу на загрузку документов из КАД: #{job.id} '
-            f'для {request.query_type}="{request.query_value}"{period}. '
-            "Worker заберет задачу и будет качать материалы в фоновом режиме."
+            f"Запустил фоновую загрузку материалов из картотеки (процесс №{job.id})"
+            f'{period} по запросу «{request.query_value}». '
+            "Обычно это занимает от нескольких минут. Спросите позже «как там скачивание» или «статус загрузки» — кратко опишу, что сделано."
         )
     return (
-        f'Поставил задачу на поиск в КАД: #{job.id} '
-        f'для {request.query_type}="{request.query_value}". '
-        "Когда worker обработает задачу, будет доступен статус синхронизации."
+        f"Запустил фоновый поиск в КАД (процесс №{job.id}) по запросу «{request.query_value}». "
+        "Когда появятся результаты, можно спросить статус или попросить «отчёт по задаче» с номером."
     )
 
 
@@ -2184,6 +2191,12 @@ async def assistant_ingest_text(
             refresh_summary=True,
         )
 
+    if looks_like_court_search_command(text):
+        reply_text = handle_court_sync_chat_command(db, text, _)
+        if reply_text:
+            active_case = conversation.active_case or get_or_create_unsorted_case(db)
+            return await finalize_reply(case=active_case, reply_text=reply_text, mode="court-sync-command")
+
     if settings.chat_tools_router_enabled and settings.openai_api_key.strip():
         try:
             from .chat_tools import run_chat_tools_router
@@ -2297,12 +2310,6 @@ async def assistant_ingest_text(
         reply_text = move_documents_by_chat_command(db, text)
         unsorted_case = get_or_create_unsorted_case(db)
         return await finalize_reply(case=unsorted_case, reply_text=reply_text, mode="documents-manual-move")
-
-    if looks_like_court_search_command(text):
-        reply_text = handle_court_sync_chat_command(db, text, _)
-        if reply_text:
-            active_case = conversation.active_case or get_or_create_unsorted_case(db)
-            return await finalize_reply(case=active_case, reply_text=reply_text, mode="court-sync-command")
 
     _command_conversation, command_case = resolve_case_for_conversation(
         db,
