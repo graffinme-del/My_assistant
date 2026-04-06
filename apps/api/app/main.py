@@ -1825,6 +1825,100 @@ def parse_collect_folder_title(text: str) -> str:
     return ""
 
 
+def looks_like_rename_case_request(text: str) -> bool:
+    """«Переименуй папку … в …», «смени название папки … на …»."""
+    t = (text or "").lower()
+    if re.search(r"\b(?:переименуй|переименовать)\b", t):
+        return True
+    if re.search(r"(?:смени|измени)\s+название\s+(?:папк|дела)", t):
+        return True
+    return False
+
+
+def parse_rename_case_request(text: str) -> tuple[str, str] | None:
+    """(подсказка старого названия или номера, новое название)."""
+    t = (text or "").strip()
+    if not t:
+        return None
+    m = re.search(
+        r"(?:переименуй(?:те)?|переименовать)\s+(?:папк[ау]?|дело)\s+(?:«([^»]+)»|\"([^\"]+)\"|'([^']+)')\s+в\s+(?:«([^»]+)»|\"([^\"]+)\"|'([^']+)')",
+        t,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        old = next((g for g in m.groups()[:3] if g), "")
+        new = next((g for g in m.groups()[3:] if g), "")
+        if old.strip() and new.strip():
+            return (old.strip(), new.strip())
+    m = re.search(
+        r"(?:переименуй(?:те)?|переименовать)\s+(?:папк[ау]?|дело)\s+(.+?)\s+в\s+(.+)$",
+        t,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if m:
+        old = m.group(1).strip().strip('"\'«»')
+        new = m.group(2).strip().strip('"\'«»')
+        new = re.sub(r"[.!?…]+$", "", new).strip()
+        if old and new:
+            return (old, new)
+    m = re.search(
+        r"(?:смени|измени)\s+название\s+(?:папк[иы]|дела)\s+(.+?)\s+на\s+(.+)$",
+        t,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if m:
+        old = m.group(1).strip().strip('"\'«»')
+        new = m.group(2).strip().strip('"\'«»')
+        new = re.sub(r"[.!?…]+$", "", new).strip()
+        if old and new:
+            return (old, new)
+    return None
+
+
+def handle_rename_case_chat(db: Session, text: str) -> tuple[str, Case | None]:
+    parsed = parse_rename_case_request(text)
+    if not parsed:
+        return (
+            "Не разобрал переименование. Примеры:\n"
+            "• переименуй папку «Старое» в «Новое»\n"
+            "• переименуй папку Дело A40-19021/2025 в Банкротство Эмиль\n"
+            "• смени название папки Старое на Новое",
+            None,
+        )
+    old_hint, new_title = parsed
+    if not new_title or len(new_title) > 255:
+        return "Новое название пустое или слишком длинное (макс. 255 символов).", None
+    cases = db.query(Case).all()
+    case: Case | None = None
+    extracted = extract_case_number(old_hint)
+    if extracted:
+        norm = normalize_arbitr_case_number(extracted)
+        case = db.query(Case).filter(Case.case_number == norm).first()
+    if not case:
+        case = find_case_by_hint(cases, old_hint)
+    if not case:
+        return (
+            f'Не нашёл папку по подсказке «{old_hint}». Уточните название как в списке дел или номер дела (например A40-19021/2025).',
+            None,
+        )
+    prev = case.title
+    case.title = new_title[:255]
+    db.add(case)
+    db.add(
+        CaseEvent(
+            case_id=case.id,
+            event_type="case_renamed",
+            body=f"Переименование папки: «{prev}» → «{case.title}»",
+        )
+    )
+    db.commit()
+    db.refresh(case)
+    return (
+        f'Готово: папка переименована «{prev}» → «{case.title}» (номер дела в системе: {case.case_number}).',
+        case,
+    )
+
+
 def preview_move_all_documents_from_active_case_to_folder(
     db: Session, conversation: Conversation, title: str
 ) -> tuple[str, Case | None]:
@@ -2259,6 +2353,16 @@ async def assistant_ingest_text(
             reply_text=reply_text,
             mode="message-saved-to-case",
             refresh_summary=True,
+        )
+
+    if looks_like_rename_case_request(text):
+        reply_text, target_case = handle_rename_case_chat(db, text)
+        case_for_reply = target_case if target_case is not None else get_or_create_unsorted_case(db)
+        return await finalize_reply(
+            case=case_for_reply,
+            reply_text=reply_text,
+            mode="case-rename",
+            refresh_summary=target_case is not None,
         )
 
     if looks_like_court_search_command(text):
