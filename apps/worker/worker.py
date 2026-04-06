@@ -204,20 +204,57 @@ def ingest_downloaded_file_to_case(path: Path, case_id: int | None) -> dict:
         )
 
 
-def _kad_activate_participant_tab(page) -> None:
-    """Переключение на вкладку/режим «Участник», если главная открыта в режиме «Номер дела»."""
-    try:
-        tab = page.get_by_text(re.compile(r"Участник\s+дела", re.IGNORECASE)).first
-        tab.click(timeout=5000)
-        page.wait_for_timeout(900)
-    except Exception:
+def _kad_dismiss_overlays(page) -> None:
+    """Закрытие cookie/баннеров, перекрывающих форму поиска."""
+    for pattern in (
+        r"Принять(\s+все)?",
+        r"Согласен",
+        r"Согласна",
+        r"Понятно",
+        r"Закрыть",
+        r"^OK$",
+    ):
         try:
-            page.locator("a,button,span,div").filter(has_text=re.compile(r"^\s*Участник дела\s*$")).first.click(
-                timeout=3000
-            )
-            page.wait_for_timeout(800)
+            btn = page.get_by_role("button", name=re.compile(pattern, re.IGNORECASE)).first
+            if btn.is_visible(timeout=600):
+                btn.click(timeout=2500)
+                page.wait_for_timeout(500)
         except Exception:
-            pass
+            continue
+
+
+def _kad_prepare_homepage(page, nav_timeout: int) -> None:
+    page.wait_for_timeout(800)
+    _kad_dismiss_overlays(page)
+    try:
+        page.wait_for_selector("input, textarea", timeout=min(28000, nav_timeout))
+    except Exception:
+        pass
+
+
+def _kad_activate_participant_tab(page) -> None:
+    """Переключение на режим поиска по участнику (вкладка / ссылка / кнопка)."""
+    patterns = (
+        re.compile(r"Участник\s+дела", re.IGNORECASE),
+        re.compile(r"^Участник$", re.IGNORECASE),
+        re.compile(r"По\s+участнику", re.IGNORECASE),
+    )
+    for rx in patterns:
+        try:
+            el = page.get_by_text(rx).first
+            if el.is_visible(timeout=2000):
+                el.click(timeout=5000)
+                page.wait_for_timeout(1000)
+                return
+        except Exception:
+            continue
+    try:
+        tab = page.locator('[role="tab"]').filter(has_text=re.compile(r"Участник", re.I)).first
+        if tab.is_visible(timeout=1500):
+            tab.click(timeout=4000)
+            page.wait_for_timeout(900)
+    except Exception:
+        pass
 
 
 def _fill_search_input(page, label_text: str, value: str) -> bool:
@@ -228,8 +265,14 @@ def _fill_search_input(page, label_text: str, value: str) -> bool:
         and " " in value.strip()
         and not (value.strip().startswith(('"', "«", "'")))
     ):
-        # Рекомендация КАД для фраз из нескольких слов
         fill_value = f'"{value.strip()}"'
+
+    is_participant = label_text.lower().startswith("участник")
+    ph_keys = (
+        ("участник", "участ", "сторон", "лицо", "фио", "наименован")
+        if is_participant
+        else ("номер", "дел", "case", "№")
+    )
 
     candidates = [
         f"text={label_text}",
@@ -238,21 +281,95 @@ def _fill_search_input(page, label_text: str, value: str) -> bool:
     for selector in candidates:
         try:
             anchor = page.locator(selector).first
+            if not anchor.is_visible(timeout=1500):
+                continue
             target = anchor.locator("xpath=following::input[1]").first
             target.fill("")
             target.fill(fill_value)
             return True
         except Exception:
             continue
+
+    try:
+        for role_name in (
+            r"Участник",
+            r"участник",
+            r"Номер дела",
+            r"номер",
+        ):
+            if is_participant and "номер" in role_name.lower():
+                continue
+            if not is_participant and "участник" in role_name.lower():
+                continue
+            try:
+                tb = page.get_by_role("textbox", name=re.compile(role_name, re.I)).first
+                if tb.is_visible(timeout=1200):
+                    tb.fill(fill_value)
+                    return True
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    try:
+        loc = page.locator("input, textarea")
+        for i in range(min(loc.count(), 40)):
+            ph = loc.nth(i)
+            try:
+                if not ph.is_visible(timeout=400):
+                    continue
+            except Exception:
+                continue
+            raw = (
+                (ph.get_attribute("placeholder") or "")
+                + " "
+                + (ph.get_attribute("aria-label") or "")
+                + " "
+                + (ph.get_attribute("title") or "")
+            ).lower()
+            if any(k in raw for k in ph_keys):
+                try:
+                    ph.fill("")
+                    ph.fill(fill_value)
+                    return True
+                except Exception:
+                    continue
+    except Exception:
+        pass
+
+    try:
+        inputs = page.locator("input, textarea")
+        n = inputs.count()
+        for idx in range(min(n, 24)):
+            candidate = inputs.nth(idx)
+            try:
+                if not candidate.is_visible(timeout=400):
+                    continue
+            except Exception:
+                continue
+            placeholder = (candidate.get_attribute("placeholder") or "").lower()
+            if is_participant:
+                if any(k in placeholder for k in ph_keys):
+                    candidate.fill("")
+                    candidate.fill(fill_value)
+                    return True
+            else:
+                if any(k in placeholder for k in ph_keys):
+                    candidate.fill("")
+                    candidate.fill(fill_value)
+                    return True
+    except Exception:
+        pass
+
     try:
         inputs = page.locator("input")
-        for idx in range(min(inputs.count(), 6)):
+        for idx in range(min(inputs.count(), 12)):
             candidate = inputs.nth(idx)
             placeholder = (candidate.get_attribute("placeholder") or "").lower()
             if label_text.lower()[:5] in placeholder:
                 candidate.fill(fill_value)
                 return True
-        if label_text.lower().startswith("участник"):
+        if is_participant and inputs.count() > 0:
             inputs.nth(0).fill(fill_value)
             return True
         if "номер" in label_text.lower() and inputs.count() >= 3:
@@ -261,6 +378,24 @@ def _fill_search_input(page, label_text: str, value: str) -> bool:
     except Exception:
         return False
     return False
+
+
+def _kad_click_find_button(page) -> None:
+    """Кнопка поиска на главной КАД (разная вёрстка)."""
+    errors: list[str] = []
+    for fn in (
+        lambda: page.get_by_role("button", name=re.compile(r"Найти")).first.click(timeout=8000),
+        lambda: page.locator("button:has-text('Найти')").first.click(timeout=8000),
+        lambda: page.locator("input[type='submit'][value*='Найти']").first.click(timeout=8000),
+        lambda: page.get_by_text("Найти", exact=True).first.click(timeout=8000),
+    ):
+        try:
+            fn()
+            return
+        except Exception as e:
+            errors.append(str(e)[:120])
+            continue
+    raise RuntimeError("Не найдена кнопка «Найти»: " + "; ".join(errors[:3]))
 
 
 def _normalize_kad_card_url(value: str) -> str:
@@ -341,17 +476,19 @@ def _search_cases_once(query_type: str, query_value: str, job_id: int | None = N
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
         nav_timeout = max(60_000, COURT_SYNC_TIMEOUT_SEC * 1000)
+        page.set_viewport_size({"width": 1440, "height": 900})
         page.goto("https://kad.arbitr.ru/", wait_until="domcontentloaded", timeout=nav_timeout)
-        page.wait_for_timeout(2500)
+        _kad_prepare_homepage(page, nav_timeout)
         if query_type == "case_number":
             ok = _fill_search_input(page, "Номер дела", query_value)
         else:
             _kad_activate_participant_tab(page)
+            page.wait_for_timeout(600)
             ok = _fill_search_input(page, "Участник дела", query_value)
         if not ok:
             browser.close()
             raise RuntimeError("Не удалось найти поле поиска на странице КАД.")
-        page.get_by_text("Найти").first.click()
+        _kad_click_find_button(page)
         page.wait_for_timeout(2000)
         if job_id is not None:
             report_progress(job_id, "searching", "Жду выдачу КАД (поиск карточек дела)...")
