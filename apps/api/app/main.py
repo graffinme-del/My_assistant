@@ -59,6 +59,14 @@ from .court_sync_service import (
 )
 from .config import settings
 from .db import Base, engine, get_db
+from .materials_workflow import (
+    handle_compare_documents_request,
+    handle_extract_deadlines_request,
+    handle_materials_draft_request,
+    looks_like_compare_documents_request,
+    looks_like_extract_deadlines_request,
+    looks_like_materials_draft_request,
+)
 from .models import (
     Case,
     CaseEvent,
@@ -2325,6 +2333,33 @@ async def assistant_ingest_text(
         if query:
             reply_text = search_documents(command_case, command_docs, query)
             return await finalize_reply(case=command_case, reply_text=reply_text, mode="documents-search")
+
+    if looks_like_materials_draft_request(text):
+        reply_text = await handle_materials_draft_request(db, command_case, command_docs, text)
+        return await finalize_reply(
+            case=command_case,
+            reply_text=reply_text,
+            mode="materials-draft",
+            refresh_summary=True,
+        )
+
+    if looks_like_compare_documents_request(text):
+        reply_text = await handle_compare_documents_request(db, command_case, command_docs, text)
+        return await finalize_reply(
+            case=command_case,
+            reply_text=reply_text,
+            mode="materials-compare",
+            refresh_summary=True,
+        )
+
+    if looks_like_extract_deadlines_request(text):
+        reply_text = await handle_extract_deadlines_request(db, command_case, text)
+        return await finalize_reply(
+            case=command_case,
+            reply_text=reply_text,
+            mode="materials-deadlines",
+            refresh_summary=True,
+        )
 
     extracted_case_number = payload.preferred_case_number or extract_case_number(text)
     created_case = False

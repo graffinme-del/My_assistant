@@ -71,6 +71,36 @@ async def _llm_chat(user_content: str, *, timeout: float = 45.0) -> str:
     return str(msg).strip()
 
 
+async def llm_system_user(system: str, user: str, *, timeout: float = 120.0) -> str:
+    """Двухролевой вызов (system + user) для специализированных сценариев (материалы, сравнение и т.д.)."""
+    if not settings.openai_api_key.strip():
+        return ""
+    payload = {
+        "model": settings.openai_model,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+    }
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.post(_chat_completions_url(), headers=_llm_headers(), json=payload)
+    try:
+        resp.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        code = e.response.status_code
+        if code == 401:
+            raise ValueError(
+                "OpenAI/OpenRouter вернул 401: проверьте OPENAI_API_KEY и OPENAI_BASE_URL."
+            ) from e
+        raise
+    data = resp.json()
+    choices = data.get("choices") or []
+    if not choices:
+        return ""
+    msg = (choices[0].get("message") or {}).get("content") or ""
+    return str(msg).strip()
+
+
 def _extract_date(text: str) -> date | None:
     match = re.search(r"(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?", text)
     if not match:
