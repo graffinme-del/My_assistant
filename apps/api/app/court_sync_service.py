@@ -235,7 +235,8 @@ _STATUS_RU = {
 
 _STEP_RU = {
     "queued": "ожидает запуска",
-    "searching": "поиск в КАД",
+    "claimed": "запуск",
+    "searching": "поиск в картотеке",
     "opening_case": "открытие карточки дела",
     "downloading": "скачивание файлов",
     "completed": "завершено",
@@ -312,7 +313,8 @@ def _report_snippet_for_user(report: str, *, max_chars: int = 240) -> str:
     return (text[:max_chars] + "…") if len(text) > max_chars else text
 
 
-def _job_stats_line(result_json_raw: str | None) -> str | None:
+def _job_stats_narrative(result_json_raw: str | None) -> str | None:
+    """Короткое предложение с цифрами — без сухого списка «ключ: значение»."""
     try:
         rj = json.loads(result_json_raw or "{}")
     except Exception:
@@ -321,22 +323,22 @@ def _job_stats_line(result_json_raw: str | None) -> str | None:
         return None
     parts: list[str] = []
     if rj.get("downloaded") is not None:
-        parts.append(f"скачано файлов: {rj['downloaded']}")
+        parts.append(f"новых файлов сохранено — {rj['downloaded']}")
     if rj.get("documents_found") is not None:
-        parts.append(f"найдено документов: {rj['documents_found']}")
+        parts.append(f"в выдаче найдено документов — {rj['documents_found']}")
     if rj.get("cases_found") is not None:
-        parts.append(f"дел в выдаче: {rj['cases_found']}")
+        parts.append(f"дел в выдаче — {rj['cases_found']}")
     if rj.get("failures"):
-        parts.append(f"ошибок при загрузке: {rj['failures']}")
+        parts.append(f"не удалось скачать — {rj['failures']}")
     if rj.get("duplicates_skipped"):
-        parts.append(f"пропущено как дубликаты: {rj['duplicates_skipped']}")
+        parts.append(f"пропущено как уже имеющиеся — {rj['duplicates_skipped']}")
     if not parts:
         return None
-    return "Итог: " + ", ".join(parts) + "."
+    return "По цифрам: " + "; ".join(parts) + "."
 
 
 def format_recent_download_jobs_status(db: Session, *, limit: int = 5) -> str:
-    """Краткий статус последних задач загрузки из КАД — без сырых URL и логов Parser-API."""
+    """Краткий статус последних загрузок из КАД — связный текст, без сырых URL и логов."""
     jobs = (
         db.query(CourtSyncJob)
         .filter(CourtSyncJob.run_mode == "download")
@@ -345,54 +347,81 @@ def format_recent_download_jobs_status(db: Session, *, limit: int = 5) -> str:
         .all()
     )
     if not jobs:
-        return "Фоновых загрузок из КАД пока не было. Когда поставите задачу («скачай из КАД…»), статус появится здесь."
+        return (
+            "Пока не было фоновых загрузок из картотеки. Когда попросите скачать материалы "
+            "(например, «скачай из КАД…»), здесь появится краткий итог."
+        )
 
-    lines: list[str] = [
-        "Кратко по последним загрузкам из КАД (это не список файлов в открытой папке в чате):",
-        "",
-    ]
+    intro = (
+        "Ниже — кратко по последним фоновым загрузкам из картотеки арбитражных дел. "
+        "Это не то же самое, что список документов в открытой у вас папке в чате: там только то, что уже привязано к делу."
+    )
+    blocks: list[str] = [intro, ""]
     now = datetime.utcnow()
     for j in jobs:
-        st = _STATUS_RU.get(j.status, j.status)
         stp = _STEP_RU.get(j.step, j.step)
-        lines.append(f"• Задача #{j.id} — {st}. Сейчас: {stp}.")
-        lines.append(f"  {_query_line_ru(j.query_type, j.query_value)}")
+        qline = _query_line_ru(j.query_type, j.query_value)
+        if j.status == "running":
+            head = f"Загрузка №{j.id} ещё идёт: сейчас — {stp}. {qline}"
+        elif j.status == "pending":
+            head = f"Загрузка №{j.id} стоит в очереди. {qline}"
+        elif j.status == "done":
+            head = f"Загрузка №{j.id} завершена. {qline}"
+        elif j.status == "failed":
+            head = f"Загрузка №{j.id} остановилась с ошибкой. {qline}"
+        elif j.status == "needs_manual_step":
+            head = f"Загрузка №{j.id} в основном обработана, но нужна ручная проверка. {qline}"
+        else:
+            st_ru = _STATUS_RU.get(j.status, j.status)
+            head = f"Загрузка №{j.id}: статус «{st_ru}», этап — {stp}. {qline}"
 
-        stats = _job_stats_line(j.result_json)
+        paras: list[str] = [head + "."]
+
+        stats = _job_stats_narrative(j.result_json)
         if stats:
-            lines.append(f"  {stats}")
+            paras.append(stats)
 
         if j.status == "running" and j.started_at:
             started = j.started_at.replace(tzinfo=None) if j.started_at.tzinfo else j.started_at
             age = now - started
             if age > timedelta(minutes=45):
-                lines.append(
-                    f"  Долго выполняется (~{int(age.total_seconds() // 60)} мин) — "
-                    "проверьте, что контейнер worker запущен."
+                paras.append(
+                    f"Процесс идёт уже около {int(age.total_seconds() // 60)} минут. "
+                    "Если цифры не меняются, проверьте, что на сервере запущена фоновая служба загрузки документов."
                 )
 
         snippet = _report_snippet_for_user(j.report_text or "")
         if snippet and not stats:
-            lines.append(f"  {snippet}")
+            paras.append(snippet)
         elif snippet and stats and j.status in ("failed", "needs_manual_step"):
-            lines.append(f"  {snippet}")
+            paras.append(snippet)
 
-        lines.append("")
+        blocks.append(" ".join(paras))
+        blocks.append("")
 
-    lines.append("Полный текст отчёта по одной задаче: напишите «отчёт по задаче #N» (подставьте номер).")
-    return "\n".join(lines).strip()
+    blocks.append(
+        "Подробный текст по одной загрузке можно запросить фразой «отчёт по задаче #N» — подставьте номер из списка выше."
+    )
+    return "\n".join(blocks).strip()
 
 
 def format_sync_status(db: Session, *, limit: int = 8) -> str:
     jobs = db.query(CourtSyncJob).order_by(CourtSyncJob.created_at.desc()).limit(limit).all()
     if not jobs:
-        return "Задач судебной синхронизации пока нет."
-    lines = ["Последние задачи судебной синхронизации:"]
+        return "Задач судебной синхронизации пока не запускали."
+    lines = [
+        "Последние процессы синхронизации с картотекой (кратко, для справки):",
+        "",
+    ]
     for job in jobs:
-        lines.append(
-            f'- #{job.id} | {job.status} | {job.run_mode} | {job.query_type}="{job.query_value}" | шаг: {job.step}'
-        )
-    return "\n".join(lines)
+        st = _STATUS_RU.get(job.status, job.status)
+        stp = _STEP_RU.get(job.step, job.step)
+        qv = (job.query_value or "").strip()
+        if len(qv) > 80:
+            qv = qv[:77] + "…"
+        lines.append(f"• №{job.id} — {st}, этап: {stp}. Режим: {job.run_mode}. Запрос: «{qv}».")
+        lines.append("")
+    return "\n".join(lines).strip()
 
 
 def format_nightly_report(db: Session, *, hours: int = 24) -> str:
