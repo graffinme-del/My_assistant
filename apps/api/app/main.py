@@ -346,8 +346,62 @@ def looks_like_bulk_folder_by_keywords_request(text: str) -> bool:
     )
 
 
+def looks_like_save_message_to_case_request(text: str) -> bool:
+    """«Сохрани это сообщение в папке …» — текст заметки в дело, не массовый перенос файлов."""
+    t = text.lower()
+    if not any(k in t for k in ["сохрани", "сохранить", "запиши", "записать"]):
+        return False
+    if any(
+        k in t
+        for k in [
+            "сохрани документ",
+            "сохранить документ",
+            "сохрани файл",
+            "сохранить файл",
+            "сохрани все док",
+        ]
+    ):
+        return False
+    if not any(k in t for k in ["сообщение", "переписк", "заметку", "этот текст", "заметка"]):
+        return False
+    return any(k in t for k in ["папк", "дело", "дела", "сделк", "кейс"])
+
+
+def parse_save_message_case_hint(text: str) -> str:
+    """Название дела из кавычек в начале запроса (не из длинного текста ниже)."""
+    head = text.split("\n", 1)[0] if "\n" in text else text[:600]
+    for pat in (r"«([^»]+)»", r'"([^"]+)"', r"'([^']+)'"):
+        m = re.search(pat, head)
+        if m:
+            return m.group(1).strip()
+    return ""
+
+
+def extract_saved_message_body_for_case(text: str) -> str:
+    """Текст заметки без строки-команды «Сохрани сообщение…»."""
+    lines = text.split("\n")
+    if len(lines) >= 2:
+        fl = lines[0].lower()
+        if ("сохрани" in fl or "запиши" in fl or "сохранить" in fl) and any(
+            k in fl for k in ["сообщение", "переписк", "заметк", "текст"]
+        ):
+            return "\n".join(lines[1:]).strip()
+    stripped = re.sub(
+        r"^\s*(?:сохрани|сохранить|запиши|записать)\s+(?:это\s+)?(?:сообщение|текст)\s+(?:в\s+)?(?:папк[еиу]?\s+|дел[аеу]?\s+)?[«\"']([^»\"']+)[»\"']\s*",
+        "",
+        text,
+        count=1,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if stripped.strip() and stripped != text:
+        return stripped.strip()
+    return text.strip()
+
+
 def looks_like_move_all_from_active_case_to_folder(text: str) -> bool:
     """«Собери все документы в папку …», «в отдельную папку», без «Создай папку … содержащие:»."""
+    if looks_like_save_message_to_case_request(text):
+        return False
     t = text.lower()
     if "создай папк" in t or "создай дело" in t:
         return False
@@ -1959,6 +2013,41 @@ def handle_court_sync_chat_command(db: Session, text: str, user_role: str) -> st
     )
 
 
+async def save_message_to_case_event(db: Session, text: str, cases: list[Case]) -> tuple[str, Case | None]:
+    """Сохраняет текст сообщения как заметку по делу (CaseEvent assistant_message)."""
+    hint = parse_save_message_case_hint(text)
+    if not hint:
+        return (
+            "Укажите папку или дело в кавычках, например: Сохрани это сообщение в папке «Название»",
+            None,
+        )
+    case = find_case_by_hint(cases, hint)
+    if not case:
+        case, _ = ensure_chat_case(db, hint)
+    body = extract_saved_message_body_for_case(text)
+    if not body.strip():
+        body = text
+    db.add(CaseEvent(case_id=case.id, event_type="assistant_message", body=body[:40000]))
+    if (
+        settings.case_note_digest_enabled
+        and case.case_number != "UNSORTED"
+        and len(body) >= settings.case_note_digest_min_chars
+        and settings.openai_api_key.strip()
+    ):
+        try:
+            digest = await llm_digest_incoming_case_note(body, case.title)
+            if digest:
+                db.add(CaseEvent(case_id=case.id, event_type="case_note_digest", body=digest[:4000]))
+        except Exception:
+            pass
+    db.commit()
+    reply = (
+        f"Сохранил текст в деле «{case.title}» ({case.case_number}). "
+        f"Символов: {len(body)}."
+    )
+    return reply, case
+
+
 @app.post("/assistant/ingest-text", response_model=AssistantIngestOut)
 async def assistant_ingest_text(
     payload: AssistantIngestIn,
@@ -2074,6 +2163,16 @@ async def assistant_ingest_text(
             reply_text=reply_text,
             mode="case-tags",
             created_case=created_case,
+            refresh_summary=True,
+        )
+
+    if looks_like_save_message_to_case_request(text):
+        reply_text, target_case = await save_message_to_case_event(db, text, cases)
+        case_for_reply = target_case if target_case is not None else get_or_create_unsorted_case(db)
+        return await finalize_reply(
+            case=case_for_reply,
+            reply_text=reply_text,
+            mode="message-saved-to-case",
             refresh_summary=True,
         )
 
