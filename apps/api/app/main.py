@@ -240,6 +240,32 @@ def resolve_case_for_chat(
     return get_or_create_unsorted_case(db)
 
 
+def extract_move_source_case_number(text: str) -> str | None:
+    """Номер дела-источника до «в папку» / «перенеси», чтобы не перепутать с целевой папкой."""
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    parts = re.split(r"\bв\s+папк[ау]\b", raw, maxsplit=1, flags=re.IGNORECASE)
+    head = parts[0] if parts else raw
+    n = extract_case_number(head)
+    if n:
+        return n
+    parts = re.split(r"\b(?:перенеси|перемести)\b", raw, maxsplit=1, flags=re.IGNORECASE)
+    head = parts[0] if parts else raw
+    if len(head.strip()) > 2:
+        n = extract_case_number(head)
+        if n:
+            return n
+    return None
+
+
+def resolve_move_source_case_from_text(db: Session, text: str) -> Case | None:
+    num = extract_move_source_case_number(text)
+    if not num:
+        return None
+    return db.query(Case).filter(Case.case_number == num).first()
+
+
 def local_storage_path(doc: Document) -> Path | None:
     if not doc.s3_key.startswith("local://"):
         return None
@@ -1941,6 +1967,43 @@ def handle_rename_case_chat(db: Session, text: str) -> tuple[str, Case | None]:
     )
 
 
+def execute_move_all_documents_to_case_folder(db: Session, src: Case, target_title: str) -> tuple[str, Case | None]:
+    """Перенос всех документов из дела src в папку target_title — сразу, без шага подтверждения."""
+    tt = (target_title or "").strip()
+    if not tt:
+        return "Не вижу название папки назначения (куда переносить).", None
+    docs = db.query(Document).filter(Document.case_id == src.id).order_by(Document.created_at.asc()).all()
+    if not docs:
+        return f'В деле «{src.title}» ({src.case_number}) нет документов для переноса.', None
+    target_case, _created = ensure_chat_case(db, tt)
+    if target_case.id == src.id:
+        return "Источник и папка назначения совпадают — перенос не нужен.", None
+    for doc in docs:
+        old_case_id = doc.case_id
+        doc.case_id = target_case.id
+        db.add(
+            CaseEvent(
+                case_id=target_case.id,
+                event_type="document_reclassified",
+                body=f'Документ "{doc.filename}" перенесён из дела «{src.title}» ({src.case_number}).',
+            )
+        )
+        db.add(
+            CaseEvent(
+                case_id=old_case_id,
+                event_type="document_reclassified",
+                body=f'Документ "{doc.filename}" перенесён в дело «{target_case.title}» ({target_case.case_number}).',
+            )
+        )
+    db.commit()
+    db.refresh(target_case)
+    return (
+        f"Готово: перенесено {len(docs)} документов из «{src.title}» ({src.case_number}) "
+        f'в «{target_case.title}» ({target_case.case_number}).',
+        target_case,
+    )
+
+
 def preview_move_all_documents_from_active_case_to_folder(
     db: Session, conversation: Conversation, title: str
 ) -> tuple[str, Case | None]:
@@ -2485,6 +2548,11 @@ async def assistant_ingest_text(
         if not title:
             title = parse_case_title_from_folder_request(text)
         save_folder_request_context(db, title or "")
+        src_explicit = resolve_move_source_case_from_text(db, text)
+        if src_explicit and title:
+            reply_text, target_case = execute_move_all_documents_to_case_folder(db, src_explicit, title)
+            case_for_reply = target_case if target_case is not None else get_or_create_unsorted_case(db)
+            return await finalize_reply(case=case_for_reply, reply_text=reply_text, mode="documents-bulk-move-direct")
         reply_text, target_case = preview_move_all_documents_from_active_case_to_folder(db, conversation, title)
         case_for_reply = target_case if target_case is not None else get_or_create_unsorted_case(db)
         return await finalize_reply(case=case_for_reply, reply_text=reply_text, mode="documents-bulk-move-active-case")
