@@ -328,6 +328,8 @@ def _job_stats_line(result_json_raw: str | None) -> str | None:
         parts.append(f"дел в выдаче: {rj['cases_found']}")
     if rj.get("failures"):
         parts.append(f"ошибок при загрузке: {rj['failures']}")
+    if rj.get("duplicates_skipped"):
+        parts.append(f"пропущено как дубликаты: {rj['duplicates_skipped']}")
     if not parts:
         return None
     return "Итог: " + ", ".join(parts) + "."

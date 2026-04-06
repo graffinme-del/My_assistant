@@ -41,6 +41,22 @@ if _PARSER_FB_RAW:
 else:
     PARSER_PDF_FALLBACK_BROWSER = True
 
+PARSER_PDF_DOWNLOAD_RETRIES = max(1, int(os.getenv("PARSER_PDF_DOWNLOAD_RETRIES", "3")))
+
+
+def parser_pdf_download_with_retries(doc_url: str) -> bytes:
+    """Несколько попыток pdf_download (сетевые сбои / лимиты Parser-API)."""
+    last: Exception | None = None
+    for attempt in range(PARSER_PDF_DOWNLOAD_RETRIES):
+        try:
+            return parser_pdf_download(doc_url)
+        except Exception as exc:
+            last = exc
+            if attempt < PARSER_PDF_DOWNLOAD_RETRIES - 1:
+                time.sleep(1.2 + attempt * 1.8)
+    assert last is not None
+    raise last
+
 
 def _parser_pdf_date_bounds() -> tuple[date | None, date | None]:
     """Границы дат для pdf_download (только Parser-API). Пусто = без фильтра."""
@@ -982,12 +998,14 @@ def download_documents_via_parser(
     preview_lines: list[str],
     results: list[dict],
     preferred_case_id: int | None,
-) -> tuple[int, int, int, list[str]]:
-    """Скачивание PDF по URL из ответа Parser-API; при сбое pdf_download — опционально Playwright."""
+) -> tuple[int, int, int, int, list[str]]:
+    """Скачивание PDF по URL из ответа Parser-API; при сбое pdf_download — опционально Playwright.
+    Возвращает: downloaded (новые файлы в деле), discovered, failures, duplicates_skipped, lines."""
     job_id = int(job["id"])
     downloaded = 0
     discovered = 0
     failures = 0
+    duplicates_skipped = 0
     lines = preview_lines[:]
 
     for case_data in target_cases:
@@ -1056,7 +1074,7 @@ def download_documents_via_parser(
                 fn = f"{fn}.pdf"
             try:
                 report_progress(job_id, "downloading", f"Parser-API pdf_download: {doc_url[:120]}…")
-                raw = parser_pdf_download(doc_url)
+                raw = parser_pdf_download_with_retries(doc_url)
                 safe_name = re.sub(r"[^\w.\-а-яА-Я]", "_", fn)
                 target = Path(tempfile.mkdtemp()) / safe_name
                 target.write_bytes(raw)
@@ -1110,7 +1128,15 @@ def download_documents_via_parser(
             assert target is not None
             try:
                 ingest_result = ingest_downloaded_file_to_case(target, effective_preferred_id)
+                routing = (ingest_result.get("routing_mode") or "").strip()
                 local_document = ingest_result.get("document") or {}
+                if routing == "duplicate-skip":
+                    duplicates_skipped += 1
+                    lines.append(
+                        f"- Пропуск дубликата (уже в деле): {local_document.get('filename') or fn}"
+                    )
+                    time.sleep(max(1, COURT_SYNC_DELAY_SEC))
+                    continue
                 doc = {
                     "remote_document_id": doc_url[:500],
                     "case_source_id": case_source_id,
@@ -1138,7 +1164,7 @@ def download_documents_via_parser(
                 lines.append(f"- Не удалось сохранить документ после скачивания {doc_url[:100]}: {exc}")
             time.sleep(max(1, COURT_SYNC_DELAY_SEC))
 
-    return downloaded, discovered, failures, lines
+    return downloaded, discovered, failures, duplicates_skipped, lines
 
 
 def process_job(job: dict) -> None:
@@ -1199,19 +1225,21 @@ def process_job(job: dict) -> None:
     downloaded = 0
     discovered = 0
     failures = 0
+    duplicates_skipped = 0
     lines = preview_lines[:]
 
     if COURT_SYNC_USE_PARSER_API and run_mode == "download":
-        downloaded, discovered, failures, lines = download_documents_via_parser(
+        downloaded, discovered, failures, duplicates_skipped, lines = download_documents_via_parser(
             job, target_cases, preview_lines, results, preferred_case_id
         )
         lines.append(
-            f"Итог: найдено дел {len(results)}, найдено документов {discovered}, "
-            f"скачано {downloaded}, ошибок {failures} (режим Parser-API)."
+            f"Итог: найдено дел {len(results)}, ссылок на PDF в карточках: {discovered}, "
+            f"новых файлов в деле: {downloaded}, пропущено дубликатов: {duplicates_skipped}, "
+            f"ошибок: {failures} (Parser-API)."
         )
-        if run_mode != "preview" and downloaded == 0:
+        if run_mode != "preview" and downloaded == 0 and duplicates_skipped == 0:
             lines.append(
-                "Автоскачивание через Parser-API не принесло файлов. "
+                "Автоскачивание через Parser-API не добавило новых файлов в дело (не было ни одной успешной загрузки). "
                 "Проверьте лимит ключа, статус сервиса arbitr или отключите COURT_SYNC_USE_PARSER_API для режима браузера."
             )
             final_status = "needs_manual_step"
@@ -1225,6 +1253,7 @@ def process_job(job: dict) -> None:
                 "cases_found": len(results),
                 "documents_found": discovered,
                 "downloaded": downloaded,
+                "duplicates_skipped": duplicates_skipped,
                 "failures": failures,
                 "backend": "parser_api",
             },
@@ -1276,13 +1305,18 @@ def process_job(job: dict) -> None:
                     report_progress(job_id, "downloading", f'Скачиваю: {doc.get("title") or doc.get("file_url")}')
                     path = download_document_via_context(context, doc["file_url"])
                     ingest_result = ingest_downloaded_file_to_case(path, effective_preferred_id)
+                    routing = (ingest_result.get("routing_mode") or "").strip()
                     local_document = ingest_result.get("document") or {}
                     doc["case_source_id"] = case_source_id
                     doc["local_document_id"] = local_document.get("id")
                     doc["filename"] = local_document.get("filename") or path.name
-                    doc["status"] = "downloaded"
+                    if routing == "duplicate-skip":
+                        duplicates_skipped += 1
+                        doc["status"] = "duplicate_skip"
+                    else:
+                        doc["status"] = "downloaded"
+                        downloaded += 1
                     register_document_source(job_id, doc)
-                    downloaded += 1
                 except Exception as exc:
                     failures += 1
                     register_document_source(
@@ -1300,7 +1334,10 @@ def process_job(job: dict) -> None:
                 time.sleep(max(1, COURT_SYNC_DELAY_SEC))
             browser.close()
 
-    lines.append(f"Итог: найдено дел {len(results)}, найдено документов {discovered}, скачано {downloaded}, ошибок {failures}.")
+    lines.append(
+        f"Итог: найдено дел {len(results)}, найдено документов {discovered}, "
+        f"новых файлов: {downloaded}, пропущено дубликатов: {duplicates_skipped}, ошибок: {failures}."
+    )
     if run_mode != "preview" and downloaded == 0:
         lines.append("Автоскачивание не принесло файлов. Скорее всего, КАД требует ручной шаг (капча/подтверждение) или структура документов не распознана.")
         final_status = "needs_manual_step"
@@ -1310,7 +1347,13 @@ def process_job(job: dict) -> None:
         job_id,
         final_status,
         "\n".join(lines),
-        {"cases_found": len(results), "documents_found": discovered, "downloaded": downloaded, "failures": failures},
+        {
+            "cases_found": len(results),
+            "documents_found": discovered,
+            "downloaded": downloaded,
+            "duplicates_skipped": duplicates_skipped,
+            "failures": failures,
+        },
     )
 
 
