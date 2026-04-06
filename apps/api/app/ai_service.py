@@ -17,11 +17,12 @@ from PIL import Image
 from pypdf import PdfReader
 import pypdfium2 as pdfium
 import pytesseract
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from .case_number import normalize_arbitr_case_number
 from .config import settings
-from .models import Case, CaseEvent, CaseTag, Task
+from .models import Case, CaseEvent, CaseTag, Document, Task
 
 
 def _chat_completions_url() -> str:
@@ -388,18 +389,23 @@ def _tokenize_tag_values(raw: str) -> list[str]:
     return deduped
 
 
-def find_case_by_hint(cases: list[Case], hint: str) -> Case | None:
+def find_case_by_hint(cases: list[Case], hint: str, *, db: Session | None = None) -> Case | None:
+    """
+    Подбор дела по названию/номеру/тегам. Если совпадений несколько (одинаковое имя папки у TAG-… и у дела с номером),
+    при переданном db предпочитаем дело с документами и «настоящим» номером, а не пустой TAG-папкой.
+    """
     norm_hint = _normalize(hint)
     if not norm_hint:
         return None
 
-    best: Case | None = None
-    best_score = 0.0
+    scored: list[tuple[Case, float]] = []
     for case in cases:
         score = 0.0
         title_norm = _normalize(case.title)
         if title_norm and (title_norm in norm_hint or norm_hint in title_norm):
             score += 0.8
+        if title_norm == norm_hint:
+            score += 0.12
         if case.case_number and _normalize(case.case_number) in norm_hint:
             score += 0.95
         for tag in getattr(case, "tags", []):
@@ -408,10 +414,39 @@ def find_case_by_hint(cases: list[Case], hint: str) -> Case | None:
                 continue
             if tag_norm in norm_hint or norm_hint in tag_norm:
                 score += 0.7 if tag.kind == "alias" else 0.45
-        if score > best_score:
-            best_score = score
-            best = case
-    return best if best_score >= 0.65 else None
+        if score >= 0.65:
+            scored.append((case, score))
+
+    if not scored:
+        return None
+    if len(scored) == 1:
+        return scored[0][0]
+
+    if db is None:
+        return max(scored, key=lambda x: x[1])[0]
+
+    case_ids = [c.id for c, _ in scored]
+    counts_rows = (
+        db.query(Document.case_id, func.count(Document.id))
+        .filter(Document.case_id.in_(case_ids))
+        .group_by(Document.case_id)
+        .all()
+    )
+    count_map = {int(cid): int(n) for cid, n in counts_rows}
+
+    hint_lower = (hint or "").lower()
+
+    def sort_key(item: tuple[Case, float]) -> tuple:
+        case, sc = item
+        cn = case.case_number or ""
+        tag_penalty = 0
+        if cn.startswith("TAG-") and "tag" not in norm_hint and "тег" not in hint_lower:
+            tag_penalty = 1
+        dc = count_map.get(case.id, 0)
+        return (-sc, tag_penalty, -dc, case.id)
+
+    scored.sort(key=sort_key)
+    return scored[0][0]
 
 
 def looks_like_case_tag_update(text: str) -> bool:

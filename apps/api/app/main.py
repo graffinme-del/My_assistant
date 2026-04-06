@@ -221,11 +221,11 @@ def resolve_case_for_chat(
 
     folder_hint = extract_case_hint_from_folder_phrase(text)
     if folder_hint:
-        hinted = find_case_by_hint(cases, folder_hint)
+        hinted = find_case_by_hint(cases, folder_hint, db=db)
         if hinted:
             return hinted
 
-    hinted = find_case_by_hint(cases, text)
+    hinted = find_case_by_hint(cases, text, db=db)
     if hinted:
         return hinted
 
@@ -1424,7 +1424,13 @@ async def assistant_summary_from_text(
 
 def render_document_list(case: Case, docs: list[Document]) -> str:
     if not docs:
-        return f'В папке «{case.title}» пока нет загруженных документов.'
+        note = ""
+        if (case.case_number or "").startswith("TAG-"):
+            note = (
+                " Если документы должны быть здесь, попробуйте запрос по номеру дела "
+                "(например: «покажи документы в папке по делу A40-19021/2025») — могла выбраться пустая служебная папка."
+            )
+        return f'В папке «{case.title}» пока нет загруженных документов.{note}'
     lines = [
         f'В папке «{case.title}» сейчас {len(docs)} документ(ов). Ниже первые 20; при необходимости сузим поиск.',
         "",
@@ -1586,7 +1592,7 @@ def move_documents_by_chat_command(db: Session, text: str) -> str:
     if not m:
         return "Не вижу, в какое дело переносить. Напишите: перенеси документ 4 в дело <название>"
     case_hint = m.group(1).strip(" .:-")
-    target_case = find_case_by_hint(db.query(Case).all(), case_hint)
+    target_case = find_case_by_hint(db.query(Case).all(), case_hint, db=db)
     if not target_case:
         return f'Не нашёл дело по фразе "{case_hint}". Сначала добавьте теги/алиасы или уточните название дела.'
 
@@ -1712,7 +1718,7 @@ def build_bulk_move_candidates(db: Session, keywords: list[str], *, docs_scope: 
 
 
 def ensure_chat_case(db: Session, title: str) -> tuple[Case, bool]:
-    case = find_case_by_hint(db.query(Case).all(), title)
+    case = find_case_by_hint(db.query(Case).all(), title, db=db)
     created = False
     if not case:
         case = Case(
@@ -1911,7 +1917,7 @@ def handle_rename_case_chat(db: Session, text: str) -> tuple[str, Case | None]:
         norm = normalize_arbitr_case_number(extracted)
         case = db.query(Case).filter(Case.case_number == norm).first()
     if not case:
-        case = find_case_by_hint(cases, old_hint)
+        case = find_case_by_hint(cases, old_hint, db=db)
     if not case:
         return (
             f'Не нашёл папку по подсказке «{old_hint}». Уточните название как в списке дел или номер дела (например A40-19021/2025).',
@@ -2001,7 +2007,7 @@ def apply_pending_move_plan(db: Session, text: str) -> tuple[str, Case | None]:
     for m in re.finditer(r"(\d+)\s*(?:и\s*(\d+))?\s*.*?перенеси\s+в\s+дел[оау]\s+([^.;\n]+)", text, flags=re.IGNORECASE):
         nums = [m.group(1), m.group(2)]
         case_hint = (m.group(3) or "").strip(" .:-")
-        alt_case = find_case_by_hint(all_cases, case_hint)
+        alt_case = find_case_by_hint(all_cases, case_hint, db=db)
         if not alt_case:
             continue
         for raw_num in nums:
@@ -2216,7 +2222,7 @@ async def save_message_to_case_event(db: Session, text: str, cases: list[Case]) 
             "Укажите папку или дело в кавычках, например: Сохрани это сообщение в папке «Название»",
             None,
         )
-    case = find_case_by_hint(cases, hint)
+    case = find_case_by_hint(cases, hint, db=db)
     if not case:
         case, _ = ensure_chat_case(db, hint)
     body = extract_saved_message_body_for_case(text)
@@ -2304,7 +2310,7 @@ async def assistant_ingest_text(
         except Exception:
             tag_update = None
     if tag_update:
-        case = find_case_by_hint(cases, tag_update["case_hint"])
+        case = find_case_by_hint(cases, tag_update["case_hint"], db=db)
         created_case = False
         if not case:
             case = Case(
