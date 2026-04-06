@@ -96,6 +96,9 @@ def parse_court_search_request(text: str) -> CourtSearchRequest | None:
         "файлы по делу",
         "с сайта арбитражного суда",
         "найди дело",
+        "найди и скачай",
+        "найди из кад",
+        "скачай из кад",
         "поставь на отслеживание дело",
     ]
     if any(marker in lowered for marker in case_markers) and m_case:
@@ -130,6 +133,54 @@ def parse_court_search_request(text: str) -> CourtSearchRequest | None:
             CourtSearchRequest(query_type="ogrn", query_value=normalize_ogrn(m_ogrn.group(1))),
             raw,
         )
+
+    # Участник / ФИО: только вместе с явным запросом к КАД (иначе ложные срабатывания)
+    kad_context_markers = (
+        "кад",
+        "kad.arbitr",
+        "арбитраж",
+        "найди и скачай",
+        "найди из кад",
+        "найди в кад",
+        "скачай из кад",
+        "скачай с кад",
+        "скачай все материалы",
+        "материалы дела",
+        "все материалы дела",
+    )
+    if any(m in lowered for m in kad_context_markers):
+        m_quoted = re.search(
+            r"по\s+данным\s+(?:'([^']+)'|\"([^\"]+)\"|«([^»]+)»)",
+            raw,
+            flags=re.IGNORECASE,
+        )
+        name_val = ""
+        if m_quoted:
+            name_val = (m_quoted.group(1) or m_quoted.group(2) or m_quoted.group(3) or "").strip()
+        if not name_val:
+            m_plain = re.search(
+                r"по\s+данным\s+([А-ЯЁ][А-Яа-яЁё]+(?:\s+[А-Яа-яЁё]+){0,5})(?=[\s.!?,;]|$)",
+                raw,
+                flags=re.IGNORECASE,
+            )
+            if m_plain:
+                name_val = m_plain.group(1).strip()
+        if not name_val:
+            m_u = re.search(
+                r"участник[ауе]?\s+дел[ау]?\s+(?:'([^']+)'|\"([^\"]+)\"|«([^»]+)»|([А-ЯЁ][А-Яа-яЁё]+(?:\s+[А-Яа-яЁё]+){0,5}))",
+                raw,
+                flags=re.IGNORECASE,
+            )
+            if m_u:
+                name_val = (
+                    (m_u.group(1) or m_u.group(2) or m_u.group(3) or m_u.group(4) or "").strip()
+                )
+        name_val = normalize_query_value(name_val)
+        if len(name_val) >= 3:
+            return _with_years(
+                CourtSearchRequest(query_type="participant_name", query_value=name_val),
+                raw,
+            )
 
     org_markers = [
         "по организации",
@@ -207,11 +258,16 @@ def looks_like_court_search_command(text: str) -> bool:
             "скачай все материалы дела",
             "скачай все файлы",
             "скачай файлы",
+            "скачай из кад",
+            "скачай с кад",
             "файлы дела",
             "файлы по делу",
             "с сайта арбитражного суда",
             "найди дела по",
             "найди дело",
+            "найди и скачай",
+            "найди из кад",
+            "найди в кад",
             "поставь на отслеживание дело",
             "поставь на отслеживание инн",
             "поставь на отслеживание огрн",
