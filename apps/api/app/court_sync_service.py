@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta
 
 from sqlalchemy.orm import Session
@@ -224,8 +225,116 @@ def enqueue_nightly_jobs(db: Session) -> int:
     return count
 
 
+_STATUS_RU = {
+    "pending": "в очереди",
+    "running": "выполняется",
+    "done": "завершена",
+    "failed": "ошибка",
+    "needs_manual_step": "нужна ручная проверка",
+}
+
+_STEP_RU = {
+    "queued": "ожидает запуска",
+    "searching": "поиск в КАД",
+    "opening_case": "открытие карточки дела",
+    "downloading": "скачивание файлов",
+    "completed": "завершено",
+    "needs_manual_step": "нужны действия",
+    "failed": "ошибка",
+}
+
+_QUERY_TYPE_RU = {
+    "participant_name": "участник",
+    "case_number": "номер дела",
+    "inn": "ИНН",
+    "ogrn": "ОГРН",
+    "organization_name": "организация",
+    "card_url": "ссылка на карточку",
+}
+
+
+def _query_line_ru(query_type: str, query_value: str) -> str:
+    label = _QUERY_TYPE_RU.get(query_type, query_type)
+    qv = (query_value or "").strip()
+    if len(qv) > 100:
+        qv = qv[:97] + "…"
+    return f"{label}: «{qv}»"
+
+
+def _report_snippet_for_user(report: str, *, max_chars: int = 240) -> str:
+    """Убирает URL и техно-логи; оставляет короткую человекочитаемую строку."""
+    if not (report or "").strip():
+        return ""
+    fallback_note = ""
+    clean_lines: list[str] = []
+    for ln in report.splitlines():
+        s = ln.strip()
+        if not s:
+            continue
+        low = s.lower()
+        if "parser-api pdf_download" in low:
+            continue
+        if "playwright fallback" in low and not fallback_note:
+            fallback_note = "Часть файлов качалась запасным способом (браузер), когда API не смог скачать PDF."
+            continue
+        if re.search(r"https?://", s) and len(s) > 80:
+            continue
+        if any(
+            k in s
+            for k in (
+                "Итог:",
+                "Найдено дел",
+                "По запросу",
+                "Поставил задачу",
+                "дела не найдены",
+                "не найдены",
+                "Ошибка поиска",
+                "Не удалось",
+                "Автоскачивание",
+                "лимит",
+            )
+        ):
+            s2 = re.sub(r"https?://\S+", "…", s)
+            clean_lines.append(s2.strip())
+
+    parts: list[str] = []
+    if fallback_note:
+        parts.append(fallback_note)
+    if clean_lines:
+        parts.append(" ".join(clean_lines[-2:])[:max_chars])
+    text = " ".join(parts).strip()
+    if not text:
+        for ln in report.splitlines():
+            s = ln.strip()
+            if s and "http" not in s[:12] and len(s) < 200:
+                return (s[:max_chars] + "…") if len(s) > max_chars else s
+        return ""
+    return (text[:max_chars] + "…") if len(text) > max_chars else text
+
+
+def _job_stats_line(result_json_raw: str | None) -> str | None:
+    try:
+        rj = json.loads(result_json_raw or "{}")
+    except Exception:
+        return None
+    if not isinstance(rj, dict):
+        return None
+    parts: list[str] = []
+    if rj.get("downloaded") is not None:
+        parts.append(f"скачано файлов: {rj['downloaded']}")
+    if rj.get("documents_found") is not None:
+        parts.append(f"найдено документов: {rj['documents_found']}")
+    if rj.get("cases_found") is not None:
+        parts.append(f"дел в выдаче: {rj['cases_found']}")
+    if rj.get("failures"):
+        parts.append(f"ошибок при загрузке: {rj['failures']}")
+    if not parts:
+        return None
+    return "Итог: " + ", ".join(parts) + "."
+
+
 def format_recent_download_jobs_status(db: Session, *, limit: int = 5) -> str:
-    """Краткий статус последних задач загрузки из КАД — для вопросов «ты скачал?», без RAG по документам."""
+    """Краткий статус последних задач загрузки из КАД — без сырых URL и логов Parser-API."""
     jobs = (
         db.query(CourtSyncJob)
         .filter(CourtSyncJob.run_mode == "download")
@@ -234,28 +343,41 @@ def format_recent_download_jobs_status(db: Session, *, limit: int = 5) -> str:
         .all()
     )
     if not jobs:
-        return "Задач загрузки из КАД пока не было."
-    lines = [
-        "Статус фоновых задач КАД (это не список файлов в «текущем деле» в чате):",
+        return "Фоновых загрузок из КАД пока не было. Когда поставите задачу («скачай из КАД…»), статус появится здесь."
+
+    lines: list[str] = [
+        "Кратко по последним загрузкам из КАД (это не список файлов в открытой папке в чате):",
         "",
     ]
     now = datetime.utcnow()
     for j in jobs:
-        lines.append(f"Задача #{j.id} — {j.status}, шаг: {j.step}")
+        st = _STATUS_RU.get(j.status, j.status)
+        stp = _STEP_RU.get(j.step, j.step)
+        lines.append(f"• Задача #{j.id} — {st}. Сейчас: {stp}.")
+        lines.append(f"  {_query_line_ru(j.query_type, j.query_value)}")
+
+        stats = _job_stats_line(j.result_json)
+        if stats:
+            lines.append(f"  {stats}")
+
         if j.status == "running" and j.started_at:
-            age = now - j.started_at.replace(tzinfo=None) if j.started_at.tzinfo else now - j.started_at
+            started = j.started_at.replace(tzinfo=None) if j.started_at.tzinfo else j.started_at
+            age = now - started
             if age > timedelta(minutes=45):
                 lines.append(
-                    f"(Долго в статусе running, прошло ~{int(age.total_seconds() // 60)} мин — "
-                    "проверьте логи worker и что контейнер worker запущен; при сбое можно сбросить задачу в pending.)"
+                    f"  Долго выполняется (~{int(age.total_seconds() // 60)} мин) — "
+                    "проверьте, что контейнер worker запущен."
                 )
-        rep = (j.report_text or "").strip()
-        if rep:
-            if len(rep) > 900:
-                rep = rep[:900] + "\n…"
-            lines.append(rep)
+
+        snippet = _report_snippet_for_user(j.report_text or "")
+        if snippet and not stats:
+            lines.append(f"  {snippet}")
+        elif snippet and stats and j.status in ("failed", "needs_manual_step"):
+            lines.append(f"  {snippet}")
+
         lines.append("")
-    lines.append('Точный отчёт по одной задаче: «отчёт по задаче #N».')
+
+    lines.append("Полный текст отчёта по одной задаче: напишите «отчёт по задаче #N» (подставьте номер).")
     return "\n".join(lines).strip()
 
 
