@@ -1828,9 +1828,14 @@ def parse_collect_folder_title(text: str) -> str:
 def looks_like_rename_case_request(text: str) -> bool:
     """«Переименуй папку … в …», «смени название папки … на …»."""
     t = (text or "").lower()
-    if re.search(r"\b(?:переименуй|переименовать)\b", t):
+    # «переименуйте» не совпадает с отдельным словом «переименуй» — нужно переименуй(?:те)?
+    if re.search(r"\b(?:переименуй(?:те)?|переименовать)\b", t) and any(
+        k in t for k in ("папк", "дело", "дела", "название")
+    ):
         return True
     if re.search(r"(?:смени|измени)\s+название\s+(?:папк|дела)", t):
+        return True
+    if re.search(r"(?:поменяй|замени)\s+название\s+(?:папк[иы]|дела)", t):
         return True
     return False
 
@@ -1863,6 +1868,17 @@ def parse_rename_case_request(text: str) -> tuple[str, str] | None:
             return (old, new)
     m = re.search(
         r"(?:смени|измени)\s+название\s+(?:папк[иы]|дела)\s+(.+?)\s+на\s+(.+)$",
+        t,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if m:
+        old = m.group(1).strip().strip('"\'«»')
+        new = m.group(2).strip().strip('"\'«»')
+        new = re.sub(r"[.!?…]+$", "", new).strip()
+        if old and new:
+            return (old, new)
+    m = re.search(
+        r"(?:поменяй|замени)\s+название\s+(?:папк[иы]|дела)\s+(.+?)\s+на\s+(.+)$",
         t,
         flags=re.IGNORECASE | re.DOTALL,
     )

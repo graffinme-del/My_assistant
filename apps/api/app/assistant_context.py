@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from sqlalchemy.orm import Session
 
 from .ai_service import build_case_summary, llm_summary
@@ -169,6 +171,17 @@ def build_grounded_prompt(
             "Если вопрос задан слишком широко или точных совпадений нет, нужно прямо сказать об этом."
         )
 
+    rename_ops_hint = ""
+    if re.search(
+        r"переименов|название\s+папк|название\s+дела|смени\s+название|поменяй\s+название",
+        user_message.lower(),
+    ):
+        rename_ops_hint = (
+            "\n\n[Системная подсказка] Переименование папки/дела в этом приложении делается командой в чате, "
+            "например: «переименуй папку «старое» в «новое»» или «переименуй папку Старое в Новое». "
+            "Не утверждайте, что это возможно только вручную в интерфейсе — такая команда поддерживается."
+        )
+
     prompt = (
         "Ты личный помощник по судебным делам. "
         "Отвечай по-русски, уверенно, по делу и только на основе найденного контекста. "
@@ -187,5 +200,6 @@ def build_grounded_prompt(
         f"Последние сообщения:\n{history_block}\n\n"
         f"Релевантные фрагменты документов:\n" + "\n\n".join(chunk_lines) + "\n\n"
         f"Текущее сообщение пользователя:\n{user_message}"
+        + rename_ops_hint
     )
     return prompt, source_docs, citations
