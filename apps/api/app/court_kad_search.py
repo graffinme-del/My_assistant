@@ -98,8 +98,15 @@ def parse_court_search_request(text: str) -> CourtSearchRequest | None:
         "найди дело",
         "найди и скачай",
         "найди из кад",
+        "найди в кад",
         "скачай из кад",
         "поставь на отслеживание дело",
+        "проверь кад",
+        "проверь кад на",
+        "проверь кад на наличие",
+        "parser api",
+        "parser-api",
+        "parserapi",
     ]
     if any(marker in lowered for marker in case_markers) and m_case:
         return _with_years(
@@ -147,7 +154,25 @@ def parse_court_search_request(text: str) -> CourtSearchRequest | None:
         "скачай все материалы",
         "материалы дела",
         "все материалы дела",
+        "проверь кад",
+        "проверь кад на",
+        "parser api",
+        "parser-api",
     )
+    # «проверь КАД … по делу банкротство Эмиль» — без номера в стандартной форме
+    if ("кад" in lowered or "kad.arbitr" in lowered) and "по делу" in lowered and not m_case:
+        m_po_delu = re.search(
+            r"по\s+делу\s+(.+?)(?:\.|$|\?|!|;)",
+            raw,
+            flags=re.IGNORECASE,
+        )
+        if m_po_delu:
+            candidate = normalize_query_value(m_po_delu.group(1))
+            if len(candidate) >= 3:
+                return _with_years(
+                    CourtSearchRequest(query_type="organization_name", query_value=candidate),
+                    raw,
+                )
     if any(m in lowered for m in kad_context_markers):
         m_quoted = re.search(
             r"по\s+данным\s+(?:'([^']+)'|\"([^\"]+)\"|«([^»]+)»)",
@@ -339,6 +364,12 @@ def looks_like_court_search_command(text: str) -> bool:
             "найди из кад",
             "найди в кад",
             "поставь на отслеживание дело",
+            "проверь кад",
+            "проверь кад на",
+            "проверь кад на наличие",
+            "parser api",
+            "parser-api",
+            "parserapi",
             "поставь на отслеживание инн",
             "поставь на отслеживание огрн",
             "поставь на отслеживание организацию",

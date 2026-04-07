@@ -2247,7 +2247,19 @@ def handle_court_sync_chat_command(db: Session, text: str, user_role: str) -> st
             return True
         if any(p in low for p in ("не скачай", "не скачивай", "не надо скачивать")):
             return False
-        return "скачай" in low or "скачайте" in low
+        if "скачай" in low or "скачайте" in low:
+            return True
+        if any(
+            p in low
+            for p in (
+                "проверь кад на наличие новых",
+                "проверь кад на новые",
+                "новые документы по делу",
+                "есть ли новые документы",
+            )
+        ):
+            return True
+        return False
 
     run_mode = "download" if _wants_kad_download(request.query_type, lowered) else "preview"
     job = create_sync_job(
@@ -2455,6 +2467,16 @@ async def assistant_ingest_text(
         if reply_text:
             active_case = conversation.active_case or get_or_create_unsorted_case(db)
             return await finalize_reply(case=active_case, reply_text=reply_text, mode="court-sync-command")
+        active_case = conversation.active_case or get_or_create_unsorted_case(db)
+        return await finalize_reply(
+            case=active_case,
+            reply_text=(
+                "Запрос похож на обращение к картотеке (КАД), но не удалось извлечь номер дела, ссылку на карточку "
+                "kad.arbitr.ru, ИНН/ОГРН или название для поиска. Напишите, например: «Скачай из КАД все материалы "
+                "дела А40-12345/2025» или вставьте полную ссылку на карточку дела. Фоновая загрузка идёт через Parser API."
+            ),
+            mode="court-sync-command",
+        )
 
     if looks_like_show_documents_in_folder_only(text):
         _lc, command_case = resolve_case_for_conversation(
