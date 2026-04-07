@@ -126,6 +126,26 @@ def api_post(path: str, json_payload: dict | None = None, files=None, data=None)
     return {}
 
 
+def api_get(path: str) -> dict:
+    headers = {"X-API-Token": OWNER_TOKEN}
+    with httpx.Client(timeout=max(30, COURT_SYNC_TIMEOUT_SEC)) as client:
+        response = client.get(f"{API_BASE}{path}", headers=headers)
+    response.raise_for_status()
+    if response.headers.get("content-type", "").startswith("application/json"):
+        return response.json()
+    return {}
+
+
+def court_sync_job_stopped_remotely(job_id: int) -> bool:
+    """True если задача уже завершена в БД (например отмена из чата) — воркер не должен вызывать complete повторно."""
+    try:
+        data = api_get(f"/internal/court-sync/jobs/{job_id}")
+        j = data.get("job") or {}
+        return j.get("status") != "running"
+    except Exception:
+        return False
+
+
 def claim_job() -> dict | None:
     return api_post("/internal/court-sync/claim").get("job")
 
@@ -1009,6 +1029,9 @@ def download_documents_via_parser(
     lines = preview_lines[:]
 
     for case_data in target_cases:
+        if court_sync_job_stopped_remotely(job_id):
+            lines.append("Загрузка остановлена (задача снята пользователем или завершена извне).")
+            return downloaded, discovered, failures, duplicates_skipped, lines
         case_source_id = register_case_source(job_id, case_data)
         rid = (case_data.get("remote_case_id") or "").strip()
         num = (case_data.get("case_number") or "").strip()
@@ -1068,6 +1091,9 @@ def download_documents_via_parser(
                 effective_preferred_id = cid
 
         for doc_url in urls[:COURT_SYNC_MAX_DOCS_PER_RUN]:
+            if court_sync_job_stopped_remotely(job_id):
+                lines.append("Загрузка остановлена между файлами (задача снята пользователем).")
+                return downloaded, discovered, failures, duplicates_skipped, lines
             target: Path | None = None
             fn = doc_url.rstrip("/").split("/")[-1] or f"kad-{int(time.time())}.pdf"
             if not fn.lower().endswith(".pdf"):
@@ -1172,6 +1198,8 @@ def process_job(job: dict) -> None:
     query_type = str(job["query_type"])
     query_value = str(job["query_value"])
     run_mode = str(job["run_mode"])
+    if court_sync_job_stopped_remotely(job_id):
+        return
     report_progress(job_id, "searching", f'Ищу в КАД: {query_type}="{query_value}"')
     try:
         results = search_cases_for_job(query_type, query_value, job_id=job_id)
@@ -1232,6 +1260,8 @@ def process_job(job: dict) -> None:
         downloaded, discovered, failures, duplicates_skipped, lines = download_documents_via_parser(
             job, target_cases, preview_lines, results, preferred_case_id
         )
+        if court_sync_job_stopped_remotely(job_id):
+            return
         lines.append(
             f"Итог: найдено дел {len(results)}, ссылок на PDF в карточках: {discovered}, "
             f"новых файлов в деле: {downloaded}, пропущено дубликатов: {duplicates_skipped}, "

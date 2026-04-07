@@ -40,6 +40,7 @@ from .ai_service import (
 )
 from .case_number import normalize_arbitr_case_number
 from .court_kad_search import (
+    looks_like_cancel_court_sync_jobs,
     looks_like_court_download_count_question,
     looks_like_court_download_status_question,
     looks_like_court_search_command,
@@ -47,6 +48,7 @@ from .court_kad_search import (
     parse_court_search_request,
 )
 from .court_sync_service import (
+    cancel_active_court_sync_jobs,
     claim_next_sync_job,
     complete_sync_job,
     create_sync_job,
@@ -1271,6 +1273,15 @@ def internal_enqueue_nightly_sync(
     return {"enqueued": enqueue_nightly_jobs(db)}
 
 
+@app.post("/internal/court-sync/cancel-active")
+def internal_cancel_active_court_sync_jobs(
+    db: Session = Depends(get_db), user_role: str = Depends(require_user)
+) -> dict[str, int]:
+    if user_role != "owner":
+        raise HTTPException(status_code=403, detail="Owner token required")
+    return cancel_active_court_sync_jobs(db)
+
+
 @app.post("/internal/court-sync/jobs/{job_id}/progress", response_model=CourtSyncJobOut)
 def internal_update_court_sync_progress(
     job_id: int,
@@ -2195,6 +2206,13 @@ def search_documents(case: Case, docs: list[Document], query: str) -> str:
 
 def handle_court_sync_chat_command(db: Session, text: str, user_role: str) -> str | None:
     lowered = text.lower()
+    if looks_like_cancel_court_sync_jobs(text):
+        stats = cancel_active_court_sync_jobs(db)
+        n = int(stats.get("cancelled", 0))
+        return (
+            f"Снято задач: {n}. Очередь и активные загрузки помечены как отменённые; воркер прекращает скачивание между файлами. "
+            "Повторный запрос с тем же текстом не создаёт вторую параллельную задачу, пока первая не завершена — это ограничивает дубли."
+        )
     if looks_like_kad_downloaded_documents_list(text):
         return format_kad_downloaded_documents_list(db)
     if looks_like_court_download_count_question(text):
@@ -2226,7 +2244,7 @@ def handle_court_sync_chat_command(db: Session, text: str, user_role: str) -> st
             title=request.query_value,
             auto_download=True,
         )
-        job = create_sync_job(
+        job, job_new = create_sync_job(
             db,
             query_type=request.query_type,
             query_value=request.query_value,
@@ -2239,7 +2257,8 @@ def handle_court_sync_chat_command(db: Session, text: str, user_role: str) -> st
         )
         return (
             f'{"Добавил" if created else "Уже отслеживается"} профиль "{request.query_value}" '
-            f'({request.query_type}). Создана задача синхронизации #{job.id}.'
+            f'({request.query_type}). '
+            f'{"Создана задача синхронизации" if job_new else "Уже есть активная задача синхронизации"} #{job.id}.'
         )
 
     def _wants_kad_download(qt: str, low: str) -> bool:
@@ -2262,7 +2281,7 @@ def handle_court_sync_chat_command(db: Session, text: str, user_role: str) -> st
         return False
 
     run_mode = "download" if _wants_kad_download(request.query_type, lowered) else "preview"
-    job = create_sync_job(
+    job, job_new = create_sync_job(
         db,
         query_type=request.query_type,
         query_value=request.query_value,
@@ -2277,6 +2296,16 @@ def handle_court_sync_chat_command(db: Session, text: str, user_role: str) -> st
             period = f" (только документы за {request.parser_year_min}–{request.parser_year_max} г.)"
         else:
             period = f" (только документы за {request.parser_year_min} г.)"
+    if not job_new:
+        if run_mode == "download":
+            return (
+                f"Такая фоновая загрузка уже в работе или в очереди (процесс №{job.id}){period} по запросу «{request.query_value}». "
+                "Дубликат не создавался. Спросите «как там скачивание» или «отмени все задачи КАД», если нужно снять очередь."
+            )
+        return (
+            f"Такой поиск в КАД уже выполняется или стоит в очереди (процесс №{job.id}) по запросу «{request.query_value}». "
+            "Дубликат не создавался."
+        )
     if run_mode == "download":
         return (
             f"Запустил фоновую загрузку материалов из картотеки (процесс №{job.id})"

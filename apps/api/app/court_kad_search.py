@@ -332,7 +332,34 @@ def looks_like_court_download_status_question(text: str) -> bool:
     return False
 
 
+def looks_like_cancel_court_sync_jobs(text: str) -> bool:
+    """Снять очередь и остановить активные загрузки из КАД (не путать с «отчёт по задаче»)."""
+    lowered = (text or "").lower()
+    if re.search(r"(?:отчет|отчёт)\s+(?:по\s+)?(?:задач[еаи])", lowered):
+        return False
+    return any(
+        p in lowered
+        for p in (
+            "сними задачи",
+            "снять задачи",
+            "снять старые задачи",
+            "отмени все задачи",
+            "отмени задачи кад",
+            "отмени задачи скачивания",
+            "останови скачивание",
+            "останови загрузку",
+            "останови фонов",
+            "сбрось очередь",
+            "очисти очередь кад",
+            "удали старые задачи",
+            "убери дубли задач",
+        )
+    )
+
+
 def looks_like_court_search_command(text: str) -> bool:
+    if looks_like_cancel_court_sync_jobs(text):
+        return True
     if looks_like_kad_downloaded_documents_list(text):
         return True
     if looks_like_court_download_count_question(text):

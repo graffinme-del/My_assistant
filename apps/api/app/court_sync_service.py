@@ -63,7 +63,22 @@ def create_sync_job(
     watch_profile_id: int | None = None,
     parser_year_min: int | None = None,
     parser_year_max: int | None = None,
-) -> CourtSyncJob:
+    dedupe: bool = True,
+) -> tuple[CourtSyncJob, bool]:
+    if dedupe:
+        existing = (
+            db.query(CourtSyncJob)
+            .filter(
+                CourtSyncJob.query_type == query_type,
+                CourtSyncJob.query_value == query_value,
+                CourtSyncJob.run_mode == run_mode,
+                CourtSyncJob.status.in_(("pending", "running")),
+            )
+            .order_by(CourtSyncJob.id.desc())
+            .first()
+        )
+        if existing:
+            return existing, False
     job = CourtSyncJob(
         query_type=query_type,
         query_value=query_value,
@@ -79,7 +94,7 @@ def create_sync_job(
     db.add(job)
     db.commit()
     db.refresh(job)
-    return job
+    return job, True
 
 
 def claim_next_sync_job(db: Session) -> CourtSyncJob | None:
@@ -105,6 +120,8 @@ def update_job_progress(db: Session, job_id: int, *, step: str, message: str) ->
     job = db.query(CourtSyncJob).filter(CourtSyncJob.id == job_id).first()
     if not job:
         return None
+    if job.finished_at is not None:
+        return job
     job.step = step[:100]
     if message:
         job.report_text = (job.report_text + ("\n" if job.report_text else "") + message).strip()[:20000]
@@ -119,6 +136,8 @@ def complete_sync_job(db: Session, job_id: int, *, status: str, result: dict, re
     job = db.query(CourtSyncJob).filter(CourtSyncJob.id == job_id).first()
     if not job:
         return None
+    if job.finished_at is not None:
+        return job
     job.status = status
     job.step = "completed" if status == "done" else status
     job.finished_at = datetime.utcnow()
@@ -143,6 +162,27 @@ def complete_sync_job(db: Session, job_id: int, *, status: str, result: dict, re
     db.commit()
     db.refresh(job)
     return job
+
+
+def cancel_active_court_sync_jobs(db: Session) -> dict[str, int]:
+    """Снимает все задачи в очереди (pending) и останавливает помеченные как running (воркер прекращает между шагами)."""
+    n = 0
+    active = (
+        db.query(CourtSyncJob)
+        .filter(CourtSyncJob.status.in_(("pending", "running")))
+        .order_by(CourtSyncJob.id.asc())
+        .all()
+    )
+    for job in active:
+        complete_sync_job(
+            db,
+            job.id,
+            status="cancelled",
+            result={"reason": "user_cancel_all"},
+            report_text="Задача снята по запросу пользователя (очистка очереди / остановка старых загрузок).",
+        )
+        n += 1
+    return {"cancelled": n}
 
 
 def upsert_case_source(
@@ -213,7 +253,7 @@ def enqueue_nightly_jobs(db: Session) -> int:
         )
         if not due:
             continue
-        create_sync_job(
+        _, _ = create_sync_job(
             db,
             query_type=profile.profile_type,
             query_value=profile.query_value,
@@ -221,6 +261,7 @@ def enqueue_nightly_jobs(db: Session) -> int:
             requested_by="nightly",
             trigger_type="nightly",
             watch_profile_id=profile.id,
+            dedupe=False,
         )
         count += 1
     return count
@@ -232,6 +273,7 @@ _STATUS_RU = {
     "done": "завершена",
     "failed": "ошибка",
     "needs_manual_step": "нужна ручная проверка",
+    "cancelled": "отменена",
 }
 
 _STEP_RU = {
@@ -454,6 +496,8 @@ def format_recent_download_jobs_status(db: Session, *, limit: int = 5) -> str:
             head = f"Загрузка №{j.id} остановилась с ошибкой. {qline}"
         elif j.status == "needs_manual_step":
             head = f"Загрузка №{j.id} в основном обработана, но нужна ручная проверка. {qline}"
+        elif j.status == "cancelled":
+            head = f"Загрузка №{j.id} отменена. {qline}"
         else:
             st_ru = _STATUS_RU.get(j.status, j.status)
             head = f"Загрузка №{j.id}: статус «{st_ru}», этап — {stp}. {qline}"
