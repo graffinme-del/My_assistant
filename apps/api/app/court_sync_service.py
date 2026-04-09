@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 
 from sqlalchemy.orm import Session
 
+from .config import settings
 from .models import (
     Case,
     CaseEvent,
@@ -162,6 +163,38 @@ def complete_sync_job(db: Session, job_id: int, *, status: str, result: dict, re
     db.commit()
     db.refresh(job)
     return job
+
+
+def mark_stale_running_court_sync_jobs(db: Session) -> int:
+    """
+    Закрывает «зомби»-задачи: долго в running без complete (упал воркер, зависание браузера и т.д.).
+    Вызывается при выводе статуса в чат, чтобы список не показывал недели «скачивания».
+    """
+    hrs = max(1, int(settings.court_sync_stale_running_hours))
+    cutoff = datetime.utcnow() - timedelta(hours=hrs)
+    stale = (
+        db.query(CourtSyncJob)
+        .filter(
+            CourtSyncJob.status == "running",
+            CourtSyncJob.started_at.isnot(None),
+            CourtSyncJob.started_at < cutoff,
+        )
+        .all()
+    )
+    n = 0
+    for job in stale:
+        complete_sync_job(
+            db,
+            job.id,
+            status="failed",
+            result={"reason": "stale_running", "max_hours": hrs},
+            report_text=(
+                f"Автоматическое закрытие: задача оставалась в статусе «выполняется» дольше {hrs} ч. "
+                "Если загрузка не шла — проверьте воркер; повторите запрос. Чтобы снять очередь вручную: «отмени все задачи КАД»."
+            ),
+        )
+        n += 1
+    return n
 
 
 def cancel_active_court_sync_jobs(db: Session) -> dict[str, int]:
@@ -464,6 +497,8 @@ def format_kad_downloaded_documents_list(db: Session, *, limit: int = 80) -> str
 
 def format_recent_download_jobs_status(db: Session, *, limit: int = 5) -> str:
     """Краткий статус последних загрузок из КАД — связный текст, без сырых URL и логов."""
+    stale_closed = mark_stale_running_court_sync_jobs(db)
+    stale_hrs = max(1, int(settings.court_sync_stale_running_hours))
     jobs = (
         db.query(CourtSyncJob)
         .filter(CourtSyncJob.run_mode == "download")
@@ -481,6 +516,10 @@ def format_recent_download_jobs_status(db: Session, *, limit: int = 5) -> str:
         "Ниже — кратко по последним фоновым загрузкам из картотеки арбитражных дел. "
         "Это не то же самое, что список документов в открытой у вас папке в чате: там только то, что уже привязано к делу."
     )
+    if stale_closed > 0:
+        intro += (
+            f" Только что автоматически закрыто зависших задач (дольше {stale_hrs} ч. в статусе «выполняется»): {stale_closed}."
+        )
     blocks: list[str] = [intro, ""]
     now = datetime.utcnow()
     for j in jobs:
@@ -533,6 +572,7 @@ def format_recent_download_jobs_status(db: Session, *, limit: int = 5) -> str:
 
 
 def format_sync_status(db: Session, *, limit: int = 8) -> str:
+    mark_stale_running_court_sync_jobs(db)
     jobs = db.query(CourtSyncJob).order_by(CourtSyncJob.created_at.desc()).limit(limit).all()
     if not jobs:
         return "Задач судебной синхронизации пока не запускали."

@@ -39,6 +39,8 @@ class Settings(BaseSettings):
     court_sync_max_docs_per_run: int = 200
     court_sync_delay_sec: int = 5
     court_sync_timeout_sec: int = 60
+    # Задачи в статусе running дольше N часов без завершения помечаются сбоем (зависший воркер / обрыв).
+    court_sync_stale_running_hours: int = 8
 
     # Parser-API (kad.arbitr.ru): https://www.parser-api.com/ — заявка на ключ на сайте
     parser_api_key: str = ""

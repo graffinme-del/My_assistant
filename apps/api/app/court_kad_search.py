@@ -19,6 +19,23 @@ def normalize_query_value(value: str) -> str:
     return re.sub(r"\s+", " ", (value or "").strip())
 
 
+def normalize_po_delu_case_hint(candidate: str) -> str:
+    """
+    «По делу банкротство Эмиль» → «Эмиль» (слово «банкротство» — тип процесса, не часть поисковой строки в КАД).
+    """
+    c = normalize_query_value(candidate)
+    if len(c) < 2:
+        return c
+    low = c.casefold()
+    for prefix in ("банкротство ", "дело о банкротстве "):
+        if low.startswith(prefix):
+            remainder = c[len(prefix) :].strip()
+            if len(remainder) >= 2:
+                return remainder
+            break
+    return c
+
+
 def normalize_case_number(value: str) -> str:
     raw = normalize_query_value(value).replace(" ", "").replace("\\", "")
     return normalize_arbitr_case_number(raw)
@@ -167,10 +184,10 @@ def parse_court_search_request(text: str) -> CourtSearchRequest | None:
             flags=re.IGNORECASE,
         )
         if m_po_delu:
-            candidate = normalize_query_value(m_po_delu.group(1))
-            if len(candidate) >= 3:
+            candidate = normalize_po_delu_case_hint(m_po_delu.group(1))
+            if len(candidate) >= 2:
                 return _with_years(
-                    CourtSearchRequest(query_type="organization_name", query_value=candidate),
+                    CourtSearchRequest(query_type="participant_name", query_value=candidate),
                     raw,
                 )
     if any(m in lowered for m in kad_context_markers):
