@@ -27,6 +27,8 @@ COURT_SYNC_NIGHT_HOUR = int(os.getenv("COURT_SYNC_NIGHT_HOUR", "2"))
 COURT_SYNC_MAX_DOCS_PER_RUN = int(os.getenv("COURT_SYNC_MAX_DOCS_PER_RUN", "200"))
 COURT_SYNC_DELAY_SEC = int(os.getenv("COURT_SYNC_DELAY_SEC", "5"))
 COURT_SYNC_TIMEOUT_SEC = int(os.getenv("COURT_SYNC_TIMEOUT_SEC", "120"))
+# Клик по «Найти» на kad.arbitr.ru (медленный ответ / смена вёрстки).
+KAD_FIND_CLICK_TIMEOUT_MS = int(os.getenv("KAD_FIND_CLICK_TIMEOUT_MS", "25000"))
 # Загрузка дел через Parser-API (HTTP) вместо Playwright, если задан PARSER_API_KEY.
 _COURT_SYNC_PARSER_RAW = os.getenv("COURT_SYNC_USE_PARSER_API", "").strip().lower()
 if _COURT_SYNC_PARSER_RAW:
@@ -417,21 +419,54 @@ def _fill_search_input(page, label_text: str, value: str) -> bool:
 
 
 def _kad_click_find_button(page) -> None:
-    """Кнопка поиска на главной КАД (разная вёрстка)."""
+    """Кнопка поиска на главной КАД (разная вёрстка, SPA, оверлеи)."""
+    timeout = max(8000, KAD_FIND_CLICK_TIMEOUT_MS)
     errors: list[str] = []
-    for fn in (
-        lambda: page.get_by_role("button", name=re.compile(r"Найти")).first.click(timeout=8000),
-        lambda: page.locator("button:has-text('Найти')").first.click(timeout=8000),
-        lambda: page.locator("input[type='submit'][value*='Найти']").first.click(timeout=8000),
-        lambda: page.get_by_text("Найти", exact=True).first.click(timeout=8000),
-    ):
+
+    def _try_click(locator, label: str) -> bool:
         try:
-            fn()
-            return
+            first = locator.first
+            first.wait_for(state="visible", timeout=timeout)
+            first.scroll_into_view_if_needed(timeout=timeout)
+            first.click(timeout=timeout)
+            return True
         except Exception as e:
-            errors.append(str(e)[:120])
-            continue
-    raise RuntimeError("Не найдена кнопка «Найти»: " + "; ".join(errors[:3]))
+            errors.append(f"{label}: {str(e)[:140]}")
+            return False
+
+    _kad_dismiss_overlays(page)
+    page.wait_for_timeout(500)
+
+    locators: list[tuple[str, object]] = [
+        ("role=button /Найти/", page.get_by_role("button", name=re.compile(r"Найти"))),
+        ("button:has-text('Найти')", page.locator("button:has-text('Найти')")),
+        ("input[type=submit][value*=Найти]", page.locator("input[type='submit'][value*='Найти']")),
+        ("input[type=button][value*=Найти]", page.locator("input[type='button'][value*='Найти']")),
+        ("role=link /Найти/", page.get_by_role("link", name=re.compile(r"Найти"))),
+        ("//*[contains(@class,'btn')][contains(.,'Найти')]", page.locator("xpath=//*[contains(@class,'btn')][contains(.,'Найти')]")),
+        ("get_by_text Найти", page.get_by_text("Найти", exact=True)),
+    ]
+    for label, loc in locators:
+        if _try_click(loc, label):
+            return
+
+    # Запасной ввод: Enter в поле номера дела (часто без стабильной кнопки в DOM).
+    try:
+        for pb in (
+            page.get_by_placeholder(re.compile(r"омер|дела|case", re.I)).first,
+            page.locator("input:focus").first,
+        ):
+            try:
+                if pb.is_visible(timeout=2000):
+                    pb.press("Enter")
+                    page.wait_for_timeout(900)
+                    return
+            except Exception as e:
+                errors.append(f"Enter field: {str(e)[:100]}")
+    except Exception as e:
+        errors.append(f"Enter: {str(e)[:120]}")
+
+    raise RuntimeError("Не найдена кнопка «Найти»: " + "; ".join(errors[:5]))
 
 
 def _normalize_kad_card_url(value: str) -> str:
@@ -547,6 +582,12 @@ def search_cases_via_browser(query_type: str, query_value: str, job_id: int | No
         except PlaywrightTimeoutError:
             if attempt == 0:
                 time.sleep(3)
+                continue
+            raise
+        except RuntimeError as e:
+            # Повтор при сбое кнопки «Найти» (медленный КАД / оверлей).
+            if attempt == 0 and "Не найдена кнопка «Найти»" in str(e):
+                time.sleep(4)
                 continue
             raise
 
