@@ -592,7 +592,8 @@ def looks_like_chronology_request(text: str) -> bool:
 
 def extract_search_query(text: str) -> str:
     lowered = text.lower()
-    for marker in ["найди", "поиск", "ищи", "покажи документы с", "документы с"]:
+    # «поищи» раньше «ищи», иначе срабатывает подстрока «ищи» внутри «поищи» и запрос обрезается неверно.
+    for marker in ["поищи", "найди", "поиск", "ищи", "покажи документы с", "документы с"]:
         idx = lowered.find(marker)
         if idx >= 0:
             return text[idx + len(marker) :].strip(" :.-")
@@ -601,7 +602,13 @@ def extract_search_query(text: str) -> str:
 
 def looks_like_documents_search_request(text: str) -> bool:
     t = text.lower()
-    return any(k in t for k in ["найди", "поиск", "ищи"]) and any(
+    # Запросы в картотеку (КАД) — не поиск по локальным файлам текущей папки.
+    if re.search(
+        r"(?:поищи|найди|ищи|поиск)\s+(?:в|из)\s+кад|кад\.arbitr|картотек[аеи]?\s+арбитраж",
+        t,
+    ):
+        return False
+    return any(k in t for k in ["найди", "поиск", "ищи", "поищи"]) and any(
         k in t for k in ["док", "файл", "асв", "банк", "определен", "договор", "жалоб", "акт"]
     )
 
