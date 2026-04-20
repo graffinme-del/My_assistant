@@ -262,6 +262,7 @@ def upsert_document_source(
     source = db.query(CourtDocumentSource).filter(CourtDocumentSource.remote_document_id == remote_document_id).first()
     if not source:
         source = CourtDocumentSource(remote_document_id=remote_document_id)
+    previous_local_id = source.local_document_id
     source.case_source_id = case_source_id
     source.local_document_id = local_document_id
     source.title = title[:500]
@@ -270,7 +271,9 @@ def upsert_document_source(
     source.status = status
     source.last_seen_at = datetime.utcnow()
     if local_document_id:
-        source.last_downloaded_at = datetime.utcnow()
+        # Момент первого сохранения файла в приложение; не обновлять при каждом повторном upsert (иначе «все скачаны сегодня»).
+        if previous_local_id is None or previous_local_id != local_document_id:
+            source.last_downloaded_at = datetime.utcnow()
     db.add(source)
     db.commit()
     db.refresh(source)
@@ -427,11 +430,11 @@ def format_kad_download_count_answer(
         start, end = date_range
         n_saved = (
             db.query(CourtDocumentSource)
-            .join(Document, Document.id == CourtDocumentSource.local_document_id)
             .filter(CourtDocumentSource.local_document_id.isnot(None))
             .filter(
-                func.coalesce(CourtDocumentSource.last_downloaded_at, Document.created_at) >= start,
-                func.coalesce(CourtDocumentSource.last_downloaded_at, Document.created_at) < end,
+                CourtDocumentSource.last_downloaded_at.isnot(None),
+                CourtDocumentSource.last_downloaded_at >= start,
+                CourtDocumentSource.last_downloaded_at < end,
             )
             .count()
         )
@@ -488,8 +491,9 @@ def format_kad_downloaded_documents_list(
     if date_range:
         start, end = date_range
         q = q.filter(
-            func.coalesce(CourtDocumentSource.last_downloaded_at, Document.created_at) >= start,
-            func.coalesce(CourtDocumentSource.last_downloaded_at, Document.created_at) < end,
+            CourtDocumentSource.last_downloaded_at.isnot(None),
+            CourtDocumentSource.last_downloaded_at >= start,
+            CourtDocumentSource.last_downloaded_at < end,
         )
     rows = (
         q.order_by(CourtDocumentSource.last_downloaded_at.desc().nulls_last(), CourtDocumentSource.id.desc())
@@ -499,9 +503,9 @@ def format_kad_downloaded_documents_list(
     if not rows:
         if date_range:
             return (
-                f"За {period_label or 'указанный день'} сохранённых из картотеки файлов нет "
-                "(или дата сохранения в базе не попала в этот календарный день). "
-                "Попробуйте запрос без даты или проверьте «статус загрузки»."
+                f"За {period_label or 'указанный день'} нет файлов с зафиксированным временем сохранения из картотеки в этот день "
+                "(смотрим только реальную дату сохранения в приложении, не дату в имени PDF). "
+                "Попробуйте запрос без даты — полный список; или «статус загрузки» по задачам."
             )
         return (
             "Пока нет сохранённых в приложении файлов из картотеки (или загрузка ещё не успела их записать). "
@@ -516,8 +520,8 @@ def format_kad_downloaded_documents_list(
         cs.id: cs for cs in db.query(CourtCaseSource).filter(CourtCaseSource.id.in_(cs_ids)).all()
     } if cs_ids else {}
     head_line = (
-        f"Вот сохранённые из картотеки файлы за {period_label or 'указанную дату'} "
-        f"(показано до {limit} шт., от новых к старым):"
+        f"Вот файлы, сохранённые из картотеки за {period_label or 'указанную дату'} "
+        f"(по времени сохранения в приложении, не по дате в названии файла; до {limit} шт., от новых к старым):"
         if date_range
         else f"Вот сохранённые из картотеки файлы (показано до {limit} шт., от новых к старым):"
     )
