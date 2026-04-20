@@ -564,7 +564,21 @@ def extract_case_number(text: str) -> str | None:
     # Examples:
     # - А40-12345/2026
     # - 2-123/2026
+    # - A40-19021-2025_дата_....pdf (имя файла из КАД: год через дефис)
     # Keep it intentionally permissive for messy Telegram copies.
+    m_fn = re.search(
+        r"([АA]\d{1,4})-(\d{1,7})-(\d{2,4})(?=[_\.\s\[\]\-]|$)",
+        text or "",
+        flags=re.IGNORECASE,
+    )
+    if m_fn:
+        p1 = m_fn.group(1)
+        if len(p1) >= 1 and p1[0] in "\u0410\u0430":
+            p1 = "A" + p1[1:]
+        elif len(p1) >= 1 and p1[0] in "aA":
+            p1 = "A" + p1[1:]
+        raw = f"{p1}-{m_fn.group(2)}/{m_fn.group(3)}"
+        return normalize_arbitr_case_number(raw)
     patterns = [
         r"([АA]\d{1,4}\s*-\s*\d{1,7}\s*/\s*\d{2,4})",
         r"(\d{1,2}\s*-\s*\d{1,7}\s*/\s*\d{2,4})",

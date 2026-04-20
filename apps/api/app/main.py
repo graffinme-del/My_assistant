@@ -38,7 +38,7 @@ from .ai_service import (
     parse_case_tag_update,
     parse_hearing_note,
 )
-from .case_number import normalize_arbitr_case_number
+from .case_number import arbitr_case_number_lookup_keys, normalize_arbitr_case_number
 from .court_kad_search import (
     apply_active_case_number_to_kad_request,
     looks_like_cancel_court_sync_jobs,
@@ -833,6 +833,17 @@ async def document_summary(
     return {"document_id": doc.id, "filename": doc.filename, "summary": summary}
 
 
+def find_case_by_arbitr_number(db: Session, extracted: str | None) -> Case | None:
+    """Находит дело по номеру с учётом вариантов /25 и /2025."""
+    if not (extracted or "").strip():
+        return None
+    for key in arbitr_case_number_lookup_keys(extracted):
+        c = db.query(Case).filter(Case.case_number == key).first()
+        if c:
+            return c
+    return None
+
+
 async def build_document_summary_by_id(db: Session, document_id: int) -> tuple[Document | None, str]:
     doc = db.query(Document).filter(Document.id == document_id).first()
     if not doc:
@@ -857,13 +868,6 @@ async def ingest_document(
     extracted_text = extract_document_text(dst, safe_name)
     category, class_confidence = classify_document(safe_name, extracted_text)
 
-    all_cases = db.query(Case).all()
-    llm_route = await llm_document_routing(
-        filename=safe_name,
-        text=extracted_text,
-        available_case_numbers=[c.case_number for c in all_cases],
-    )
-
     matched_case = None
     case_confidence = 0.0
     llm_note = ""
@@ -871,6 +875,19 @@ async def ingest_document(
         matched_case = db.query(Case).filter(Case.id == preferred_case_id).first()
         if matched_case:
             case_confidence = 0.99
+
+    if not matched_case:
+        extracted_num = extract_case_number(safe_name) or extract_case_number(extracted_text)
+        matched_case = find_case_by_arbitr_number(db, extracted_num)
+        if matched_case:
+            case_confidence = 0.97
+
+    all_cases = db.query(Case).all()
+    llm_route = await llm_document_routing(
+        filename=safe_name,
+        text=extracted_text,
+        available_case_numbers=[c.case_number for c in all_cases],
+    )
 
     if llm_route:
         llm_case_number = str(llm_route.get("case_number", "")).strip()
@@ -900,8 +917,8 @@ async def ingest_document(
         # Hands-off: если номер дела распознался, создадим дело автоматически.
         auto_case_number = extract_case_number(extracted_text) or extract_case_number(safe_name)
         if auto_case_number:
-            normalized_auto = auto_case_number.replace(" ", "").replace("\n", "")
-            case = db.query(Case).filter(Case.case_number == normalized_auto).first()
+            normalized_auto = normalize_arbitr_case_number(auto_case_number.replace(" ", "").replace("\n", ""))
+            case = find_case_by_arbitr_number(db, auto_case_number)
             if not case:
                 case = Case(
                     title=f"Дело {normalized_auto}",
@@ -1090,17 +1107,31 @@ async def bulk_ingest(
                     continue
                 category, class_confidence = classify_document(original_name, extracted_text)
 
-                matched_case, case_confidence = match_case(
-                    db,
-                    filename=original_name,
-                    text=extracted_text,
-                    preferred_case_id=preferred_case_id,
-                )
+                matched_case = None
+                case_confidence = 0.0
+                if preferred_case_id:
+                    matched_case = db.query(Case).filter(Case.id == preferred_case_id).first()
+                    if matched_case:
+                        case_confidence = 0.99
+                if not matched_case:
+                    extracted_num = extract_case_number(original_name) or extract_case_number(extracted_text)
+                    matched_case = find_case_by_arbitr_number(db, extracted_num)
+                    if matched_case:
+                        case_confidence = 0.97
+                if not matched_case:
+                    matched_case, case_confidence = match_case(
+                        db,
+                        filename=original_name,
+                        text=extracted_text,
+                        preferred_case_id=preferred_case_id,
+                    )
                 if not matched_case:
                     auto_case_number = extract_case_number(extracted_text) or extract_case_number(original_name)
                     if auto_case_number:
-                        normalized_auto = auto_case_number.replace(" ", "").replace("\n", "")
-                        case = db.query(Case).filter(Case.case_number == normalized_auto).first()
+                        normalized_auto = normalize_arbitr_case_number(
+                            auto_case_number.replace(" ", "").replace("\n", "")
+                        )
+                        case = find_case_by_arbitr_number(db, auto_case_number)
                         if not case:
                             case = Case(
                                 title=f"Дело {normalized_auto}",
