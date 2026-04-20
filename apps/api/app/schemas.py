@@ -149,6 +149,15 @@ class BulkIngestOut(BaseModel):
     errors: list[str] = []
 
 
+class AutoSortUnsortedOut(BaseModel):
+    moved: int
+    remained: int
+    created_cases: int
+    moved_by_case_number: int
+    moved_by_tag_match: int
+    details: list[str] = []
+
+
 class AssistantSummaryIn(BaseModel):
     text: str
     preferred_case_number: str | None = None

@@ -66,6 +66,7 @@ from .court_sync_service import (
     upsert_document_source,
 )
 from .config import settings
+from .document_batch_sort import format_auto_sort_reply, run_auto_sort_unsorted
 from .db import Base, engine, get_db
 from .materials_workflow import (
     handle_compare_documents_request,
@@ -103,6 +104,7 @@ from .schemas import (
     TaskCreate,
     TaskOut,
     BulkIngestOut,
+    AutoSortUnsortedOut,
     CourtSyncCaseSourceIn,
     CourtSyncClaimOut,
     CourtSyncGetOut,
@@ -392,8 +394,10 @@ def looks_like_unsorted_tag_suggestion_request(text: str) -> bool:
 
 def looks_like_reclassify_unsorted_request(text: str) -> bool:
     t = text.lower()
+    if "автосорт" in t and ("неразобран" in t or "unsorted" in t):
+        return True
     return any(k in t for k in ["разбери", "переразбери", "перенеси", "привяжи", "разложи"]) and any(
-        k in t for k in ["неразобран", "unsorted", "по тегам", "по делам"]
+        k in t for k in ["неразобран", "unsorted", "по тегам", "по делам", "по номеру", "по номерам"]
     )
 
 
@@ -1209,6 +1213,35 @@ async def bulk_ingest(
     )
 
 
+@app.post("/documents/auto-sort-unsorted", response_model=AutoSortUnsortedOut)
+def auto_sort_unsorted_documents(
+    max_documents: int = Query(default=10000, ge=1, le=50000),
+    create_missing_cases: bool = Query(default=True),
+    use_tag_match: bool = Query(default=True),
+    db: Session = Depends(get_db),
+    _: str = Depends(require_user),
+) -> AutoSortUnsortedOut:
+    """Разбор неразобранных: номер дела в имени/тексте (создание дела при необходимости), затем совпадение по тегам."""
+    unsorted = db.query(Case).filter(Case.case_number == "UNSORTED").first()
+    if not unsorted:
+        raise HTTPException(status_code=404, detail="Неразобранное дело не найдено")
+    result = run_auto_sort_unsorted(
+        db,
+        unsorted_case=unsorted,
+        max_documents=max_documents,
+        create_missing_cases=create_missing_cases,
+        use_tag_match=use_tag_match,
+    )
+    return AutoSortUnsortedOut(
+        moved=result.moved,
+        remained=result.remained,
+        created_cases=result.created_cases,
+        moved_by_case_number=result.moved_by_case_number,
+        moved_by_tag_match=result.moved_by_tag_match,
+        details=result.details,
+    )
+
+
 @app.get("/cases/{case_id}/summary", response_model=SummaryOut)
 async def case_summary(
     case_id: int, db: Session = Depends(get_db), _: str = Depends(require_user)
@@ -1621,41 +1654,8 @@ def reclassify_unsorted_documents(db: Session) -> str:
     if not docs:
         return "В неразобранных документах пока ничего нет."
 
-    moved = 0
-    remained = 0
-    details: list[str] = []
-    for doc in docs:
-        matched_case, confidence = match_case(db, filename=doc.filename, text=doc.extracted_text or "")
-        if not matched_case or matched_case.id == unsorted.id or confidence < 0.6:
-            remained += 1
-            continue
-
-        old_case_id = doc.case_id
-        doc.case_id = matched_case.id
-        db.add(
-            CaseEvent(
-                case_id=matched_case.id,
-                event_type="document_reclassified",
-                body=f'Документ "{doc.filename}" автоматически перенесён из UNSORTED (confidence={confidence:.2f}).',
-            )
-        )
-        db.add(
-            CaseEvent(
-                case_id=old_case_id,
-                event_type="document_reclassified",
-                body=f'Документ "{doc.filename}" перенесён в дело "{matched_case.title}" ({matched_case.case_number}).',
-            )
-        )
-        moved += 1
-        if len(details) < 12:
-            details.append(f'- {doc.filename} -> "{matched_case.title}" ({matched_case.case_number}), confidence={confidence:.2f}')
-
-    db.commit()
-    summary = [f"Переразобрал неразобранные документы по тегам/алиасам. Перенесено: {moved}. Осталось в UNSORTED: {remained}."]
-    if details:
-        summary.append("Что перенесено:")
-        summary.extend(details)
-    return "\n".join(summary)
+    result = run_auto_sort_unsorted(db, unsorted_case=unsorted)
+    return format_auto_sort_reply(result)
 
 
 def move_documents_by_chat_command(db: Session, text: str) -> str:
