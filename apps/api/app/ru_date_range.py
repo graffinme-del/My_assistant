@@ -34,13 +34,25 @@ def parse_calendar_period_ru(text: str) -> tuple[datetime, datetime] | None:
     полуинтервал [start_utc, end_utc) для SQL-фильтра. Иначе None.
 
     Одна календарная дата в локальном часовом поясе ассистента (по умолчанию Москва).
+
+    Сначала слова «сегодня»/«вчера»/«позавчера», затем ДД.ММ.ГГГГ — чтобы номера дел
+    вроде «…/2025» не перехватывались как календарная дата.
     """
     raw = (text or "").strip()
     if not raw:
         return None
     lowered = raw.lower()
 
-    # Явная дата ДД.ММ.ГГГГ или ДД.ММ.ГГ
+    # 1) Относительные дни (устойчивее \b для кириллицы в разных окружениях)
+    today = datetime.now(assistant_timezone()).date()
+    if re.search(r"(?<![а-яё])позавчера(?![а-яё])", lowered, re.IGNORECASE):
+        return _utc_naive_bounds_for_local_day(today - timedelta(days=2))
+    if re.search(r"(?<![а-яё])сегодня(?![а-яё])", lowered, re.IGNORECASE):
+        return _utc_naive_bounds_for_local_day(today)
+    if re.search(r"(?<![а-яё])вчера(?![а-яё])", lowered, re.IGNORECASE):
+        return _utc_naive_bounds_for_local_day(today - timedelta(days=1))
+
+    # 2) Явная дата ДД.ММ.ГГГГ или ДД.ММ.ГГ (точки или слэши)
     m = _RE_DMY.search(raw)
     if m:
         dd, mm, ystr = int(m.group(1)), int(m.group(2)), m.group(3)
@@ -54,15 +66,6 @@ def parse_calendar_period_ru(text: str) -> tuple[datetime, datetime] | None:
         if d is not None:
             return _utc_naive_bounds_for_local_day(d)
 
-    # Порядок: «позавчера» раньше «вчера» (подстрока внутри слова не ловим — границы слова)
-    today = datetime.now(assistant_timezone()).date()
-    if re.search(r"(?i)\bпозавчера\b", lowered):
-        return _utc_naive_bounds_for_local_day(today - timedelta(days=2))
-    if re.search(r"(?i)\bсегодня\b", lowered):
-        return _utc_naive_bounds_for_local_day(today)
-    if re.search(r"(?i)\bвчера\b", lowered):
-        return _utc_naive_bounds_for_local_day(today - timedelta(days=1))
-
     return None
 
 
@@ -72,13 +75,13 @@ def describe_calendar_period_ru(text: str) -> str | None:
     if not raw:
         return None
     lowered = raw.lower()
+    if re.search(r"(?<![а-яё])позавчера(?![а-яё])", lowered, re.IGNORECASE):
+        return "позавчера"
+    if re.search(r"(?<![а-яё])сегодня(?![а-яё])", lowered, re.IGNORECASE):
+        return "сегодня"
+    if re.search(r"(?<![а-яё])вчера(?![а-яё])", lowered, re.IGNORECASE):
+        return "вчера"
     m = _RE_DMY.search(raw)
     if m:
         return f"{m.group(1)}.{m.group(2)}.{m.group(3)}"
-    if re.search(r"(?i)\bпозавчера\b", lowered):
-        return "позавчера"
-    if re.search(r"(?i)\bсегодня\b", lowered):
-        return "сегодня"
-    if re.search(r"(?i)\bвчера\b", lowered):
-        return "вчера"
     return None

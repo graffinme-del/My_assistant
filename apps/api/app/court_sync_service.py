@@ -428,14 +428,12 @@ def format_kad_download_count_answer(
     """Один ответ на «сколько скачали»: факт в базе + кратко по последней задаче."""
     if date_range:
         start, end = date_range
+        # По дате появления строки Document в приложении (неизменяемо), а не last_downloaded_at из КАД-метаданных.
         n_saved = (
             db.query(CourtDocumentSource)
+            .join(Document, Document.id == CourtDocumentSource.local_document_id)
             .filter(CourtDocumentSource.local_document_id.isnot(None))
-            .filter(
-                CourtDocumentSource.last_downloaded_at.isnot(None),
-                CourtDocumentSource.last_downloaded_at >= start,
-                CourtDocumentSource.last_downloaded_at < end,
-            )
+            .filter(Document.created_at >= start, Document.created_at < end)
             .count()
         )
     else:
@@ -490,21 +488,18 @@ def format_kad_downloaded_documents_list(
     )
     if date_range:
         start, end = date_range
-        q = q.filter(
-            CourtDocumentSource.last_downloaded_at.isnot(None),
-            CourtDocumentSource.last_downloaded_at >= start,
-            CourtDocumentSource.last_downloaded_at < end,
-        )
-    rows = (
-        q.order_by(CourtDocumentSource.last_downloaded_at.desc().nulls_last(), CourtDocumentSource.id.desc())
-        .limit(limit)
-        .all()
+        q = q.filter(Document.created_at >= start, Document.created_at < end)
+    order_cols = (
+        (Document.created_at.desc(), CourtDocumentSource.id.desc())
+        if date_range
+        else (CourtDocumentSource.last_downloaded_at.desc().nulls_last(), CourtDocumentSource.id.desc())
     )
+    rows = q.order_by(*order_cols).limit(limit).all()
     if not rows:
         if date_range:
             return (
-                f"За {period_label or 'указанный день'} нет файлов с зафиксированным временем сохранения из картотеки в этот день "
-                "(смотрим только реальную дату сохранения в приложении, не дату в имени PDF). "
+                f"За {period_label or 'указанный день'} нет файлов из картотеки, которые впервые появились в приложении в этот календарный день "
+                "(фильтр по дате создания записи документа, не по дате в имени PDF). "
                 "Попробуйте запрос без даты — полный список; или «статус загрузки» по задачам."
             )
         return (
@@ -520,8 +515,8 @@ def format_kad_downloaded_documents_list(
         cs.id: cs for cs in db.query(CourtCaseSource).filter(CourtCaseSource.id.in_(cs_ids)).all()
     } if cs_ids else {}
     head_line = (
-        f"Вот файлы, сохранённые из картотеки за {period_label or 'указанную дату'} "
-        f"(по времени сохранения в приложении, не по дате в названии файла; до {limit} шт., от новых к старым):"
+        f"Вот файлы из картотеки, которые впервые попали в приложение за {period_label or 'указанную дату'} "
+        f"(по дате создания записи документа, не по дате в названии PDF; до {limit} шт., от новых к старым):"
         if date_range
         else f"Вот сохранённые из картотеки файлы (показано до {limit} шт., от новых к старым):"
     )
