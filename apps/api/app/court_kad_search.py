@@ -16,7 +16,8 @@ class CourtSearchRequest:
 
 
 def normalize_query_value(value: str) -> str:
-    return re.sub(r"\s+", " ", (value or "").strip())
+    s = re.sub(r"\s+", " ", (value or "").strip())
+    return s.strip("'\"").strip("«»").strip()
 
 
 def normalize_po_delu_case_hint(candidate: str) -> str:
@@ -118,6 +119,79 @@ def _title_or_query_aligns_with_message(title: str | None, msg: str, query_value
         if tok in mt:
             return True
     return False
+
+
+def collect_distinct_case_numbers_from_folder_documents(
+    db,
+    *,
+    case_id: int,
+    max_docs: int = 400,
+    text_sample_chars: int = 120_000,
+) -> list[str]:
+    """
+    Все уникальные номера арбитражных дел, найденные в именах файлов и текстах документов папки.
+    """
+    from .ai_service import extract_case_number
+    from .models import Document
+    docs = (
+        db.query(Document)
+        .filter(Document.case_id == case_id)
+        .order_by(Document.created_at.desc())
+        .limit(max_docs)
+        .all()
+    )
+    seen: set[str] = set()
+    out: list[str] = []
+    for d in docs:
+        for blob in (d.filename, (d.extracted_text or "")[:text_sample_chars]):
+            cand = extract_case_number(blob)
+            if not cand:
+                continue
+            norm = normalize_case_number(cand)
+            if not looks_like_stored_arbitr_case_number(norm):
+                continue
+            if norm not in seen:
+                seen.add(norm)
+                out.append(norm)
+    return out
+
+
+def apply_folder_documents_case_numbers_to_kad_request(
+    db,
+    text: str,
+    request: CourtSearchRequest,
+    *,
+    active_case_id: int | None,
+    active_case_title: str | None,
+) -> tuple[CourtSearchRequest, list[str], bool]:
+    """
+    Если в папке уже есть PDF с номерами дел — ищем в КАД по ним, а не по «Банкротство Эмиль» / ФИО.
+    Возвращает (запрос, дополнительные номера для отдельных задач, сработала_ли подмена).
+    """
+    if not request or not active_case_id:
+        return request, [], False
+    if request.query_type in ("card_url", "case_number", "inn", "ogrn"):
+        return request, [], False
+    if extract_explicit_case_number_from_message(text):
+        return request, [], False
+    doc_nums = collect_distinct_case_numbers_from_folder_documents(db, case_id=active_case_id)
+    if not doc_nums:
+        return request, [], False
+    if not _title_or_query_aligns_with_message(active_case_title, text, request.query_value):
+        return request, [], False
+    primary = doc_nums[0]
+    rest = doc_nums[1:]
+    return (
+        CourtSearchRequest(
+            query_type="case_number",
+            query_value=primary,
+            run_mode=request.run_mode,
+            parser_year_min=request.parser_year_min,
+            parser_year_max=request.parser_year_max,
+        ),
+        rest,
+        True,
+    )
 
 
 def apply_active_case_number_to_kad_request(

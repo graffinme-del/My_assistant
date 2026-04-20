@@ -41,6 +41,7 @@ from .ai_service import (
 from .case_number import arbitr_case_number_lookup_keys, normalize_arbitr_case_number
 from .court_kad_search import (
     apply_active_case_number_to_kad_request,
+    apply_folder_documents_case_numbers_to_kad_request,
     looks_like_cancel_court_sync_jobs,
     looks_like_court_download_count_question,
     looks_like_court_download_status_question,
@@ -2248,6 +2249,7 @@ def handle_court_sync_chat_command(
     text: str,
     user_role: str,
     *,
+    active_case_id: int | None = None,
     active_case_title: str | None = None,
     active_case_number: str | None = None,
 ) -> str | None:
@@ -2280,6 +2282,16 @@ def handle_court_sync_chat_command(
 
     request = parse_court_search_request(text)
     parsed_before_override = request
+    extra_doc_case_numbers: list[str] = []
+    replaced_from_documents = False
+    if request and active_case_id:
+        request, extra_doc_case_numbers, replaced_from_documents = apply_folder_documents_case_numbers_to_kad_request(
+            db,
+            text,
+            request,
+            active_case_id=active_case_id,
+            active_case_title=active_case_title,
+        )
     if request:
         request = apply_active_case_number_to_kad_request(
             text,
@@ -2296,11 +2308,19 @@ def handle_court_sync_chat_command(
         and parsed_before_override.query_type in ("participant_name", "organization_name")
         and request.query_type == "case_number"
     )
-    folder_hint = (
-        f" Номер дела взят из открытой папки ({active_case_title or active_case_number})."
-        if used_folder_case_number
-        else ""
-    )
+    if replaced_from_documents:
+        nums_shown = [request.query_value] + extra_doc_case_numbers
+        folder_hint = (
+            " Номера дел для КАД взяты из документов в этой папке (имена файлов и текст): "
+            + ", ".join(f"«{n}»" for n in nums_shown)
+            + "."
+        )
+    elif used_folder_case_number:
+        folder_hint = (
+            f" Номер дела взят из карточки папки ({active_case_title or active_case_number})."
+        )
+    else:
+        folder_hint = ""
 
     if "поставь на отслеживание" in lowered:
         profile, created = create_watch_profile(
@@ -2357,6 +2377,20 @@ def handle_court_sync_chat_command(
         parser_year_min=request.parser_year_min,
         parser_year_max=request.parser_year_max,
     )
+    extra_job_ids: list[int] = []
+    for extra_cn in extra_doc_case_numbers:
+        ej, _ = create_sync_job(
+            db,
+            query_type="case_number",
+            query_value=extra_cn,
+            run_mode=run_mode,
+            requested_by=user_role,
+            parser_year_min=request.parser_year_min,
+            parser_year_max=request.parser_year_max,
+        )
+        extra_job_ids.append(ej.id)
+    job_ids_label = ", ".join(f"№{x}" for x in ([job.id] + extra_job_ids))
+
     period = ""
     if request.parser_year_min is not None:
         if request.parser_year_max is not None and request.parser_year_max != request.parser_year_min:
@@ -2377,13 +2411,13 @@ def handle_court_sync_chat_command(
         )
     if run_mode == "download":
         return (
-            f"Запустил фоновую загрузку материалов из картотеки (процесс №{job.id})"
+            f"Запустил фоновую загрузку материалов из картотеки ({job_ids_label})"
             f'{period} по запросу «{request.query_value}». '
             "Обычно это занимает от нескольких минут. Спросите позже «как там скачивание» или «статус загрузки» — кратко опишу, что сделано."
             f"{folder_hint}"
         )
     return (
-        f"Запустил фоновый поиск в КАД (процесс №{job.id}) по запросу «{request.query_value}». "
+        f"Запустил фоновый поиск в КАД ({job_ids_label}) по запросу «{request.query_value}». "
         "Когда появятся результаты, можно спросить статус или попросить «отчёт по задаче» с номером."
         f"{folder_hint}"
     )
@@ -2568,6 +2602,7 @@ async def assistant_ingest_text(
             db,
             text,
             _,
+            active_case_id=_ac.id if _ac else None,
             active_case_title=_ac.title if _ac else None,
             active_case_number=_ac.case_number if _ac else None,
         )
