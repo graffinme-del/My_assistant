@@ -67,6 +67,7 @@ from .court_sync_service import (
 )
 from .config import settings
 from .document_batch_sort import format_auto_sort_reply, run_auto_sort_unsorted
+from .ru_date_range import describe_calendar_period_ru, parse_calendar_period_ru
 from .db import Base, engine, get_db
 from .materials_workflow import (
     handle_compare_documents_request,
@@ -2254,6 +2255,8 @@ def handle_court_sync_chat_command(
     active_case_number: str | None = None,
 ) -> str | None:
     lowered = text.lower()
+    _kad_date_range = parse_calendar_period_ru(text)
+    _kad_period_label = describe_calendar_period_ru(text) if _kad_date_range else None
     if looks_like_cancel_court_sync_jobs(text):
         stats = cancel_active_court_sync_jobs(db)
         n = int(stats.get("cancelled", 0))
@@ -2262,11 +2265,17 @@ def handle_court_sync_chat_command(
             "Повторный запрос с тем же текстом не создаёт вторую параллельную задачу, пока первая не завершена — это ограничивает дубли."
         )
     if looks_like_kad_downloaded_documents_list(text):
-        return format_kad_downloaded_documents_list(db)
+        return format_kad_downloaded_documents_list(
+            db, date_range=_kad_date_range, period_label=_kad_period_label
+        )
     if looks_like_court_download_count_question(text):
-        return format_kad_download_count_answer(db)
+        return format_kad_download_count_answer(
+            db, date_range=_kad_date_range, period_label=_kad_period_label
+        )
     if looks_like_court_download_status_question(text):
-        return format_recent_download_jobs_status(db)
+        return format_recent_download_jobs_status(
+            db, date_range=_kad_date_range, period_label=_kad_period_label
+        )
     if "статус синхронизации" in lowered:
         return format_sync_status(db)
     if "что нового скачано за ночь" in lowered:

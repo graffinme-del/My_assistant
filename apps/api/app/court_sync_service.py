@@ -4,6 +4,7 @@ import json
 import re
 from datetime import datetime, timedelta
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from .config import settings
@@ -415,17 +416,38 @@ def _job_stats_narrative(result_json_raw: str | None) -> str | None:
     return "По цифрам: " + "; ".join(parts) + "."
 
 
-def format_kad_download_count_answer(db: Session) -> str:
+def format_kad_download_count_answer(
+    db: Session,
+    *,
+    date_range: tuple[datetime, datetime] | None = None,
+    period_label: str | None = None,
+) -> str:
     """Один ответ на «сколько скачали»: факт в базе + кратко по последней задаче."""
-    n_saved = db.query(CourtDocumentSource).filter(CourtDocumentSource.local_document_id.isnot(None)).count()
-    latest = (
-        db.query(CourtSyncJob)
-        .filter(CourtSyncJob.run_mode == "download")
-        .order_by(CourtSyncJob.id.desc())
-        .first()
-    )
+    if date_range:
+        start, end = date_range
+        n_saved = (
+            db.query(CourtDocumentSource)
+            .join(Document, Document.id == CourtDocumentSource.local_document_id)
+            .filter(CourtDocumentSource.local_document_id.isnot(None))
+            .filter(
+                func.coalesce(CourtDocumentSource.last_downloaded_at, Document.created_at) >= start,
+                func.coalesce(CourtDocumentSource.last_downloaded_at, Document.created_at) < end,
+            )
+            .count()
+        )
+    else:
+        n_saved = db.query(CourtDocumentSource).filter(CourtDocumentSource.local_document_id.isnot(None)).count()
+    q_latest = db.query(CourtSyncJob).filter(CourtSyncJob.run_mode == "download")
+    if date_range:
+        start, end = date_range
+        q_latest = q_latest.filter(
+            func.coalesce(CourtSyncJob.finished_at, CourtSyncJob.started_at, CourtSyncJob.created_at) >= start,
+            func.coalesce(CourtSyncJob.finished_at, CourtSyncJob.started_at, CourtSyncJob.created_at) < end,
+        )
+    latest = q_latest.order_by(CourtSyncJob.id.desc()).first()
+    period_note = f" за {period_label}" if (date_range and period_label) else ""
     head = (
-        f"В приложении сейчас сохранено файлов, пришедших из картотеки: {n_saved} "
+        f"В приложении сейчас сохранено файлов из картотеки{period_note}: {n_saved} "
         "(это реально лежащие в хранилище документы, не просто строки в отчёте задачи)."
     )
     if not latest:
@@ -450,16 +472,37 @@ def format_kad_download_count_answer(db: Session) -> str:
     return head + extra
 
 
-def format_kad_downloaded_documents_list(db: Session, *, limit: int = 80) -> str:
+def format_kad_downloaded_documents_list(
+    db: Session,
+    *,
+    limit: int = 80,
+    date_range: tuple[datetime, datetime] | None = None,
+    period_label: str | None = None,
+) -> str:
     """Имена файлов, реально сохранённых из КАД (есть локальный Document)."""
-    rows = (
+    q = (
         db.query(CourtDocumentSource)
+        .join(Document, Document.id == CourtDocumentSource.local_document_id)
         .filter(CourtDocumentSource.local_document_id.isnot(None))
-        .order_by(CourtDocumentSource.last_downloaded_at.desc().nulls_last(), CourtDocumentSource.id.desc())
+    )
+    if date_range:
+        start, end = date_range
+        q = q.filter(
+            func.coalesce(CourtDocumentSource.last_downloaded_at, Document.created_at) >= start,
+            func.coalesce(CourtDocumentSource.last_downloaded_at, Document.created_at) < end,
+        )
+    rows = (
+        q.order_by(CourtDocumentSource.last_downloaded_at.desc().nulls_last(), CourtDocumentSource.id.desc())
         .limit(limit)
         .all()
     )
     if not rows:
+        if date_range:
+            return (
+                f"За {period_label or 'указанный день'} сохранённых из картотеки файлов нет "
+                "(или дата сохранения в базе не попала в этот календарный день). "
+                "Попробуйте запрос без даты или проверьте «статус загрузки»."
+            )
         return (
             "Пока нет сохранённых в приложении файлов из картотеки (или загрузка ещё не успела их записать). "
             "Когда фоновая загрузка завершится, список появится здесь; краткий ход процесса — по фразе «статус загрузки»."
@@ -472,10 +515,13 @@ def format_kad_downloaded_documents_list(db: Session, *, limit: int = 80) -> str
     case_sources = {
         cs.id: cs for cs in db.query(CourtCaseSource).filter(CourtCaseSource.id.in_(cs_ids)).all()
     } if cs_ids else {}
-    lines = [
-        f"Вот сохранённые из картотеки файлы (показано до {limit} шт., от новых к старым):",
-        "",
-    ]
+    head_line = (
+        f"Вот сохранённые из картотеки файлы за {period_label or 'указанную дату'} "
+        f"(показано до {limit} шт., от новых к старым):"
+        if date_range
+        else f"Вот сохранённые из картотеки файлы (показано до {limit} шт., от новых к старым):"
+    )
+    lines = [head_line, ""]
     for ds in rows:
         doc = docs.get(ds.local_document_id) if ds.local_document_id else None
         fn = (doc.filename if doc else None) or ds.filename or ds.title or f"документ {ds.remote_document_id}"
@@ -495,26 +541,45 @@ def format_kad_downloaded_documents_list(db: Session, *, limit: int = 80) -> str
     return "\n".join(lines)
 
 
-def format_recent_download_jobs_status(db: Session, *, limit: int = 5) -> str:
+def format_recent_download_jobs_status(
+    db: Session,
+    *,
+    limit: int = 5,
+    date_range: tuple[datetime, datetime] | None = None,
+    period_label: str | None = None,
+) -> str:
     """Краткий статус последних загрузок из КАД — связный текст, без сырых URL и логов."""
     stale_closed = mark_stale_running_court_sync_jobs(db)
     stale_hrs = max(1, int(settings.court_sync_stale_running_hours))
-    jobs = (
-        db.query(CourtSyncJob)
-        .filter(CourtSyncJob.run_mode == "download")
-        .order_by(CourtSyncJob.id.desc())
-        .limit(limit)
-        .all()
-    )
+    q = db.query(CourtSyncJob).filter(CourtSyncJob.run_mode == "download")
+    if date_range:
+        start, end = date_range
+        q = q.filter(
+            func.coalesce(CourtSyncJob.finished_at, CourtSyncJob.started_at, CourtSyncJob.created_at) >= start,
+            func.coalesce(CourtSyncJob.finished_at, CourtSyncJob.started_at, CourtSyncJob.created_at) < end,
+        )
+    jobs = q.order_by(CourtSyncJob.id.desc()).limit(limit).all()
     if not jobs:
+        if date_range:
+            return (
+                f"За {period_label or 'указанный день'} в логе нет фоновых загрузок из картотеки "
+                "(по времени создания/запуска/завершения задачи). Попробуйте запрос без даты или другую дату."
+            )
         return (
             "Пока не было фоновых загрузок из картотеки. Когда попросите скачать материалы "
             "(например, «скачай из КАД…»), здесь появится краткий итог."
         )
 
     intro = (
-        "Ниже — кратко по последним фоновым загрузкам из картотеки арбитражных дел. "
-        "Это не то же самое, что список документов в открытой у вас папке в чате: там только то, что уже привязано к делу."
+        (
+            f"Ниже — кратко по фоновым загрузкам из картотеки за {period_label or 'указанную дату'}. "
+            "Это не то же самое, что список документов в открытой у вас папке в чате: там только то, что уже привязано к делу."
+        )
+        if date_range
+        else (
+            "Ниже — кратко по последним фоновым загрузкам из картотеки арбитражных дел. "
+            "Это не то же самое, что список документов в открытой у вас папке в чате: там только то, что уже привязано к делу."
+        )
     )
     if stale_closed > 0:
         intro += (

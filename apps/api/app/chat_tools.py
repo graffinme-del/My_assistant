@@ -15,6 +15,7 @@ from .ai_service import llm_chat_with_tool_choice
 from .config import settings
 from .court_kad_search import looks_like_court_download_count_question, looks_like_kad_downloaded_documents_list
 from .court_sync_service import format_kad_downloaded_documents_list, format_recent_download_jobs_status
+from .ru_date_range import describe_calendar_period_ru, parse_calendar_period_ru
 from .models import Case, Conversation
 
 # OpenAI-compatible tools (function calling)
@@ -157,13 +158,17 @@ async def run_chat_tools_router(
     args = call.get("arguments") or {}
 
     if name == "kad_download_jobs_status":
-        reply = format_recent_download_jobs_status(db)
+        dr = parse_calendar_period_ru(user_message)
+        pl = describe_calendar_period_ru(user_message) if dr else None
+        reply = format_recent_download_jobs_status(db, date_range=dr, period_label=pl)
         from .main import get_or_create_unsorted_case
 
         return reply, get_or_create_unsorted_case(db), "chat-tools-kad-status"
 
     if name == "kad_downloaded_files_list":
-        reply = format_kad_downloaded_documents_list(db)
+        dr = parse_calendar_period_ru(user_message)
+        pl = describe_calendar_period_ru(user_message) if dr else None
+        reply = format_kad_downloaded_documents_list(db, date_range=dr, period_label=pl)
         from .main import get_or_create_unsorted_case
 
         return reply, get_or_create_unsorted_case(db), "chat-tools-kad-files-list"

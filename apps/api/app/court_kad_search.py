@@ -392,9 +392,15 @@ def parse_court_search_request(text: str) -> CourtSearchRequest | None:
 
 def looks_like_court_download_count_question(text: str) -> bool:
     """«Сколько скачали» — короткий ответ по факту, не простыня по задачам."""
+    from .ru_date_range import parse_calendar_period_ru
+
     lowered = (text or "").lower()
     if "скачай" in lowered or "найди дел" in lowered or "поставь на отслеживание" in lowered:
         return False
+    if parse_calendar_period_ru(text) and "сколько" in lowered and any(
+        k in lowered for k in ("скачал", "скачано", "файл", "документ", "кад", "картотек", "удалось", "нового")
+    ):
+        return True
     return any(
         p in lowered
         for p in (
@@ -411,6 +417,8 @@ def looks_like_court_download_count_question(text: str) -> bool:
 
 def looks_like_kad_downloaded_documents_list(text: str) -> bool:
     """Пользователь просит список/названия файлов, сохранённых из КАД — не статус задач."""
+    from .ru_date_range import parse_calendar_period_ru
+
     lowered = (text or "").lower()
     if "скачай" in lowered or "найди дел" in lowered or "поставь на отслеживание" in lowered:
         return False
@@ -432,6 +440,27 @@ def looks_like_kad_downloaded_documents_list(text: str) -> bool:
             "открой список",
         )
     )
+    # Дата + «что/какие скачали из картотеки» без явного «список»
+    if not list_intent and parse_calendar_period_ru(text):
+        list_intent = bool(
+            any(p in lowered for p in ("что ", "что нового", "какие ", "какой ", "названия", "перечень"))
+            and any(
+                k in lowered
+                for k in (
+                    "скачал",
+                    "скачан",
+                    "удалось",
+                    "кад",
+                    "kad",
+                    "картотек",
+                    "файл",
+                    "документ",
+                    "нового",
+                    "новые",
+                    "сохран",
+                )
+            )
+        )
     if not list_intent:
         return False
     kad_context = any(
@@ -456,6 +485,8 @@ def looks_like_kad_downloaded_documents_list(text: str) -> bool:
 
 def looks_like_court_download_status_question(text: str) -> bool:
     """Вопросы о ходе/ошибках фоновой загрузки из КАД — развёрнутый статус по задачам."""
+    from .ru_date_range import parse_calendar_period_ru
+
     if looks_like_court_download_count_question(text) or looks_like_kad_downloaded_documents_list(text):
         return False
     lowered = (text or "").lower()
@@ -488,6 +519,23 @@ def looks_like_court_download_status_question(text: str) -> bool:
     ):
         return True
     if "?" in lowered and "документ" in lowered and ("кад" in lowered or "суд" in lowered or "задач" in lowered):
+        return True
+    # «Что нового скачали сегодня», «статус за вчера» — дата + загрузка/КАД
+    if parse_calendar_period_ru(text) and any(
+        k in lowered
+        for k in (
+            "скачал",
+            "загруз",
+            "кад",
+            "картотек",
+            "фонов",
+            "нового",
+            "удалось",
+            "получилось",
+            "статус",
+            "задач",
+        )
+    ):
         return True
     return False
 
