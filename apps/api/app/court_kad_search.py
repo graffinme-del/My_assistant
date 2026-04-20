@@ -84,6 +84,72 @@ def _with_years(req: CourtSearchRequest, text: str) -> CourtSearchRequest:
     )
 
 
+def looks_like_stored_arbitr_case_number(value: str | None) -> bool:
+    """Номер дела в папке (не TAG-*, не UNSORTED), похожий на арбитражный."""
+    if not value or not str(value).strip():
+        return False
+    s = normalize_case_number(str(value))
+    if s.upper().startswith("TAG-") or s == "UNSORTED":
+        return False
+    return bool(re.match(r"^[A]\d{1,4}-\d{1,7}/\d{2,4}", s, flags=re.IGNORECASE))
+
+
+def extract_explicit_case_number_from_message(text: str) -> str | None:
+    """Если пользователь указал номер в тексте — не подменяем его номером из папки."""
+    raw = text or ""
+    m = re.search(
+        r"(?:дел[ауо]?|дела)\s+№?\s*([АA]\d{1,4}-\d{1,7}/\d{2,4})",
+        raw,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        return normalize_case_number(m.group(1))
+    return None
+
+
+def _title_or_query_aligns_with_message(title: str | None, msg: str, query_value: str) -> bool:
+    """Не подставлять номер чужой папки: совпадение с названием дела или с распарсенным запросом."""
+    mt = (msg or "").casefold()
+    qv = (query_value or "").strip().casefold()
+    tt = (title or "").strip().casefold()
+    if len(qv) >= 3 and qv and (qv in tt or qv in mt):
+        return True
+    for tok in re.findall(r"[а-яёa-z]{3,}", tt):
+        if tok in mt:
+            return True
+    return False
+
+
+def apply_active_case_number_to_kad_request(
+    text: str,
+    request: CourtSearchRequest,
+    *,
+    active_case_title: str | None,
+    active_case_number: str | None,
+) -> CourtSearchRequest:
+    """
+    Если открыта папка с известным номером дела, а запрос к КАД распарсен как ФИО/организация
+    («Эмиль», «банкротство …»), подставляем номер дела из папки — точнее, чем поиск по одному слову.
+    """
+    if request.query_type not in ("participant_name", "organization_name"):
+        return request
+    if not looks_like_stored_arbitr_case_number(active_case_number):
+        return request
+    explicit = extract_explicit_case_number_from_message(text)
+    folder_cn = normalize_case_number(active_case_number or "")
+    if explicit and explicit != folder_cn:
+        return request
+    if not _title_or_query_aligns_with_message(active_case_title, text, request.query_value):
+        return request
+    return CourtSearchRequest(
+        query_type="case_number",
+        query_value=folder_cn,
+        run_mode=request.run_mode,
+        parser_year_min=request.parser_year_min,
+        parser_year_max=request.parser_year_max,
+    )
+
+
 def parse_court_search_request(text: str) -> CourtSearchRequest | None:
     raw = normalize_query_value(text)
     lowered = raw.lower()

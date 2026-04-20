@@ -40,6 +40,7 @@ from .ai_service import (
 )
 from .case_number import normalize_arbitr_case_number
 from .court_kad_search import (
+    apply_active_case_number_to_kad_request,
     looks_like_cancel_court_sync_jobs,
     looks_like_court_download_count_question,
     looks_like_court_download_status_question,
@@ -2211,7 +2212,14 @@ def search_documents(case: Case, docs: list[Document], query: str) -> str:
     return "\n".join(lines)
 
 
-def handle_court_sync_chat_command(db: Session, text: str, user_role: str) -> str | None:
+def handle_court_sync_chat_command(
+    db: Session,
+    text: str,
+    user_role: str,
+    *,
+    active_case_title: str | None = None,
+    active_case_number: str | None = None,
+) -> str | None:
     lowered = text.lower()
     if looks_like_cancel_court_sync_jobs(text):
         stats = cancel_active_court_sync_jobs(db)
@@ -2240,8 +2248,28 @@ def handle_court_sync_chat_command(db: Session, text: str, user_role: str) -> st
         return f"Отчет по задаче #{job.id} ({job.status}, шаг: {job.step}):\n{text}"
 
     request = parse_court_search_request(text)
+    parsed_before_override = request
+    if request:
+        request = apply_active_case_number_to_kad_request(
+            text,
+            request,
+            active_case_title=active_case_title,
+            active_case_number=active_case_number,
+        )
     if not request:
         return None
+
+    used_folder_case_number = bool(
+        parsed_before_override
+        and request
+        and parsed_before_override.query_type in ("participant_name", "organization_name")
+        and request.query_type == "case_number"
+    )
+    folder_hint = (
+        f" Номер дела взят из открытой папки ({active_case_title or active_case_number})."
+        if used_folder_case_number
+        else ""
+    )
 
     if "поставь на отслеживание" in lowered:
         profile, created = create_watch_profile(
@@ -2266,6 +2294,7 @@ def handle_court_sync_chat_command(db: Session, text: str, user_role: str) -> st
             f'{"Добавил" if created else "Уже отслеживается"} профиль "{request.query_value}" '
             f'({request.query_type}). '
             f'{"Создана задача синхронизации" if job_new else "Уже есть активная задача синхронизации"} #{job.id}.'
+            f"{folder_hint}"
         )
 
     def _wants_kad_download(qt: str, low: str) -> bool:
@@ -2308,20 +2337,24 @@ def handle_court_sync_chat_command(db: Session, text: str, user_role: str) -> st
             return (
                 f"Такая фоновая загрузка уже в работе или в очереди (процесс №{job.id}){period} по запросу «{request.query_value}». "
                 "Дубликат не создавался. Спросите «как там скачивание» или «отмени все задачи КАД», если нужно снять очередь."
+                f"{folder_hint}"
             )
         return (
             f"Такой поиск в КАД уже выполняется или стоит в очереди (процесс №{job.id}) по запросу «{request.query_value}». "
             "Дубликат не создавался."
+            f"{folder_hint}"
         )
     if run_mode == "download":
         return (
             f"Запустил фоновую загрузку материалов из картотеки (процесс №{job.id})"
             f'{period} по запросу «{request.query_value}». '
             "Обычно это занимает от нескольких минут. Спросите позже «как там скачивание» или «статус загрузки» — кратко опишу, что сделано."
+            f"{folder_hint}"
         )
     return (
         f"Запустил фоновый поиск в КАД (процесс №{job.id}) по запросу «{request.query_value}». "
         "Когда появятся результаты, можно спросить статус или попросить «отчёт по задаче» с номером."
+        f"{folder_hint}"
     )
 
 
@@ -2499,7 +2532,14 @@ async def assistant_ingest_text(
         )
 
     if looks_like_court_search_command(text):
-        reply_text = handle_court_sync_chat_command(db, text, _)
+        _ac = conversation.active_case
+        reply_text = handle_court_sync_chat_command(
+            db,
+            text,
+            _,
+            active_case_title=_ac.title if _ac else None,
+            active_case_number=_ac.case_number if _ac else None,
+        )
         if reply_text:
             active_case = conversation.active_case or get_or_create_unsorted_case(db)
             return await finalize_reply(case=active_case, reply_text=reply_text, mode="court-sync-command")
