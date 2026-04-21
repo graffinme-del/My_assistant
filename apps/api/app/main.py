@@ -2279,7 +2279,12 @@ def handle_court_sync_chat_command(
         return format_sync_status(db)
     if "что нового скачано за ночь" in lowered:
         return format_nightly_report(db)
-    m_job = re.search(r"(?:отчет|отчёт)\s+(?:по\s+)?(?:задач[еаи])\s*#?(\d+)", lowered)
+    # «№35», «#35», «номер 35» после «задаче»; только «#?» не ловит Unicode №.
+    m_job = re.search(
+        r"(?:(?:дай|покажи|пришли|нужен|нужно)\s+)?"
+        r"(?:отчет|отчёт)\s+(?:по\s+)?задач[еаи]\s*(?:#|№)?\s*(?:номер\s*)?(\d+)",
+        lowered,
+    )
     if m_job:
         job_id = int(m_job.group(1))
         job = db.query(CourtSyncJob).filter(CourtSyncJob.id == job_id).first()
