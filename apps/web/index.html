@@ -77,6 +77,7 @@
       }
       .error {
         color: #bf1d1d;
+        white-space: pre-wrap;
       }
 
       .msg {
@@ -183,7 +184,7 @@
       <main class="main">
         <div id="emptyState" class="card">
           <h3 style="margin-bottom:6px;">My Assistant</h3>
-          <div id="healthStatus" class="muted">Проверка API...</div>
+          <div id="healthStatus" class="muted" data-ui-build="2026-04-02d">Проверка API… (сборка 2026-04-02d)</div>
           <div id="chatLog" class="list" style="max-height: 360px;"></div>
           <div class="chatInputWrap">
             <div class="composerRow">
@@ -248,13 +249,77 @@
       </main>
     </div>
     <script>
+      /**
+       * URL для запроса к API. По умолчанию — относительный путь /api/... (тот же хост и порт, что у страницы).
+       * Так браузер не зависит от Local Storage и не ломается из‑за http://127.0.0.1 с другого компьютера.
+       * Опционально: в localStorage apiBase — полный префикс, например https://другой-хост/api (без слэша в конце).
+       */
+      function resolveApiRequestUrl(path) {
+        const p = path.startsWith("/") ? path : `/${path}`;
+        let saved = (localStorage.getItem("apiBase") || "").trim().replace(/\/$/, "");
+        const host = (window.location.hostname || "").toLowerCase();
+        const isLocalPage =
+          host === "localhost" ||
+          host === "127.0.0.1" ||
+          host === "[::1]";
+        if (saved) {
+          try {
+            const u = new URL(saved.startsWith("http") ? saved : `https://${saved}`);
+            const h = (u.hostname || "").toLowerCase();
+            if (!isLocalPage && (h === "localhost" || h === "127.0.0.1")) {
+              localStorage.removeItem("apiBase");
+              saved = "";
+            }
+          } catch (_) {
+            localStorage.removeItem("apiBase");
+            saved = "";
+          }
+        }
+        if (saved) {
+          return `${saved}${p}`;
+        }
+        return `/api${p}`;
+      }
+
+      /** Убрать apiBase, если он дублирует текущий сайт, другой порт того же хоста (8080 vs 8001) или чужой localhost. */
+      function normalizeApiBaseOnLoad() {
+        const saved = (localStorage.getItem("apiBase") || "").trim();
+        if (!saved) return;
+        const host = (window.location.hostname || "").toLowerCase();
+        const isLocalPage =
+          host === "localhost" ||
+          host === "127.0.0.1" ||
+          host === "[::1]";
+        const portNorm = (protocol, port) => {
+          if (port) return String(port);
+          return protocol === "https:" ? "443" : "80";
+        };
+        try {
+          const u = new URL(saved.startsWith("http") ? saved : `https://${saved}`);
+          const h = (u.hostname || "").toLowerCase();
+          if (!isLocalPage && (h === "localhost" || h === "127.0.0.1")) {
+            localStorage.removeItem("apiBase");
+            return;
+          }
+          if (u.origin === window.location.origin) {
+            localStorage.removeItem("apiBase");
+            return;
+          }
+          if (
+            h === host &&
+            portNorm(u.protocol, u.port) !== portNorm(window.location.protocol, window.location.port)
+          ) {
+            localStorage.removeItem("apiBase");
+          }
+        } catch (_) {
+          localStorage.removeItem("apiBase");
+        }
+      }
+
       const storage = {
-        get apiBase() {
-          const saved = localStorage.getItem("apiBase");
-          if (saved) return saved.replace(/\/$/, "");
-          return `${window.location.origin}/api`;
-        },
-        get apiToken() { return localStorage.getItem("apiToken") || "owner-dev-token"; }
+        get apiToken() {
+          return localStorage.getItem("apiToken") || "owner-dev-token";
+        }
       };
       let selectedCaseId = null;
 
@@ -279,14 +344,13 @@
 
       async function api(path, options = {}) {
         const { timeoutMs, ...rest } = options;
-        const base = storage.apiBase;
         const token = storage.apiToken;
         const headers = { ...(rest.headers || {}), "X-API-Token": token };
         if (!(rest.body instanceof FormData)) {
           headers["Content-Type"] = "application/json";
         }
         const fetchInit = { ...rest, headers };
-        const url = `${base}${path}`;
+        const url = resolveApiRequestUrl(path);
         const res = timeoutMs
           ? await fetchWithTimeout(url, fetchInit, timeoutMs)
           : await fetch(url, fetchInit);
@@ -299,54 +363,66 @@
 
       async function checkHealth() {
         const node = el("healthStatus");
-        const base = storage.apiBase;
-        const maxMs = 3 * 60 * 1000;
-        const started = Date.now();
         const healthTimeoutMs = 8000;
-        let lastProgressSec = -1;
-        node.textContent =
-          "Ждём API (макс. 3 мин). Запрос не зависнет: каждые 8 с новая попытка.";
+        node.textContent = "Проверка API…";
         node.className = "muted";
-        while (Date.now() - started < maxMs) {
-          try {
-            const res = await fetchWithTimeout(
-              `${base}/health`,
-              { cache: "no-store" },
-              healthTimeoutMs
-            );
-            if (res.ok) {
-              let aiLine = "ChatGPT: неизвестно";
-              try {
-                const ai = await api("/ai/status", { timeoutMs: 20000 });
-                if (ai.status === "connected") {
-                  aiLine = `ChatGPT: подключен (${ai.model})`;
-                } else if (ai.status === "not_configured") {
-                  aiLine = ai.message
-                    ? `ключ не задан — ${ai.message}`
-                    : "ChatGPT: ключ не задан";
-                } else {
-                  aiLine = `ChatGPT: ошибка (${ai.message || "не удалось подключиться"})`;
-                }
-              } catch (e) {
-                aiLine = `ChatGPT: ошибка (${e.message || "запрос не выполнен"})`;
-              }
-              setStatus(node, `API доступен | ${aiLine}`, true);
-              return;
-            }
-          } catch (_) {}
-          const elapsed = Math.floor((Date.now() - started) / 1000);
-          if (elapsed >= 15 && elapsed - lastProgressSec >= 15) {
-            lastProgressSec = elapsed;
-            node.textContent = `Ждём API… ${elapsed} с. На сервере: cd /opt/my_assistant && docker compose -f runtime.compose.yml ps`;
-            node.className = "muted";
-          }
-          await new Promise((r) => setTimeout(r, 1000));
+        const healthUrl = resolveApiRequestUrl("/health");
+        if (window.location.protocol === "https:" && healthUrl.startsWith("http:")) {
+          setStatus(
+            node,
+            "Страница открыта по HTTPS, а API — по HTTP: браузер блокирует запрос (mixed content). " +
+              "Откройте сайт по http://…:8080 или настройте HTTPS для API.",
+            false
+          );
+          return;
         }
-        setStatus(
-          node,
-          "API не ответил за 3 мин. SSH: docker compose -f runtime.compose.yml ps и logs api / logs postgres. Браузер: Ctrl+F5; в Local Storage удалите apiBase, если там :8000.",
-          false
-        );
+        try {
+          const res = await fetchWithTimeout(
+            healthUrl,
+            { cache: "no-store" },
+            healthTimeoutMs
+          );
+          if (!res.ok) {
+            const body = await res.text();
+            setStatus(
+              node,
+              `Ответ /health не OK: HTTP ${res.status}. ${body.slice(0, 280)} — URL: ${healthUrl}`,
+              false
+            );
+            return;
+          }
+          let aiLine = "ChatGPT: неизвестно";
+          try {
+            const ai = await api("/ai/status", { timeoutMs: 20000 });
+            if (ai.status === "connected") {
+              aiLine = `ChatGPT: подключен (${ai.model})`;
+            } else if (ai.status === "not_configured") {
+              aiLine = ai.message
+                ? `ключ не задан — ${ai.message}`
+                : "ChatGPT: ключ не задан";
+            } else {
+              aiLine = `ChatGPT: ошибка (${ai.message || "не удалось подключиться"})`;
+            }
+          } catch (e) {
+            aiLine = `ChatGPT: ошибка (${e.message || "запрос не выполнен"})`;
+          }
+          setStatus(node, `API доступен | ${aiLine}`, true);
+        } catch (err) {
+          const msg = String(err && err.message ? err.message : err);
+          setStatus(
+            node,
+            `Сеть: не удалось выполнить запрос к API — ${msg}\n\n` +
+              `Проверяемый URL: ${healthUrl}\n` +
+              `Адрес страницы: ${window.location.origin}\n\n` +
+              `Сделайте: 1) откройте именно http://IP:8080 (не :8001); 2) окно инкогнито; ` +
+              `3) F12 → Application → Local Storage → удалите ключ apiBase; 4) на сервере: ` +
+              `curl -sS http://127.0.0.1:8080/api/health\n\n` +
+              `Если видите старый текст про «runtime.compose» — страница из кэша: на сервере ` +
+              `git pull && docker compose --env-file .env -f infra/compose.prod.yml build --no-cache web ` +
+              `&& docker compose --env-file .env -f infra/compose.prod.yml up -d --force-recreate web`,
+            false
+          );
+        }
       }
 
       async function loadCases() {
@@ -610,6 +686,7 @@
       }
 
       function init() {
+        normalizeApiBaseOnLoad();
         // Simplified UI: chat + file upload
         const mic = el("micBtn");
         const send = el("sendChatBtn");

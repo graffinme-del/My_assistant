@@ -643,10 +643,9 @@ async def ai_status(_: str = Depends(require_user)) -> dict[str, str | bool]:
             "status": "not_configured",
             "model": settings.openai_model,
             "message": (
-                "В контейнере API нет ключа. На сервере в каталоге с runtime.compose.yml "
-                "в файле .env добавьте строку OPENAI_API_KEY=sk-… (без кавычек), "
-                "при необходимости OPENAI_BASE_URL и OPENAI_MODEL, затем: "
-                "docker compose -f runtime.compose.yml up -d --force-recreate api"
+                "В контейнере API нет ключа. На сервере в /opt/my_assistant в файле .env добавьте строку "
+                "OPENAI_API_KEY=sk-… (без кавычек), при необходимости OPENAI_BASE_URL и OPENAI_MODEL, затем: "
+                "docker compose --env-file .env -f infra/compose.prod.yml up -d --force-recreate api"
             ),
         }
 
