@@ -610,7 +610,9 @@ def try_parser_search_cases(query_type: str, query_value: str, job_id: int | Non
                 report_progress(job_id, "searching", "Parser-API: детали дела по ссылке на карточку…")
             d = parser_details_by_id(rid)
             if d.get("Success") != 1:
-                return []
+                err = d.get("error") or d.get("Error") or ""
+                print(f"[worker] Parser-API details_by_id Success!=1, fallback to browser: {err!s}"[:500])
+                return None
             cases = d.get("Cases") or []
             return [case_dict_from_parser_case(c, card_url_hint=url) for c in cases[:20]]
 
@@ -620,7 +622,9 @@ def try_parser_search_cases(query_type: str, query_value: str, job_id: int | Non
                 report_progress(job_id, "searching", "Parser-API: детали по номеру дела…")
             d = parser_details_by_number(qn)
             if d.get("Success") != 1:
-                return []
+                err = d.get("error") or d.get("Error") or ""
+                print(f"[worker] Parser-API details_by_number Success!=1, fallback to browser: {err!s}"[:500])
+                return None
             cases = d.get("Cases") or []
             return [case_dict_from_parser_case(c) for c in cases[:20]]
 
@@ -632,7 +636,9 @@ def try_parser_search_cases(query_type: str, query_value: str, job_id: int | Non
                 report_progress(job_id, "searching", "Parser-API: поиск дел по ИНН…")
             d = parser_search(inn=inn, inn_type="Any", page=1)
             if d.get("Success") != 1:
-                return []
+                err = d.get("error") or d.get("Error") or ""
+                print(f"[worker] Parser-API search (inn) Success!=1, fallback to browser: {err!s}"[:500])
+                return None
             cases = d.get("Cases") or []
             return [case_dict_from_parser_case(c) for c in cases[:25]]
 
@@ -649,6 +655,8 @@ def try_parser_search_cases(query_type: str, query_value: str, job_id: int | Non
                 )
             d = parser_search(inn=qv, inn_type="Any", page=1)
             if d.get("Success") != 1:
+                err = d.get("error") or d.get("Error") or ""
+                print(f"[worker] Parser-API search (participant) Success!=1, fallback to browser: {err!s}"[:500])
                 return None
             cases = d.get("Cases") or []
             return [case_dict_from_parser_case(c) for c in cases[:25]]
