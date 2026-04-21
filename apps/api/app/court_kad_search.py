@@ -95,6 +95,63 @@ def looks_like_stored_arbitr_case_number(value: str | None) -> bool:
     return bool(re.match(r"^[A]\d{1,4}-\d{1,7}/\d{2,4}", s, flags=re.IGNORECASE))
 
 
+def extract_kad_folder_title_hint(text: str) -> str:
+    """
+    Название папки/дела из «по делу …» (в кавычках или без) — для сопоставления с Case в БД.
+    Не обрезает «Банкротство …» до одного имени (в отличие от normalize_po_delu для поиска участника).
+    """
+    raw = text or ""
+    m = re.search(
+        r"по\s+делу\s+(?:«([^»]+)»|\"([^\"]+)\"|'([^']+)'|([А-Яа-яЁё0-9][^.\n!?;]{0,240}))",
+        raw,
+        flags=re.IGNORECASE,
+    )
+    if not m:
+        return ""
+    for g in m.groups():
+        if g and str(g).strip():
+            return normalize_query_value(str(g).strip())
+    return ""
+
+
+def try_resolve_kad_folder_title_to_case_number(
+    db,
+    text: str,
+    request: CourtSearchRequest | None,
+) -> CourtSearchRequest | None:
+    """
+    «Проверь КАД … по делу Банкротство Эмиль»: находим папку в БД и подставляем номер дела для запроса в КАД.
+    """
+    if not request:
+        return None
+    if request.query_type not in ("participant_name", "organization_name"):
+        return request
+    if extract_explicit_case_number_from_message(text):
+        return request
+    hint = extract_kad_folder_title_hint(text)
+    if not hint or len(hint) < 2:
+        return request
+    from .ai_service import find_case_by_hint
+    from .models import Case
+
+    cases = db.query(Case).all()
+    case = find_case_by_hint(cases, hint, db=db)
+    if not case:
+        alt = normalize_po_delu_case_hint(hint)
+        if alt != hint:
+            case = find_case_by_hint(cases, alt, db=db)
+    if not case or not looks_like_stored_arbitr_case_number(case.case_number):
+        return request
+    cn = normalize_case_number(case.case_number)
+    return CourtSearchRequest(
+        query_type="case_number",
+        query_value=cn,
+        run_mode=request.run_mode,
+        parser_year_min=request.parser_year_min,
+        parser_year_max=request.parser_year_max,
+    )
+
+
 def extract_explicit_case_number_from_message(text: str) -> str | None:
     """Если пользователь указал номер в тексте — не подменяем его номером из папки."""
     raw = text or ""
