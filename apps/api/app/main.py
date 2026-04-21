@@ -42,12 +42,14 @@ from .case_number import arbitr_case_number_lookup_keys, normalize_arbitr_case_n
 from .court_kad_search import (
     apply_active_case_number_to_kad_request,
     apply_folder_documents_case_numbers_to_kad_request,
+    extract_kad_folder_title_hint,
     looks_like_cancel_court_sync_jobs,
     looks_like_court_download_count_question,
     looks_like_court_download_status_question,
     looks_like_court_search_command,
     looks_like_kad_downloaded_documents_list,
     parse_court_search_request,
+    try_resolve_kad_folder_title_to_case_number,
 )
 from .court_sync_service import (
     cancel_active_court_sync_jobs,
@@ -477,6 +479,30 @@ def extract_saved_message_body_for_case(text: str) -> str:
     return text.strip()
 
 
+def looks_like_delete_documents_command(text: str) -> bool:
+    """Удаление файлов из приложения (не путать с «удали задачи КАД»)."""
+    t = (text or "").lower()
+    if not any(k in t for k in ("удали", "удалить", "стереть", "убери", "убрать")):
+        return False
+    if "задач" in t and "документ" not in t and "файл" not in t and "pdf" not in t:
+        return False
+    if "папк" in t and "документ" not in t and "файл" not in t:
+        return False
+    return any(
+        k in t
+        for k in (
+            "документ",
+            "документа",
+            "документы",
+            "файл",
+            "файлы",
+            "pdf",
+            "материал",
+            "вложен",
+        )
+    )
+
+
 def looks_like_show_documents_in_folder_only(text: str) -> bool:
     """Просмотр списка («покажи документы в папке …»), не перенос из активного дела."""
     t = (text or "").lower()
@@ -800,6 +826,21 @@ def list_documents(
     )
 
 
+@app.delete("/documents/{document_id}")
+def delete_document(
+    document_id: int,
+    db: Session = Depends(get_db),
+    _: str = Depends(require_user),
+) -> dict[str, str | int]:
+    doc = db.query(Document).filter(Document.id == document_id).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    fn = doc.filename
+    cid = doc.case_id
+    delete_documents_hard(db, [doc])
+    return {"ok": True, "id": document_id, "filename": fn, "case_id": cid}
+
+
 @app.get("/documents/{document_id}/download")
 def download_document(
     document_id: int, db: Session = Depends(get_db), _: str = Depends(require_user_header_or_query)
@@ -847,6 +888,192 @@ def find_case_by_arbitr_number(db: Session, extracted: str | None) -> Case | Non
         if c:
             return c
     return None
+
+
+def find_first_case_by_arbitr_numbers_in_text(db: Session, text: str) -> Case | None:
+    for m in re.finditer(r"[АAаa]\d{1,4}-\d{1,7}/\d{2,4}", text or "", flags=re.IGNORECASE):
+        c = find_case_by_arbitr_number(db, m.group(0))
+        if c:
+            return c
+    return None
+
+
+def _unlink_local_document_file(doc: Document) -> None:
+    path = local_storage_path(doc)
+    if path and path.is_file():
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
+def delete_documents_hard(db: Session, docs: list[Document]) -> list[str]:
+    """Удаляет строки Document, чанки (CASCADE), файл на диске; пишет CaseEvent."""
+    removed: list[str] = []
+    for doc in docs:
+        doc_id, case_id, fn = doc.id, doc.case_id, doc.filename
+        _unlink_local_document_file(doc)
+        db.add(
+            CaseEvent(
+                case_id=case_id,
+                event_type="document_deleted",
+                body=f"Удалён документ [{doc_id}]: {fn}",
+            )
+        )
+        db.delete(doc)
+        removed.append(f"[{doc_id}] {fn}")
+    db.commit()
+    return removed
+
+
+def _collect_documents_matching_delete_hints(db: Session, hints: list[str]) -> list[Document]:
+    """Совпадение по имени файла или по извлечённому тексту PDF (extracted_text)."""
+    collected: dict[int, Document] = {}
+    for h in hints:
+        if re.search(r"[АAаa]\d{1,4}-\d{1,7}/\d{2,4}", h):
+            continue
+        h_safe = re.sub(r"[%_\x00]", "", h).strip()[:500]
+        if len(h_safe) < 3:
+            continue
+        q = (
+            db.query(Document)
+            .filter(
+                or_(
+                    Document.filename.ilike(f"%{h_safe}%"),
+                    Document.extracted_text.ilike(f"%{h_safe}%"),
+                )
+            )
+            .order_by(Document.id.desc())
+            .limit(250)
+        )
+        for d in q:
+            collected[d.id] = d
+    return list(collected.values())
+
+
+def _extract_delete_target_phrases(text: str) -> list[str]:
+    """Кавычки, «для …», «по фио …», «по Фамилия Имя …» (но не «по делу …» — это КАД)."""
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def add(s: str) -> None:
+        v = (s or "").strip()
+        if len(v) >= 3 and v.lower() not in seen:
+            seen.add(v.lower())
+            out.append(v)
+
+    for a, b in re.findall(r'"([^"]+)"|«([^»]+)»', text or ""):
+        add((a or b).strip())
+    for m in re.finditer(
+        r"(?:для|по\s+фио)\s+([А-Яа-яЁё][А-Яа-яЁё'\-]*(?:\s+[А-Яа-яЁё][А-Яа-яЁё'\-]*){0,6})",
+        text or "",
+        flags=re.IGNORECASE,
+    ):
+        add(m.group(1).strip())
+    m2 = re.search(
+        r"(?<![а-яё])по\s+(?!делу\b)([А-Яа-яЁё][А-Яа-яЁё'\-]*(?:\s+[А-Яа-яЁё][А-Яа-яЁё'\-]*){1,6})(?:\s*[!?.…]*)?(?:\s*$|\n)",
+        text or "",
+        flags=re.IGNORECASE,
+    )
+    if m2:
+        add(m2.group(1).strip())
+    return out
+
+
+def parse_document_ids_for_delete_command(text: str) -> list[int]:
+    ids = [int(x) for x in re.findall(r"\[(\d+)\]", text or "")]
+    if ids:
+        return sorted(set(ids))
+    m = re.search(
+        r"(?:документы?|файлы?)(?:\s+(?:с\s+)?id|\s+№|\s+#)?\s*[:.]?\s*([\d\s,;и]+)",
+        text or "",
+        flags=re.IGNORECASE,
+    )
+    if m:
+        return sorted({int(x) for x in re.findall(r"\d+", m.group(1))})
+    m2 = re.search(r"(?:документ|файл)\s*(?:№|#)?\s*(\d+)\b", text or "", flags=re.IGNORECASE)
+    if m2:
+        return [int(m2.group(1))]
+    return []
+
+
+def handle_delete_documents_chat(db: Session, text: str, conversation: Conversation) -> str | None:
+    """Чат: удалить документы по id, по номеру дела или по фрагменту имени файла (в кавычках)."""
+    if not looks_like_delete_documents_command(text):
+        return None
+    low = (text or "").lower()
+
+    doc_ids = parse_document_ids_for_delete_command(text)
+    if doc_ids:
+        docs = db.query(Document).filter(Document.id.in_(doc_ids)).all()
+        if not docs:
+            return "Не нашёл документы с такими номерами. Пример: удали документы 214 287 или удали документ 214."
+        found_ids = {d.id for d in docs}
+        missing = [i for i in doc_ids if i not in found_ids]
+        removed = delete_documents_hard(db, docs)
+        lines = ["Удалено из приложения (файл и поиск по тексту):"] + [f"• {r}" for r in removed]
+        if missing:
+            lines.append(f"Не найдены id: {', '.join(str(i) for i in missing)}.")
+        return "\n".join(lines)
+
+    wants_all = any(
+        w in low
+        for w in (
+            "все документ",
+            "все файлы",
+            "всех документ",
+            "всех файлов",
+            "каждый документ",
+            "каждый файл",
+        )
+    )
+
+    case: Case | None = find_first_case_by_arbitr_numbers_in_text(db, text)
+    if not case and wants_all and any(
+        p in low for p in ("этой папк", "текущ", "открыт", "в этой", "из этой", "это дело")
+    ):
+        case = conversation.active_case
+
+    if wants_all and case:
+        docs = db.query(Document).filter(Document.case_id == case.id).all()
+        if not docs:
+            return f'В деле «{case.title}» ({case.case_number}) нет сохранённых документов.'
+        removed = delete_documents_hard(db, docs)
+        return (
+            f'Удалено файлов из дела «{case.title}» ({case.case_number}): {len(removed)}.\n'
+            + "\n".join(f"• {r}" for r in removed)
+        )
+
+    hints = _extract_delete_target_phrases(text)
+    if hints:
+        docs = _collect_documents_matching_delete_hints(db, hints)
+        if not docs:
+            return (
+                f'Не нашёл документов, где в имени файла или в тексте PDF встречается «{hints[0]}». '
+                "Проверьте написание или удалите по номеру дела: «удали все документы дела А53-13969/2026»."
+            )
+        removed = delete_documents_hard(db, docs)
+        return (
+            f"Удалено по совпадению с фразой в имени файла или в тексте PDF ({len(removed)} шт.):\n"
+            + "\n".join(f"• {r}" for r in removed)
+            + "\n\nЗапросы в КАД лучше указывать с номером дела или ссылкой на карточку — "
+            "по одному короткому имени поиск может подтянуть чужие дела."
+        )
+
+    if wants_all and not case:
+        return (
+            "Чтобы удалить всё лишнее, укажите номер дела, например: "
+            "«удали все документы дела А53-13969/2026», "
+            "или откройте папку слева и напишите «удали все документы в этой папке», "
+            "или «удали все документы по Вартанов Эмиль Валерьевич» (поиск по имени файла и тексту PDF)."
+        )
+    return (
+        "Напишите, что именно удалить:\n"
+        "• по номерам: «удали документы 214 287»;\n"
+        "• всё по делу: «удали все документы дела А53-13969/2026»;\n"
+        "• всё в открытой папке: «удали все документы в этой папке»;\n"
+        "• по ФИО/фразе в PDF: «удали все документы по Вартанов Эмиль Валерьевич» или «удали файлы «Вартанов»»."
+    )
 
 
 async def build_document_summary_by_id(db: Session, document_id: int) -> tuple[Document | None, str]:
@@ -2409,8 +2636,17 @@ def handle_court_sync_chat_command(
         text = job.report_text.strip() or "(отчет пуст)"
         return f"Отчет по задаче #{job.id} ({job.status}, шаг: {job.step}):\n{text}"
 
-    request = parse_court_search_request(text)
+    after_parse = parse_court_search_request(text)
+    request = try_resolve_kad_folder_title_to_case_number(db, text, after_parse)
     parsed_before_override = request
+    title_hint_kad = extract_kad_folder_title_hint(text)
+    resolved_case_title_to_number = bool(
+        title_hint_kad
+        and after_parse
+        and after_parse.query_type in ("participant_name", "organization_name")
+        and request
+        and request.query_type == "case_number"
+    )
     extra_doc_case_numbers: list[str] = []
     replaced_from_documents = False
     if request and active_case_id:
@@ -2448,6 +2684,8 @@ def handle_court_sync_chat_command(
         folder_hint = (
             f" Номер дела взят из карточки папки ({active_case_title or active_case_number})."
         )
+    elif resolved_case_title_to_number:
+        folder_hint = f' Номер дела взят из вашего списка папок по названию «{title_hint_kad}» → {request.query_value}.'
     else:
         folder_hint = ""
 
@@ -2723,6 +2961,15 @@ async def assistant_ingest_text(
             reply_text=reply_text,
             mode="case-rename",
             refresh_summary=target_case is not None,
+        )
+
+    del_reply = handle_delete_documents_chat(db, text, conversation)
+    if del_reply:
+        case_for_reply = conversation.active_case or get_or_create_unsorted_case(db)
+        return await finalize_reply(
+            case=case_for_reply,
+            reply_text=del_reply,
+            mode="documents-delete",
         )
 
     upload_loc = answer_where_recent_upload_saved(db, text, conversation)
