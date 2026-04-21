@@ -666,6 +666,9 @@
                 );
               } else {
                 fd.append("file", f);
+                if (selectedCaseId) {
+                  fd.append("preferred_case_id", String(selectedCaseId));
+                }
                 const res = await api("/documents/ingest", { method: "POST", body: fd, timeoutMs: 120000 });
                 ok += 1;
                 appendChat(

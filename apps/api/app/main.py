@@ -2244,6 +2244,122 @@ def search_documents(case: Case, docs: list[Document], query: str) -> str:
     return "\n".join(lines)
 
 
+_RECENT_UPLOAD_LOOKBACK_MINUTES = 45
+
+
+def _extract_filename_hint_from_user_text(text: str) -> str:
+    for pat in (r"«([^»]{2,})»", r'"([^"]{2,})"', r"'([^']{2,})'"):
+        m = re.search(pat, text or "")
+        if m:
+            return m.group(1).strip()
+    return ""
+
+
+def looks_like_where_was_upload_saved_question(text: str) -> bool:
+    """Куда ушёл только что загруженный файл (в продукте «папка» = дело / Case)."""
+    if looks_like_show_documents_in_folder_only(text):
+        return False
+    low = (text or "").lower()
+    where = (
+        "в какую папку",
+        "какую папку",
+        "куда положил",
+        "куда сохранил",
+        "куда ты положил",
+        "куда ты сохранил",
+        "куда делся",
+        "куда загрузил",
+        "куда файл",
+        "куда документ",
+        "в какое дело",
+        "к какому делу",
+        "в какой папке",
+        "где лежит",
+        "где сейчас",
+        "где этот файл",
+        "где этот документ",
+    )
+    if not any(w in low for w in where):
+        return False
+    return any(
+        k in low
+        for k in (
+            "документ",
+            "файл",
+            "загруз",
+            "прикреп",
+            "положил",
+            "сохранил",
+            "этот",
+            "эту",
+            "это ",
+            "папк",
+            "дело",
+        )
+    )
+
+
+def answer_where_recent_upload_saved(
+    db: Session, text: str, conversation: Conversation
+) -> tuple[str, Case] | None:
+    """Ответ по факту в БД: последние загрузки (окно времени), без LLM. Второй элемент — дело-папка файла."""
+    if not looks_like_where_was_upload_saved_question(text):
+        return None
+    since = datetime.utcnow() - timedelta(minutes=_RECENT_UPLOAD_LOOKBACK_MINUTES)
+    recent = (
+        db.query(Document)
+        .filter(Document.created_at >= since)
+        .order_by(Document.created_at.desc())
+        .limit(12)
+        .all()
+    )
+    fallback_case = conversation.active_case or get_or_create_unsorted_case(db)
+    if not recent:
+        return (
+            f"За последние ~{_RECENT_UPLOAD_LOOKBACK_MINUTES} мин. не вижу новых файлов в базе. "
+            "Если загрузка прошла, повторите вопрос через несколько секунд или укажите имя файла в кавычках. "
+            "Папка в приложении — это дело в списке слева; документ виден во вкладке документов этого дела.",
+            fallback_case,
+        )
+
+    hint = _extract_filename_hint_from_user_text(text)
+    chosen: Document | None = None
+    if hint:
+        hn = hint.lower()
+        for d in recent:
+            fn = (d.filename or "").lower()
+            if hn in fn or fn in hn:
+                chosen = d
+                break
+    if not chosen and conversation.active_case_id:
+        for d in recent:
+            if d.case_id == conversation.active_case_id:
+                chosen = d
+                break
+    if not chosen:
+        chosen = recent[0]
+
+    case = db.query(Case).filter(Case.id == chosen.case_id).first()
+    if not case:
+        return None
+
+    parts = [
+        f'Файл «{chosen.filename}» сохранён в папке «{case.title}» (дело {case.case_number}). '
+        f"Категория: {chosen.category}."
+    ]
+    if len(recent) >= 2 and chosen is recent[0] and not hint:
+        parts.append(
+            "Если речь о другом только что загруженном файле — напишите его имя в кавычках «…»."
+        )
+    ac = conversation.active_case
+    if ac and ac.id != case.id:
+        parts.append(
+            f'Ранее в чате была открыта другая папка: «{ac.title}» ({ac.case_number}). '
+            f"Сейчас подсказка относится к делу {case.case_number}."
+        )
+    return "\n".join(parts), case
+
+
 def handle_court_sync_chat_command(
     db: Session,
     text: str,
@@ -2607,6 +2723,15 @@ async def assistant_ingest_text(
             reply_text=reply_text,
             mode="case-rename",
             refresh_summary=target_case is not None,
+        )
+
+    upload_loc = answer_where_recent_upload_saved(db, text, conversation)
+    if upload_loc:
+        reply_ul, case_ul = upload_loc
+        return await finalize_reply(
+            case=case_ul,
+            reply_text=reply_ul,
+            mode="upload-location",
         )
 
     if looks_like_court_search_command(text):
