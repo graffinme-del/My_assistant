@@ -734,6 +734,8 @@ def normalize_global_search_query(raw: str) -> str:
         flags=re.I,
     )
     s = re.sub(r"^документы?\s*", "", s, flags=re.I)
+    # После «документы, содержащие…» часто остаётся запятая — иначе префикс «содержащие» не снимается.
+    s = re.sub(r"^[\s,.:;—–-]+", "", s)
     s = re.sub(
         r"^(?:содержащ(?:ие|их)?|содержащие\s+имя|содержащие\s+текст|где\s+есть|с\s+текстом)\s+",
         "",
@@ -741,6 +743,7 @@ def normalize_global_search_query(raw: str) -> str:
         flags=re.I,
     )
     s = re.sub(r"^(?:имя|фио|фамилию|текст)\s+", "", s, flags=re.I)
+    s = re.sub(r"^[\s,.:;—–-]+", "", s)
     return s.strip(" ,.:-—")
 
 
@@ -1035,6 +1038,26 @@ def delete_documents_hard(db: Session, docs: list[Document]) -> list[str]:
     return removed
 
 
+# Токены, которые не должны участвовать в AND-поиске по PDF (часто попадают из формулировки запроса).
+_HINT_SEARCH_SKIP_WORDS = frozenset(
+    {
+        "или",
+        "либо",
+        "содержащие",
+        "содержащих",
+        "документы",
+        "документ",
+        "найди",
+        "поиск",
+        "покажи",
+        "всех",
+        "папках",
+        "делам",
+        "делах",
+    }
+)
+
+
 def _tokenize_delete_hint_words(h: str) -> list[str]:
     """Слова для поиска: кириллица и латиница, ё→е; без слишком коротких (кроме как часть фразы)."""
     s = (h or "").strip().lower()
@@ -1044,7 +1067,7 @@ def _tokenize_delete_hint_words(h: str) -> list[str]:
     seen: set[str] = set()
     for w in words:
         wn = w.lower()
-        if wn in seen:
+        if wn in _HINT_SEARCH_SKIP_WORDS or wn in seen:
             continue
         seen.add(wn)
         out.append(w)
@@ -2776,6 +2799,14 @@ def search_documents_global(db: Session, user_text: str, *, limit: int = 40) -> 
         nq = normalize_global_search_query(raw_q)
         if len(nq) >= 2:
             hints = [nq]
+    expanded: list[str] = []
+    for h in hints:
+        for part in re.split(r"\s+(?:или|либо)\s+", h or "", flags=re.IGNORECASE):
+            p = part.strip().strip(" ,.:-—")
+            if len(p) >= 2:
+                expanded.append(p)
+    if expanded:
+        hints = expanded
     if not hints:
         return (
             "Не понял, что искать во всех папках. Пример: «найди во всех папках документы с именем Эмилия» "
