@@ -114,6 +114,10 @@ class DocumentIngestOut(BaseModel):
     routing_mode: str
     routing_model: str
     note: str
+    # Если несколько дел подходят по ФИО и LLM не выбрал — просим пользователя уточнить (документ в UNSORTED).
+    needs_participant_clarification: bool = False
+    participant_clarification: str | None = None
+    participant_clarification_cases: list[str] = []
 
 
 class HearingNoteIn(BaseModel):

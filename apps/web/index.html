@@ -519,10 +519,14 @@
           method: "POST",
           body: formData
         });
-        el("docIngestResult").textContent =
+        let ingestMsg =
           `Готово: ${result.document.filename}. Дело: ${result.matched_case_number}. ` +
           `Категория: ${result.category}. Уверенность: ${result.confidence}. ` +
           `ИИ-сортировка: ${result.routing_mode}. Модель: ${result.routing_model}.`;
+        if (result.needs_participant_clarification && result.note) {
+          ingestMsg += "\n\n" + result.note;
+        }
+        el("docIngestResult").textContent = ingestMsg;
         fileInput.value = "";
         await loadDocs();
         await loadEvents();
@@ -671,11 +675,13 @@
                 }
                 const res = await api("/documents/ingest", { method: "POST", body: fd, timeoutMs: 120000 });
                 ok += 1;
-                appendChat(
-                  "assistant",
+                let upMsg =
                   `Файл "${res.document.filename}" загружен. Дело: ${res.matched_case_number}. ` +
-                    `Категория: ${res.category}.`
-                );
+                  `Категория: ${res.category}.`;
+                if (res.needs_participant_clarification && res.note) {
+                  upMsg += "\n\n" + res.note;
+                }
+                appendChat("assistant", upMsg);
               }
             } catch (e) {
               failed += 1;

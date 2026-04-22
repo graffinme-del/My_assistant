@@ -664,6 +664,58 @@ async def llm_document_routing(
         return None
 
 
+async def llm_disambiguate_document_among_cases(
+    *,
+    filename: str,
+    text: str,
+    person_hint: str,
+    candidates_text: str,
+) -> dict[str, Any] | None:
+    """Один проход LLM: выбрать номер дела из узкого списка кандидатов по контексту документа."""
+    if not settings.openai_api_key.strip():
+        return None
+    sample = (text or "")[:6500]
+    prompt = (
+        "Ты помогаешь отнести судебный документ к одному делу из списка.\n"
+        "Верни ТОЛЬКО JSON вида:\n"
+        '{"case_number":"","confidence":0.0,"reason":""}\n'
+        "case_number — строго один из номеров из списка кандидатов (как написано там), либо пустая строка, "
+        "если выбрать нельзя.\n"
+        "confidence — твоя уверенность от 0 до 1.\n\n"
+        f"Кандидаты:\n{candidates_text}\n\n"
+        f"Имя файла: {filename}\n"
+        f"Подсказка по лицу (ФИО/участник): {person_hint}\n\n"
+        f"Фрагмент текста документа:\n{sample}"
+    )
+    raw = await _llm_chat(prompt, timeout=55.0)
+    try:
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
+async def llm_participant_clarification_message(
+    *,
+    filename: str,
+    person_hint: str,
+    candidates_text: str,
+) -> str | None:
+    """Короткий вопрос пользователю, если автоматика не выбрала дело (тот же LLM, что и остальной ассистент)."""
+    if not settings.openai_api_key.strip():
+        return None
+    system = (
+        "Ты помощник по судебным делам. Пользователь не обязан помнить номера дел. "
+        "Напиши по-русски один короткий блок текста (до 1200 символов): вежливо спроси, к какому из перечисленных дел "
+        "отнести загруженный файл, перечисли варианты с номерами дел в отдельных строках. "
+        "Явно скажи, что документ пока в папке «Неразобранное», и что можно ответить номером дела или фразой "
+        "«Привяжи к делу … участника …». Без канцелярита."
+    )
+    user = f"Файл: {filename}\nЛицо из контекста: {person_hint}\nВарианты дел:\n{candidates_text}"
+    raw = await llm_system_user(system, user, timeout=45.0)
+    text = (raw or "").strip()
+    return text or None
+
+
 async def llm_chat_with_tool_choice(
     *,
     system: str,

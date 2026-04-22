@@ -27,8 +27,10 @@ from .ai_service import (
     extract_document_text,
     llm_assistant_chat_reply,
     llm_digest_incoming_case_note,
+    llm_disambiguate_document_among_cases,
     llm_parse_case_tag_update,
     llm_document_routing,
+    llm_participant_clarification_message,
     llm_summary,
     match_case,
     extract_case_number,
@@ -71,8 +73,15 @@ from .config import settings
 from .document_batch_sort import format_auto_sort_reply, run_auto_sort_unsorted
 from .participant_learning import (
     build_participant_context_for_llm,
+    describe_cases_for_disambiguation_prompt,
+    extract_participant_fio_candidates,
+    find_cases_by_participant_hint,
+    fio_matches_owner_participants_setting,
     handle_remember_participant_chat,
     learn_participant_tags_from_document,
+    list_arbitr_cases_for_disambiguation,
+    resolve_case_if_unique_participant_hint,
+    template_participant_clarification_message,
 )
 from .ru_date_range import describe_calendar_period_ru, parse_calendar_period_ru
 from .db import Base, engine, get_db
@@ -1252,6 +1261,94 @@ async def ingest_document(
         matched_case = get_or_create_unsorted_case(db)
         case_confidence = 0.2
 
+    participant_clarification: str | None = None
+    needs_participant_clarification = False
+    participant_clarification_cases: list[str] = []
+
+    if matched_case.case_number == "UNSORTED" and not preferred_case_id:
+        blob = f"{safe_name}\n{extracted_text}"
+        fios = extract_participant_fio_candidates(blob)
+        resolved_unique = False
+        for fio in fios[:4]:
+            one = resolve_case_if_unique_participant_hint(db, fio)
+            if one:
+                matched_case = one
+                case_confidence = max(case_confidence, 0.78)
+                resolved_unique = True
+                break
+
+        if not resolved_unique and fios:
+            primary_fio = fios[0]
+            multi = find_cases_by_participant_hint(db, primary_fio)
+            if len(multi) >= 2:
+                block = describe_cases_for_disambiguation_prompt(multi)
+                if settings.openai_api_key.strip():
+                    llm_pick = await llm_disambiguate_document_among_cases(
+                        filename=safe_name,
+                        text=extracted_text,
+                        person_hint=primary_fio,
+                        candidates_text=block,
+                    )
+                    if llm_pick:
+                        cn_raw = str(llm_pick.get("case_number", "")).strip()
+                        conf_llm = float(llm_pick.get("confidence", 0.0) or 0.0)
+                        if cn_raw and conf_llm >= 0.68:
+                            cn = normalize_arbitr_case_number(cn_raw.replace(" ", ""))
+                            row = db.query(Case).filter(Case.case_number == cn).first()
+                            if not row:
+                                row = db.query(Case).filter(Case.case_number == cn_raw).first()
+                            if row and row in multi:
+                                matched_case = row
+                                case_confidence = max(case_confidence, conf_llm)
+                if matched_case.case_number == "UNSORTED":
+                    participant_clarification_cases = [c.case_number for c in multi]
+                    participant_clarification = await llm_participant_clarification_message(
+                        filename=safe_name,
+                        person_hint=primary_fio,
+                        candidates_text=block,
+                    )
+                    if not participant_clarification:
+                        participant_clarification = template_participant_clarification_message(
+                            safe_name, primary_fio, block
+                        )
+                    needs_participant_clarification = True
+            elif len(multi) == 0 and fio_matches_owner_participants_setting(
+                primary_fio, settings.assistant_owner_participants
+            ):
+                wide = list_arbitr_cases_for_disambiguation(db, limit=24)
+                if len(wide) >= 2:
+                    wblock = describe_cases_for_disambiguation_prompt(wide)
+                    if settings.openai_api_key.strip():
+                        llm_w = await llm_disambiguate_document_among_cases(
+                            filename=safe_name,
+                            text=extracted_text,
+                            person_hint=f"{primary_fio} (совпадает с ASSISTANT_OWNER_PARTICIPANTS)",
+                            candidates_text=wblock,
+                        )
+                        if llm_w:
+                            cn_raw = str(llm_w.get("case_number", "")).strip()
+                            conf_llm = float(llm_w.get("confidence", 0.0) or 0.0)
+                            if cn_raw and conf_llm >= 0.72:
+                                cn = normalize_arbitr_case_number(cn_raw.replace(" ", ""))
+                                row = db.query(Case).filter(Case.case_number == cn).first()
+                                if not row:
+                                    row = db.query(Case).filter(Case.case_number == cn_raw).first()
+                                if row and row in wide:
+                                    matched_case = row
+                                    case_confidence = max(case_confidence, conf_llm)
+                    if matched_case.case_number == "UNSORTED":
+                        participant_clarification_cases = [c.case_number for c in wide]
+                        participant_clarification = await llm_participant_clarification_message(
+                            filename=safe_name,
+                            person_hint=primary_fio,
+                            candidates_text=wblock,
+                        )
+                        if not participant_clarification:
+                            participant_clarification = template_participant_clarification_message(
+                                safe_name, primary_fio, wblock
+                            )
+                        needs_participant_clarification = True
+
     duplicate = find_duplicate_document(
         db,
         case_id=matched_case.id,
@@ -1268,6 +1365,9 @@ async def ingest_document(
             routing_mode="duplicate-skip",
             routing_model="дедупликация",
             note="Такой документ уже есть в этом деле. Повторная загрузка пропущена.",
+            needs_participant_clarification=False,
+            participant_clarification=None,
+            participant_clarification_cases=[],
         )
 
     doc = Document(
@@ -1292,6 +1392,10 @@ async def ingest_document(
         db, case=matched_case, filename=safe_name, extracted_text=extracted_text
     )
 
+    note_out = "Документ автоматически обработан и прикреплен к делу."
+    if needs_participant_clarification and participant_clarification:
+        note_out = participant_clarification
+
     return DocumentIngestOut(
         document=doc,
         matched_case_id=matched_case.id,
@@ -1300,7 +1404,10 @@ async def ingest_document(
         confidence=round((class_confidence + case_confidence) / 2, 2),
         routing_mode="LLM" if used_llm else "fallback-правила",
         routing_model=settings.openai_model if used_llm else "эвристики",
-        note="Документ автоматически обработан и прикреплен к делу.",
+        note=note_out,
+        needs_participant_clarification=needs_participant_clarification,
+        participant_clarification=participant_clarification if needs_participant_clarification else None,
+        participant_clarification_cases=participant_clarification_cases,
     )
 
 

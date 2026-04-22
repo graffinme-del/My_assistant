@@ -204,6 +204,62 @@ def _norm_hint(value: str) -> str:
     return re.sub(r"[^a-zа-я0-9]", "", (value or "").lower())
 
 
+def resolve_case_if_unique_participant_hint(db: Session, fio: str) -> Case | None:
+    """Если по ФИО находится ровно одно «настоящее» дело с тегами участника — вернуть его."""
+    cases = find_cases_by_participant_hint(db, fio)
+    if len(cases) == 1:
+        return cases[0]
+    return None
+
+
+def describe_cases_for_disambiguation_prompt(cases: list[Case]) -> str:
+    """Нумерованный список для промпта LLM и для текста уточнения пользователю."""
+    lines: list[str] = []
+    for i, c in enumerate(cases[:16], start=1):
+        t = (c.title or "").strip().replace("\n", " ")[:100]
+        court = (c.court_name or "").strip().replace("\n", " ")[:80]
+        lines.append(f"{i}. {c.case_number} — {t} ({court})".strip())
+    return "\n".join(lines)
+
+
+def fio_matches_owner_participants_setting(fio: str, owner_raw: str) -> bool:
+    """Совпадение извлечённого ФИО с ASSISTANT_OWNER_PARTICIPANTS (фрагментарно)."""
+    raw = (owner_raw or "").strip()
+    if not raw or len((fio or "").strip()) < 5:
+        return False
+    fn = _norm_hint(fio)
+    for part in raw.split(","):
+        p = _norm_hint(part.strip())
+        if len(p) < 6:
+            continue
+        if p in fn or fn in p:
+            return True
+    return False
+
+
+def list_arbitr_cases_for_disambiguation(db: Session, limit: int = 24) -> list[Case]:
+    """Последние дела с «настоящим» номером — для широкого выбора, если тегов участника ещё нет."""
+    rows = (
+        db.query(Case)
+        .order_by(Case.updated_at.desc(), Case.id.desc())
+        .limit(max(limit * 3, 40))
+        .all()
+    )
+    out = [c for c in rows if looks_like_stored_arbitr_case_number(c.case_number or "")]
+    return out[:limit]
+
+
+def template_participant_clarification_message(filename: str, fio: str, candidates_block: str) -> str:
+    return (
+        f"Не удалось однозначно определить дело для файла «{filename}». "
+        f"В тексте есть, в том числе, {fio} — эта фамилия/ФИО связаны с несколькими папками дел.\n"
+        f"К какому делу отнести документ?\n{candidates_block}\n\n"
+        "Ответьте в чате номером дела или фразой вида: "
+        "«Привяжи к делу А40-12345/2025 участника …». "
+        "Пока документ сохранён в «Неразобранное»."
+    )
+
+
 def find_cases_by_participant_hint(db: Session, hint: str) -> list[Case]:
     """Все дела, у которых в тегах участника есть пересечение с подсказкой."""
     norm_hint = _norm_hint(hint)
