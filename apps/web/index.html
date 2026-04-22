@@ -260,6 +260,28 @@
         padding: 10px;
         margin-bottom: 10px;
       }
+      .msgHeader {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        margin-bottom: 6px;
+      }
+      .msgBody {
+        min-width: 0;
+      }
+      .msgDelBtn {
+        width: auto !important;
+        min-width: 28px;
+        margin: 0 !important;
+        padding: 2px 8px !important;
+        font-size: 16px;
+        line-height: 1.2;
+        color: #8a9199;
+      }
+      .msgDelBtn:hover {
+        color: #bf1d1d;
+      }
       .userMsg {
         background: #eef4ff;
       }
@@ -368,7 +390,7 @@
       <div class="main-panel">
         <div id="emptyState" class="card chat-panel">
           <h3 style="margin-bottom: 6px;">My Assistant</h3>
-          <div id="healthStatus" class="muted" data-ui-build="2026-04-02f">Проверка API… (сборка 2026-04-02f)</div>
+          <div id="healthStatus" class="muted" data-ui-build="2026-04-02g">Проверка API… (сборка 2026-04-02g)</div>
           <div id="activeCaseBanner" class="muted">Загрузка списка дел…</div>
           <div id="chatLog" class="list"></div>
           <div class="chatInputWrap">
@@ -382,7 +404,7 @@
           </div>
           <div id="uploadHint" class="muted" style="margin-top: 8px;"></div>
           <div id="bulkResult" class="muted" style="margin-top: 4px;"></div>
-          <button id="clearChatBtn" class="subtleBtn" type="button" title="Очистить чат">🗑 Очистить</button>
+          <button id="clearChatBtn" class="subtleBtn" type="button" title="Удалить всю историю на сервере">🗑 Очистить историю</button>
         </div>
 
         <div id="caseWorkspace" style="display: none;">
@@ -1038,19 +1060,84 @@
         }
       }
 
-      function appendChat(role, text) {
+      function attachDeleteToMessageBox(box, messageId) {
+        if (messageId == null || messageId === "") return;
+        const mid = Number(messageId);
+        if (!mid) return;
+        box.dataset.messageId = String(mid);
+        if (box.querySelector(".msgDelBtn")) return;
+        const header = box.querySelector(".msgHeader");
+        if (!header) return;
+        const del = document.createElement("button");
+        del.type = "button";
+        del.className = "subtleBtn msgDelBtn";
+        del.textContent = "×";
+        del.title = "Удалить это сообщение из истории";
+        del.onclick = async (ev) => {
+          ev.preventDefault();
+          try {
+            await api(`/assistant/conversation-messages/${mid}`, { method: "DELETE" });
+            box.remove();
+          } catch (e) {
+            appendChat(
+              "assistant",
+              "Не удалось удалить сообщение: " + (e && e.message ? e.message : e)
+            );
+          }
+        };
+        header.appendChild(del);
+      }
+
+      function appendChat(role, text, messageId) {
         const log = el("chatLog");
         const box = document.createElement("div");
         box.className = role === "user" ? "msg userMsg" : "msg assistantMsg";
+
+        const header = document.createElement("div");
+        header.className = "msgHeader";
+        const who = document.createElement("span");
+        who.className = "muted";
+        who.style.fontSize = "12px";
+        who.textContent = role === "user" ? "Вы" : "Ассистент";
+        header.appendChild(who);
+        box.appendChild(header);
+
+        const body = document.createElement("div");
+        body.className = "msgBody";
         if (role === "assistant") {
-          renderAssistantMessage(box, text);
+          renderAssistantMessage(body, text);
         } else {
           const pre = document.createElement("pre");
           pre.textContent = text;
-          box.appendChild(pre);
+          body.appendChild(pre);
         }
+        box.appendChild(body);
+
         log.appendChild(box);
+        attachDeleteToMessageBox(box, messageId);
         log.scrollTop = log.scrollHeight;
+      }
+
+      function patchLastUserMessageId(messageId) {
+        if (messageId == null) return;
+        const log = el("chatLog");
+        const userBoxes = log.querySelectorAll(".msg.userMsg");
+        const last = userBoxes[userBoxes.length - 1];
+        if (!last) return;
+        attachDeleteToMessageBox(last, messageId);
+      }
+
+      async function loadChatHistory() {
+        try {
+          const rows = await api("/assistant/conversation-messages?limit=300");
+          const log = el("chatLog");
+          log.innerHTML = "";
+          for (const row of rows) {
+            appendChat(row.role, row.content, row.id);
+          }
+        } catch (_e) {
+          /* совместимость со старым API */
+        }
       }
 
       async function sendChat() {
@@ -1081,7 +1168,8 @@
               result.case_number +
               ", режим " +
               result.mode;
-          appendChat("assistant", msg);
+          patchLastUserMessageId(result.user_message_id);
+          appendChat("assistant", msg, result.assistant_message_id);
         } catch (e) {
           appendChat("assistant", "Ошибка: " + (e && e.message ? e.message : String(e)));
         }
@@ -1152,9 +1240,24 @@
             filesInput.value = "";
           };
         }
-        if (clearChatBtn) clearChatBtn.onclick = () => {
-          el("chatLog").innerHTML = "";
-        };
+        if (clearChatBtn)
+          clearChatBtn.onclick = async () => {
+            if (
+              !confirm(
+                "Удалить всю историю переписки на сервере? Действие нельзя отменить."
+              )
+            )
+              return;
+            try {
+              await api("/assistant/conversation-messages", { method: "DELETE" });
+              el("chatLog").innerHTML = "";
+            } catch (e) {
+              appendChat(
+                "assistant",
+                "Ошибка очистки истории: " + (e && e.message ? e.message : e)
+              );
+            }
+          };
 
         // Optional voice input
         let recognition = null;
@@ -1176,6 +1279,7 @@
         }
 
         checkHealth().catch(() => {});
+        loadChatHistory().catch(() => {});
         loadCases()
           .then(() => restoreSidebarSelection())
           .catch(() => {

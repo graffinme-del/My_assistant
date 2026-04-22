@@ -129,6 +129,7 @@ from .schemas import (
     AssistantActiveCaseIn,
     AssistantIngestIn,
     AssistantIngestOut,
+    ConversationMessageOut,
     SummaryOut,
     TaskCreate,
     TaskOut,
@@ -3986,6 +3987,61 @@ def set_assistant_active_case(
     return {"case_id": case.id, "case_number": case.case_number, "title": case.title}
 
 
+@app.get("/assistant/conversation-messages", response_model=list[ConversationMessageOut])
+def list_conversation_messages(
+    limit: int = Query(default=300, ge=1, le=500),
+    db: Session = Depends(get_db),
+    _: str = Depends(require_user),
+) -> list[ConversationMessage]:
+    conversation = get_or_create_conversation(db, conversation_user_key(_))
+    return (
+        db.query(ConversationMessage)
+        .filter(ConversationMessage.conversation_id == conversation.id)
+        .order_by(ConversationMessage.created_at.asc())
+        .limit(limit)
+        .all()
+    )
+
+
+@app.delete("/assistant/conversation-messages/{message_id}")
+def delete_conversation_message(
+    message_id: int,
+    db: Session = Depends(get_db),
+    _: str = Depends(require_user),
+) -> dict[str, bool | int]:
+    conversation = get_or_create_conversation(db, conversation_user_key(_))
+    msg = (
+        db.query(ConversationMessage)
+        .filter(
+            ConversationMessage.id == message_id,
+            ConversationMessage.conversation_id == conversation.id,
+        )
+        .first()
+    )
+    if not msg:
+        raise HTTPException(status_code=404, detail="Message not found")
+    db.delete(msg)
+    db.commit()
+    return {"ok": True, "id": message_id}
+
+
+@app.delete("/assistant/conversation-messages")
+def clear_conversation_messages(
+    db: Session = Depends(get_db),
+    _: str = Depends(require_user),
+) -> dict[str, bool | int]:
+    conversation = get_or_create_conversation(db, conversation_user_key(_))
+    deleted = (
+        db.query(ConversationMessage)
+        .filter(ConversationMessage.conversation_id == conversation.id)
+        .delete(synchronize_session=False)
+    )
+    conversation.rolling_summary = ""
+    db.add(conversation)
+    db.commit()
+    return {"ok": True, "deleted_count": deleted}
+
+
 @app.post("/assistant/ingest-text", response_model=AssistantIngestOut)
 async def assistant_ingest_text(
     payload: AssistantIngestIn,
@@ -3997,7 +4053,7 @@ async def assistant_ingest_text(
         raise HTTPException(status_code=400, detail="Empty text")
 
     conversation = get_or_create_conversation(db, conversation_user_key(_))
-    add_conversation_message(
+    user_message_row = add_conversation_message(
         db,
         conversation=conversation,
         role="user",
@@ -4005,6 +4061,7 @@ async def assistant_ingest_text(
         case=conversation.active_case,
     )
     db.commit()
+    db.refresh(user_message_row)
 
     async def finalize_reply(
         *,
@@ -4019,7 +4076,7 @@ async def assistant_ingest_text(
         conversation.active_case_id = case.id
         db.add(conversation)
         db.add(CaseEvent(case_id=case.id, event_type="assistant_reply", body=reply_text))
-        add_conversation_message(
+        assistant_message_row = add_conversation_message(
             db,
             conversation=conversation,
             role="assistant",
@@ -4027,6 +4084,7 @@ async def assistant_ingest_text(
             case=case,
         )
         db.commit()
+        db.refresh(assistant_message_row)
         if refresh_summary:
             await refresh_conversation_summary(db, conversation)
         return AssistantIngestOut(
@@ -4037,6 +4095,8 @@ async def assistant_ingest_text(
             created_tasks=created_tasks,
             next_hearing_date=next_hearing_date if next_hearing_date is not None else case.next_hearing_date,
             reply=reply_text,
+            user_message_id=user_message_row.id,
+            assistant_message_id=assistant_message_row.id,
         )
 
     cases = db.query(Case).all()

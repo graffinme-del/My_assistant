@@ -143,6 +143,17 @@ class AssistantActiveCaseIn(BaseModel):
     case_id: int
 
 
+class ConversationMessageOut(BaseModel):
+    id: int
+    role: str
+    case_id: int | None
+    content: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
 class AssistantIngestOut(BaseModel):
     case_id: int
     case_number: str
@@ -151,6 +162,8 @@ class AssistantIngestOut(BaseModel):
     created_tasks: int = 0
     next_hearing_date: date | None = None
     reply: str = ""
+    user_message_id: int | None = None
+    assistant_message_id: int | None = None
 
 
 class BulkIngestOut(BaseModel):
