@@ -2952,7 +2952,8 @@ def looks_like_delete_case_folder_request(text: str) -> bool:
     t = (text or "").lower()
     if not re.search(r"\b(?:удали|убери|удалить)\b", t):
         return False
-    if not re.search(r"\b(?:папк|дело)\b", t):
+    # «папку», «папке» — не совпадут с \bпапк\b (после «к» буква «у»).
+    if not re.search(r"\b(?:папк[а-яё]*|дел[а-яё]*)\b", t):
         return False
     if re.search(r"\b(?:документ|файл)\b", t):
         return False
@@ -2961,14 +2962,16 @@ def looks_like_delete_case_folder_request(text: str) -> bool:
 
 def parse_delete_case_folder_hint(text: str) -> str:
     t = (text or "").strip()
+    # Между глаголом и «папку/дело» допускаются слова вроде «полностью», «навсегда».
+    _cmd = r"(?:удали|убери|удалить)(?:\s+[а-яёa-z0-9-]{2,}){0,6}\s+(?:папк[а-яё]*|дел[а-яё]*)\s+"
     m = re.search(
-        r"(?:удали|убери|удалить)\s+(?:папк[ау]?|дело)\s+(?:«([^»]+)»|\"([^\"]+)\"|'([^']+)')",
+        _cmd + r"(?:«([^»]+)»|\"([^\"]+)\"|'([^']+)')",
         t,
         flags=re.I,
     )
     if m:
         return next(g for g in m.groups() if g).strip()
-    m = re.search(r"(?:удали|убери|удалить)\s+(?:папк[ау]?|дело)\s+(.+)$", t, flags=re.I | re.DOTALL)
+    m = re.search(_cmd + r"(.+)$", t, flags=re.I | re.DOTALL)
     if m:
         return re.sub(r"[.!?…]+$", "", m.group(1).strip()).strip(' "\'«»')
     return ""
