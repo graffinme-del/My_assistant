@@ -406,8 +406,9 @@ def format_duplicate_documents_across_cases_report(db: Session, *, limit_groups:
         "Чтобы сравнить два конкретных файла по тексту: «Сравни документы [id1] и [id2]». "
         "Чтобы объединить папки с такими дублями одной командой: "
         "«Объедини папки, где повторяются одинаковые файлы». "
-        "Чтобы **автоматически удалить лишние копии** (оставить по одному файлу в каждой группе по правилам «нужная папка»): "
-        "«Удали дубликаты между папками» или «Покажи план удаления дубликатов» (сначала превью без удаления)."
+        "Чтобы **автоматически удалить лишние копии** (по **смыслу** фрагментов PDF и папке; при отключённом LLM — по имени файла): "
+        "«Удали дубликаты между папками» или «Покажи план удаления дубликатов». "
+        "Быстро без ИИ: добавьте «только по имени файла»."
     )
     return "\n".join(lines)
 
@@ -4115,7 +4116,7 @@ async def assistant_ingest_text(
         )
 
     if looks_like_cross_folder_duplicate_cleanup_request(text):
-        reply_text, dup_case = handle_cross_folder_duplicate_cleanup_chat(db, text)
+        reply_text, dup_case = await handle_cross_folder_duplicate_cleanup_chat(db, text)
         return await finalize_reply(
             case=dup_case if dup_case is not None else get_or_create_unsorted_case(db),
             reply_text=reply_text,

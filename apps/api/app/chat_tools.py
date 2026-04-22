@@ -137,11 +137,11 @@ CHAT_TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "cleanup_duplicate_files_keep_best_copy",
             "description": (
-                "Удалить лишние копии одного и того же **имени файла** в разных папках: остаётся одна копия "
-                "(приоритет: номер дела из имени файла совпадает с папкой; папки UNDEF/TAG/Неразобранное хуже; "
-                "можно указать предпочтительную папку). "
-                "Формулировки: «удали дубликаты», «убери повторы файлов», «оставь по одному». "
-                "Не вызывай для сравнения содержимого двух разных файлов — только для одинакового имени в разных делах."
+                "Удалить лишние копии одного и того же **имени файла** в разных папках: остаётся одна копия. "
+                "По умолчанию модель смотрит **распознанный текст** PDF и контекст папки (смысл документа); "
+                "иначе — эвристика по номеру дела в имени файла. Можно указать предпочтительную папку. "
+                "Формулировки: «удали дубликаты», «убери повторы», «оставь по одному». "
+                "Не вызывай для сравнения двух файлов с разными именами."
             ),
             "parameters": {
                 "type": "object",
@@ -439,7 +439,9 @@ async def run_chat_tools_router(
         if pref:
             parts.append(f'Приоритет папки «{pref}».')
         parts.append(user_message.strip())
-        reply_text, out_case = handle_cross_folder_duplicate_cleanup_chat(db, " ".join(p for p in parts if p))
+        reply_text, out_case = await handle_cross_folder_duplicate_cleanup_chat(
+            db, " ".join(p for p in parts if p)
+        )
         return reply_text, out_case or get_or_create_unsorted_case(db), "chat-tools-dup-cleanup"
 
     if name == "merge_folders_sharing_duplicate_filenames":
