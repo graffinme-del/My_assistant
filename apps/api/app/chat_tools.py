@@ -1,8 +1,8 @@
 """
-Единый слой tool-calling для чата: схемы операций + маршрутизация через LLM.
+Единый слой tool-calling для чата: модель выбирает действие по смыслу формулировки.
 
-Регулярные ветки в main.py остаются запасным путём; при включённом роутере
-модель может выбрать инструмент по смыслу формулировки.
+При включённом CHAT_TOOLS_ROUTER сообщение (до ~8k символов) может пройти один вызов LLM
+с набором инструментов; regex-ветки в main.py остаются запасным путём, если инструмент не выбран.
 """
 
 from __future__ import annotations
@@ -16,10 +16,68 @@ from .config import settings
 from .court_kad_search import looks_like_court_download_count_question, looks_like_kad_downloaded_documents_list
 from .court_sync_service import format_kad_downloaded_documents_list, format_recent_download_jobs_status
 from .ru_date_range import describe_calendar_period_ru, parse_calendar_period_ru
-from .models import Case, Conversation
+from .models import Case, Conversation, Document
 
 # OpenAI-compatible tools (function calling)
 CHAT_TOOLS: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "search_documents",
+            "description": (
+                "Пользователь ищет уже загруженные в приложение файлы (PDF и др.) по смыслу: ФИО, название, "
+                "фрагмент текста, организация и т.д. Поиск идёт по имени файла и распознанному тексту документов. "
+                "Вызывай при любой формулировке вроде «найди», «где документ», «покажи файлы с», "
+                "«есть ли что-то про …», в том числе без явных слов «во всех папках» — scope выбери сам по контексту. "
+                "Не вызывай для запросов к сайту kad.arbitr.ru / картотеке судов. "
+                "Не вызывай, если пользователь просит сохранить текст самого сообщения в папку как заметку. "
+                "В queries передай 1–10 коротких фраз без служебных слов («найди», «документы», «содержащие»): "
+                "разные формы ФИО или написания — отдельными элементами (логика ИЛИ между элементами)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "scope": {
+                        "type": "string",
+                        "enum": ["all_folders", "active_case"],
+                        "description": (
+                            "all_folders — искать во всех папках; active_case — только в текущей открытой папке чата."
+                        ),
+                    },
+                    "queries": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 1,
+                        "maxItems": 10,
+                        "description": "Поисковые фразы; достаточно совпадения любой фразы с файлом или текстом PDF.",
+                    },
+                },
+                "required": ["scope", "queries"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_case_folder",
+            "description": (
+                "Пользователь хочет удалить из приложения целиком папку/дело (карточку дела). "
+                "Содержимое уходит в «Неразобранное». Не вызывай для удаления отдельных файлов («удали документ …»)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "case_hint": {
+                        "type": "string",
+                        "description": (
+                            "Номер дела или название папки из сообщения; если «эта папка» — используй активную из контекста."
+                        ),
+                    },
+                },
+                "required": ["case_hint"],
+            },
+        },
+    },
     {
         "type": "function",
         "function": {
@@ -27,9 +85,7 @@ CHAT_TOOLS: list[dict[str, Any]] = [
             "description": (
                 "Пользователь хочет собрать документы в новую «папку» (в продукте это отдельное дело/case). "
                 "Типично: перенести все документы из текущего открытого дела в новое дело с заданным названием. "
-                "Вызывай, если явно есть намерение перенести/собрать файлы в новую папку или новое дело. "
-                "Не вызывай, если пользователь просит сохранить текст сообщения или заметку в папку/дело "
-                "(«сохрани это сообщение в папке …») — это другая операция. "
+                "Не вызывай для сохранения текста сообщения как заметки в папке. "
                 "Если название новой папки не сказано — передай пустую строку в new_folder_title."
             ),
             "parameters": {
@@ -37,14 +93,13 @@ CHAT_TOOLS: list[dict[str, Any]] = [
                 "properties": {
                     "new_folder_title": {
                         "type": "string",
-                        "description": "Название новой папки/дела, как сформулировал пользователь. Пусто, если не названо.",
+                        "description": "Название новой папки/дела. Пусто, если не названо.",
                     },
                     "scope": {
                         "type": "string",
                         "enum": ["from_active_case", "unspecified"],
                         "description": (
-                            "from_active_case — перенести документы из текущего активного дела в чате; "
-                            "unspecified — если неясно (сервер попытается извлечь название из текста)."
+                            "from_active_case — из текущего активного дела; unspecified — неясно (сервер извлечёт из текста)."
                         ),
                     },
                 },
@@ -57,10 +112,8 @@ CHAT_TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "kad_download_jobs_status",
             "description": (
-                "Только общий ход фоновой загрузки из kad.arbitr.ru (КАД): «как там скачивание», «статус загрузки», "
-                "ошибки воркера, что по задаче №N в целом. "
-                "НЕ вызывай, если пользователь просит число («сколько файлов скачали») — это другой инструмент. "
-                "НЕ вызывай, если просят показать список имён файлов, перечень PDF, «все документы которые скачали» — это kad_downloaded_files_list."
+                "Общий ход фоновой загрузки из kad.arbitr.ru: «как там скачивание», «статус загрузки», задача №N. "
+                "НЕ для вопроса «сколько файлов скачали». НЕ для списка имён скачанных PDF — это kad_downloaded_files_list."
             ),
             "parameters": {"type": "object", "properties": {}},
         },
@@ -70,8 +123,7 @@ CHAT_TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "kad_downloaded_files_list",
             "description": (
-                "Пользователь хочет увидеть конкретные сохранённые файлы из картотеки: названия, список, «покажи документы», "
-                "«какие pdf скачались», перечень после загрузки из КАД. Не для статуса задачи и не для документов только текущей папки без упоминания КАД/скачивания."
+                "Список конкретных файлов, сохранённых из КАД: имена PDF, «что скачалось», перечень после загрузки."
             ),
             "parameters": {"type": "object", "properties": {}},
         },
@@ -79,49 +131,26 @@ CHAT_TOOLS: list[dict[str, Any]] = [
 ]
 
 
-def _might_use_chat_tools(text: str) -> bool:
-    """Эвристика: не дергать LLM на каждое сообщение."""
-    if len(text) > 2500:
-        return False
-    t = text.lower()
-    if looks_like_kad_downloaded_documents_list(text) or looks_like_court_download_count_question(text):
-        return False
-    return any(
-        k in t
-        for k in (
-            "папк",
-            "собери",
-            "соберите",
-            "перенеси",
-            "отдельную папку",
-            "статус скачивания",
-            "статус загрузки",
-            "ты скачал",
-            "скачал ли",
-            "загрузил ли",
-            "воркер",
-            "фонов",
-            "kad.arbitr",
-            "арбитражн",
-        )
-    )
-
-
-def _system_prompt_with_context(db: Session, conversation: Conversation) -> str:
+def _router_system_prompt(db: Session, conversation: Conversation) -> str:
     if not conversation.active_case_id:
-        ctx = "Активное дело в чате не выбрано."
+        active = "не выбрана (пользователь не открыл папку слева)."
     else:
         c = db.query(Case).filter(Case.id == conversation.active_case_id).first()
         if not c:
-            ctx = "Активное дело в чате не выбрано."
+            active = "не выбрана."
         else:
-            ctx = f"Активное дело: id={c.id}, название «{c.title}», номер {c.case_number}."
+            active = f"«{c.title}», номер {c.case_number} (id={c.id})."
+    rows = db.query(Case).order_by(Case.id.desc()).limit(48).all()
+    lines = [f"- «{c.title}» — {c.case_number}" for c in rows]
+    catalog = "\n".join(lines) if lines else "(папок нет)"
     return (
-        "Ты классификатор намерений для юридического ассистента. "
-        "Вызывай не более одного инструмента только если запрос явно соответствует его описанию. "
-        "Если пользователь просит анализ, сводку, список файлов без переноса в новую папку, общий разговор — "
-        "не вызывай инструменты.\n\n"
-        f"Контекст: {ctx}"
+        "Ты маршрутизатор намерений для ассистента по судебным материалам. "
+        "У пользователя «папки» = дела (cases). "
+        "Вызови ровно один инструмент, только если запрос явно требует этого действия в приложении. "
+        "Если пользователь просто общается, просит объяснить или обобщить без поиска по файлам, удаления папки, "
+        "переноса в новую папку или работы с КАД — не вызывай инструменты.\n\n"
+        f"Активная папка в чате: {active}\n"
+        f"Известные папки (кратко):\n{catalog}\n"
     )
 
 
@@ -131,23 +160,25 @@ async def run_chat_tools_router(
     user_message: str,
     *,
     user_role: str,
+    preferred_case_number: str | None = None,
 ) -> tuple[str, Case, str] | None:
     """
-    Если модель выбрала инструмент — выполняет его и возвращает (reply, case, mode).
-    Если модель не выбрала инструмент — возвращает None (дальше работают regex-ветки).
+    Один проход LLM с tools. Если модель выбрала инструмент — выполняет и возвращает (reply, case, mode).
+    Иначе None — дальше работают эвристики в main.py.
     """
-    _ = user_role
     if not settings.chat_tools_router_enabled or not settings.openai_api_key.strip():
         return None
-    if not _might_use_chat_tools(user_message):
+    if len(user_message) > 8000:
+        return None
+    if looks_like_kad_downloaded_documents_list(user_message) or looks_like_court_download_count_question(user_message):
         return None
 
-    system = _system_prompt_with_context(db, conversation)
+    system = _router_system_prompt(db, conversation)
     _content, tool_calls = await llm_chat_with_tool_choice(
         system=system,
         user_message=user_message,
         tools=CHAT_TOOLS,
-        timeout=50.0,
+        timeout=55.0,
     )
 
     if not tool_calls:
@@ -156,6 +187,50 @@ async def run_chat_tools_router(
     call = tool_calls[0]
     name = call.get("name") or ""
     args = call.get("arguments") or {}
+
+    if name == "search_documents":
+        from .main import (
+            get_or_create_unsorted_case,
+            resolve_case_for_conversation,
+            search_documents_global_with_hints,
+            search_documents_union_queries,
+        )
+
+        scope = str(args.get("scope") or "").strip()
+        raw_q = args.get("queries") or []
+        queries = [str(x).strip() for x in raw_q if str(x).strip()]
+        queries = queries[:10]
+        if not queries:
+            return None
+        if scope == "all_folders":
+            reply = search_documents_global_with_hints(db, queries, limit=45)
+            return reply, get_or_create_unsorted_case(db), "chat-tools-search-global"
+        if scope == "active_case":
+            _conv, command_case = resolve_case_for_conversation(
+                db,
+                user_message,
+                user_role=user_role,
+                preferred_case_number=preferred_case_number,
+            )
+            command_docs = (
+                db.query(Document)
+                .filter(Document.case_id == command_case.id)
+                .order_by(Document.created_at.desc())
+                .all()
+            )
+            reply = search_documents_union_queries(command_case, command_docs, queries)
+            return reply, command_case, "chat-tools-search-case"
+        return None
+
+    if name == "delete_case_folder":
+        from .main import get_or_create_unsorted_case, handle_delete_case_folder_chat
+
+        hint = str(args.get("case_hint") or "").strip()
+        if len(hint) < 2:
+            return None
+        reply_text, del_case = handle_delete_case_folder_chat(db, user_message, hint_override=hint)
+        case_for_reply = del_case if del_case is not None else get_or_create_unsorted_case(db)
+        return reply_text, case_for_reply, "chat-tools-delete-folder"
 
     if name == "kad_download_jobs_status":
         dr = parse_calendar_period_ru(user_message)

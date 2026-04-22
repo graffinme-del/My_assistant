@@ -47,7 +47,8 @@ class Settings(BaseSettings):
     parser_api_base_url: str = "https://parser-api.com/parser/arbitr_api"
     parser_api_timeout_sec: int = 120
 
-    # Маршрутизация части команд через LLM + tools (см. chat_tools.py). Отключить: CHAT_TOOLS_ROUTER=0
+    # Естественный язык: один вызов LLM с function-calling (поиск, удаление папки, КАД, перенос в папку…).
+    # См. chat_tools.py. Отключить эвристику+стоимость API: CHAT_TOOLS_ROUTER=0
     chat_tools_router_enabled: bool = True
 
     # Автосводка длинных сообщений в чат по делу (переписка юристов и т.д.). Отключить: CASE_NOTE_DIGEST=0

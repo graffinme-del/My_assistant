@@ -2791,22 +2791,15 @@ def search_documents(case: Case, docs: list[Document], query: str) -> str:
     return "\n".join(lines)
 
 
-def search_documents_global(db: Session, user_text: str, *, limit: int = 40) -> str:
-    """Поиск документов по всем делам (имя файла и извлечённый текст PDF)."""
-    hints = _extract_delete_target_phrases(user_text)
-    raw_q = extract_search_query(user_text)
-    if not hints:
-        nq = normalize_global_search_query(raw_q)
-        if len(nq) >= 2:
-            hints = [nq]
+def search_documents_global_with_hints(db: Session, hints: list[str], *, limit: int = 40) -> str:
+    """Поиск по всем делам по уже разобранным фразам (в т.ч. из NL-router)."""
     expanded: list[str] = []
     for h in hints:
         for part in re.split(r"\s+(?:или|либо)\s+", h or "", flags=re.IGNORECASE):
             p = part.strip().strip(" ,.:-—")
             if len(p) >= 2:
                 expanded.append(p)
-    if expanded:
-        hints = expanded
+    hints = expanded if expanded else [x.strip() for x in hints if len((x or "").strip()) >= 2]
     if not hints:
         return (
             "Не понял, что искать во всех папках. Пример: «найди во всех папках документы с именем Эмилия» "
@@ -2837,6 +2830,50 @@ def search_documents_global(db: Session, user_text: str, *, limit: int = 40) -> 
         )
     if total > limit:
         lines.append(f"… всего совпадений: {total}. Сузьте фразу в кавычках для точного поиска.")
+    return "\n".join(lines)
+
+
+def search_documents_global(db: Session, user_text: str, *, limit: int = 40) -> str:
+    """Поиск документов по всем делам (имя файла и извлечённый текст PDF)."""
+    hints = _extract_delete_target_phrases(user_text)
+    raw_q = extract_search_query(user_text)
+    if not hints:
+        nq = normalize_global_search_query(raw_q)
+        if len(nq) >= 2:
+            hints = [nq]
+    if not hints:
+        return (
+            "Не понял, что искать во всех папках. Пример: «найди во всех папках документы с именем Эмилия» "
+            "или «поиск по всем делам: Рочева»."
+        )
+    return search_documents_global_with_hints(db, hints, limit=limit)
+
+
+def search_documents_union_queries(case: Case, docs: list[Document], queries: list[str]) -> str:
+    """Поиск в одном деле: достаточно вхождения любой из фраз (как сформулировала модель)."""
+    if not docs:
+        return f'По делу «{case.title}» пока нет документов.'
+    qn = [q.strip().lower() for q in queries if len(q.strip()) >= 2]
+    if not qn:
+        return "Уточните, что искать."
+    matched: list[Document] = []
+    seen: set[int] = set()
+    for doc in docs:
+        hay = f"{doc.filename}\n{doc.category}\n{doc.extracted_text or ''}".lower()
+        if any(q in hay for q in qn):
+            if doc.id not in seen:
+                seen.add(doc.id)
+                matched.append(doc)
+    if not matched:
+        show = ", ".join(repr(q) for q in queries[:5])
+        return f"По фразам {show} в деле «{case.title}» ничего не найдено."
+    lines = [
+        f'Нашёл {len(matched)} документ(ов) в деле «{case.title}» (совпала любая из фраз):',
+    ]
+    for doc in matched[:25]:
+        lines.append(f'- [{doc.id}] {doc.filename} | {doc.category} | скачать: /api/documents/{doc.id}/download')
+    if len(matched) > 25:
+        lines.append(f"... и ещё {len(matched) - 25}.")
     return "\n".join(lines)
 
 
@@ -3575,6 +3612,23 @@ async def assistant_ingest_text(
             refresh_summary=True,
         )
 
+    if settings.chat_tools_router_enabled and settings.openai_api_key.strip():
+        try:
+            from .chat_tools import run_chat_tools_router
+
+            routed = await run_chat_tools_router(
+                db,
+                conversation,
+                text,
+                user_role=_,
+                preferred_case_number=payload.preferred_case_number,
+            )
+            if routed is not None:
+                reply_text, routed_case, mode = routed
+                return await finalize_reply(case=routed_case, reply_text=reply_text, mode=mode)
+        except Exception:
+            pass
+
     if looks_like_save_message_to_case_request(text):
         reply_text, target_case = await save_message_to_case_event(db, text, cases)
         case_for_reply = target_case if target_case is not None else get_or_create_unsorted_case(db)
@@ -3688,17 +3742,6 @@ async def assistant_ingest_text(
         )
         reply_text = render_document_list(command_case, command_docs)
         return await finalize_reply(case=command_case, reply_text=reply_text, mode="documents-list")
-
-    if settings.chat_tools_router_enabled and settings.openai_api_key.strip():
-        try:
-            from .chat_tools import run_chat_tools_router
-
-            routed = await run_chat_tools_router(db, conversation, text, user_role=_)
-            if routed is not None:
-                reply_text, routed_case, mode = routed
-                return await finalize_reply(case=routed_case, reply_text=reply_text, mode=mode)
-        except Exception:
-            pass
 
     if looks_like_group_by_cases_request(text):
         reply_text = render_documents_grouped_by_cases(db)
