@@ -105,16 +105,131 @@
       button {
         cursor: pointer;
       }
-      .case-item {
+      .case-block {
         border: 1px solid #e2e5e9;
         border-radius: 6px;
-        padding: 10px;
         margin-bottom: 8px;
-        cursor: pointer;
+        overflow: hidden;
+        background: #fff;
       }
-      .case-item.active {
+      .case-block.active {
         border-color: #2463eb;
+        box-shadow: 0 0 0 1px #2463eb inset;
+      }
+      .case-block-header {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+        padding: 10px;
+        cursor: pointer;
+        user-select: none;
+      }
+      .case-block-header:hover {
+        background: #f8f9fb;
+      }
+      .case-block.active .case-block-header {
         background: #eef4ff;
+      }
+      .case-chevron {
+        flex-shrink: 0;
+        width: 18px;
+        text-align: center;
+        color: #5e6773;
+        font-size: 10px;
+        line-height: 1.6;
+        margin-top: 3px;
+      }
+      .case-block-titles {
+        flex: 1;
+        min-width: 0;
+      }
+      .case-docs {
+        padding: 4px 8px 8px 36px;
+        background: #fafbfc;
+        border-top: 1px solid #e8eaed;
+        max-height: 240px;
+        overflow-y: auto;
+      }
+      .doc-row {
+        padding: 6px 8px;
+        margin: 2px 0;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 13px;
+        line-height: 1.3;
+        word-break: break-word;
+      }
+      .doc-row:hover {
+        background: #e8eef9;
+      }
+      .doc-viewer-modal {
+        display: none;
+        position: fixed;
+        inset: 0;
+        z-index: 2000;
+        align-items: center;
+        justify-content: center;
+        padding: 16px;
+        box-sizing: border-box;
+        background: rgba(15, 20, 30, 0.52);
+      }
+      .doc-viewer-modal.open {
+        display: flex;
+      }
+      .doc-viewer-panel {
+        width: min(960px, 100%);
+        height: min(88vh, 860px);
+        display: flex;
+        flex-direction: column;
+        padding: 0 !important;
+        overflow: hidden;
+        margin: 0;
+      }
+      .doc-viewer-toolbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 10px 12px;
+        border-bottom: 1px solid #e2e5e9;
+        flex-shrink: 0;
+        background: #fff;
+      }
+      #docViewerTitle {
+        font-size: 14px;
+        font-weight: 600;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        flex: 1;
+        min-width: 0;
+      }
+      .doc-viewer-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-shrink: 0;
+      }
+      .doc-viewer-actions a {
+        font-size: 13px;
+        color: #2463eb;
+      }
+      #docViewerClose {
+        width: 34px;
+        margin: 0;
+      }
+      #docViewerFrame {
+        flex: 1;
+        width: 100%;
+        min-height: 200px;
+        border: none;
+        background: #3d3d3d;
+      }
+      #docViewerFallback {
+        flex: 1;
+        overflow-y: auto;
+        padding: 16px;
+        background: #fff;
       }
       .muted {
         color: #5e6773;
@@ -253,7 +368,7 @@
       <div class="main-panel">
         <div id="emptyState" class="card chat-panel">
           <h3 style="margin-bottom: 6px;">My Assistant</h3>
-          <div id="healthStatus" class="muted" data-ui-build="2026-04-02e">Проверка API… (сборка 2026-04-02e)</div>
+          <div id="healthStatus" class="muted" data-ui-build="2026-04-02f">Проверка API… (сборка 2026-04-02f)</div>
           <div id="activeCaseBanner" class="muted">Загрузка списка дел…</div>
           <div id="chatLog" class="list"></div>
           <div class="chatInputWrap">
@@ -316,6 +431,26 @@
             </section>
           </div>
         </div>
+      </div>
+    </div>
+
+    <div
+      id="docViewerModal"
+      class="doc-viewer-modal"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="docViewerTitle"
+    >
+      <div class="doc-viewer-panel card" onclick="event.stopPropagation()">
+        <div class="doc-viewer-toolbar">
+          <span id="docViewerTitle">Документ</span>
+          <div class="doc-viewer-actions">
+            <a id="docViewerDownload" href="#" target="_blank" rel="noopener">Скачать</a>
+            <button id="docViewerClose" class="tinyIconBtn" type="button" title="Закрыть">✕</button>
+          </div>
+        </div>
+        <iframe id="docViewerFrame" title="Просмотр документа"></iframe>
+        <div id="docViewerFallback"></div>
       </div>
     </div>
     <script>
@@ -395,6 +530,8 @@
       let selectedCaseId = null;
       let selectedCaseNumber = null;
       let allCasesCache = [];
+      let sidebarExpandedCaseId = null;
+      const caseDocsCache = {};
 
       function escapeHtml(s) {
         const d = document.createElement("div");
@@ -420,6 +557,12 @@
           : `Активное дело id ${selectedCaseId}.`;
       }
 
+      async function ensureCaseDocsLoaded(caseId) {
+        if (caseDocsCache[caseId] !== undefined) return;
+        const docs = await api(`/cases/${caseId}/documents`);
+        caseDocsCache[caseId] = Array.isArray(docs) ? docs : [];
+      }
+
       function renderCasesList() {
         const list = el("casesList");
         if (!list) return;
@@ -435,16 +578,57 @@
               return t.includes(q) || n.includes(q);
             });
         for (const c of filtered) {
-          const item = document.createElement("div");
-          item.className = "case-item" + (selectedCaseId === c.id ? " active" : "");
-          item.innerHTML =
+          const block = document.createElement("div");
+          block.className = "case-block" + (selectedCaseId === c.id ? " active" : "");
+
+          const header = document.createElement("div");
+          header.className = "case-block-header";
+          const chev = document.createElement("span");
+          chev.className = "case-chevron";
+          chev.textContent = sidebarExpandedCaseId === c.id ? "▼" : "▶";
+          const titles = document.createElement("div");
+          titles.className = "case-block-titles";
+          titles.innerHTML =
             "<strong>" +
             escapeHtml(c.title) +
             "</strong><div class=\"muted\">" +
             escapeHtml(c.case_number) +
             "</div>";
-          item.onclick = () => selectSidebarCase(c);
-          list.appendChild(item);
+          header.appendChild(chev);
+          header.appendChild(titles);
+          header.onclick = () => onCaseHeaderClick(c);
+          block.appendChild(header);
+
+          if (sidebarExpandedCaseId === c.id) {
+            const docsWrap = document.createElement("div");
+            docsWrap.className = "case-docs";
+            const cached = caseDocsCache[c.id];
+            if (cached === undefined) {
+              const p = document.createElement("div");
+              p.className = "muted";
+              p.textContent = "Загрузка…";
+              docsWrap.appendChild(p);
+            } else if (!cached.length) {
+              const p = document.createElement("div");
+              p.className = "muted";
+              p.textContent = "Нет документов в этой папке.";
+              docsWrap.appendChild(p);
+            } else {
+              for (const d of cached) {
+                const row = document.createElement("div");
+                row.className = "doc-row";
+                row.textContent = "[" + d.id + "] " + (d.filename || "");
+                row.onclick = (ev) => {
+                  ev.stopPropagation();
+                  openDocumentViewer(d);
+                };
+                docsWrap.appendChild(row);
+              }
+            }
+            block.appendChild(docsWrap);
+          }
+
+          list.appendChild(block);
         }
         if (!filtered.length) {
           const empty = document.createElement("div");
@@ -467,7 +651,92 @@
           console.warn("active-case", err);
         }
         updateActiveCaseBanner();
+      }
+
+      async function onCaseHeaderClick(c) {
+        const willCollapse = sidebarExpandedCaseId === c.id;
+        await selectSidebarCase(c);
+        if (willCollapse) {
+          sidebarExpandedCaseId = null;
+        } else {
+          sidebarExpandedCaseId = c.id;
+          try {
+            await ensureCaseDocsLoaded(c.id);
+          } catch (err) {
+            console.warn("documents", err);
+            caseDocsCache[c.id] = [];
+          }
+        }
         renderCasesList();
+      }
+
+      function closeDocViewer() {
+        const modal = el("docViewerModal");
+        const frame = el("docViewerFrame");
+        if (frame) frame.src = "about:blank";
+        if (modal) {
+          modal.classList.remove("open");
+          modal.style.display = "none";
+        }
+      }
+
+      function openDocumentViewer(doc) {
+        const token = storage.apiToken;
+        const pathDn = `/documents/${doc.id}/download`;
+        const urlInline =
+          resolveApiRequestUrl(pathDn) + "?token=" + encodeURIComponent(token) + "&inline=1";
+        const urlAttach = resolveApiRequestUrl(pathDn) + "?token=" + encodeURIComponent(token);
+        const fname = (doc.filename || "").toLowerCase();
+        const ext = fname.includes(".") ? fname.split(".").pop() : "";
+        const iframeOk = [
+          "pdf",
+          "png",
+          "jpg",
+          "jpeg",
+          "webp",
+          "gif",
+          "svg",
+          "txt",
+          "htm",
+          "html",
+          "csv",
+          "md"
+        ].includes(ext);
+
+        el("docViewerTitle").textContent = doc.filename || "Документ " + doc.id;
+        const dl = el("docViewerDownload");
+        dl.href = urlAttach;
+
+        const frame = el("docViewerFrame");
+        const fb = el("docViewerFallback");
+        const modal = el("docViewerModal");
+
+        if (iframeOk) {
+          frame.style.display = "block";
+          fb.style.display = "none";
+          fb.innerHTML = "";
+          frame.src = urlInline;
+        } else {
+          frame.style.display = "none";
+          frame.src = "about:blank";
+          fb.style.display = "block";
+          fb.innerHTML = "";
+          const p1 = document.createElement("p");
+          p1.className = "muted";
+          p1.textContent =
+            "Просмотр в окне для файлов ." + (ext || "?") + " не поддерживается.";
+          fb.appendChild(p1);
+          const p2 = document.createElement("p");
+          const a = document.createElement("a");
+          a.href = urlAttach;
+          a.target = "_blank";
+          a.rel = "noopener";
+          a.textContent = "Скачать файл";
+          p2.appendChild(a);
+          fb.appendChild(p2);
+        }
+        modal.style.display = "flex";
+        modal.classList.add("open");
       }
 
       async function restoreSidebarSelection() {
@@ -482,8 +751,10 @@
           return;
         }
         const c = allCasesCache.find((x) => x.id === id);
-        if (c) await selectSidebarCase(c);
-        else {
+        if (c) {
+          await selectSidebarCase(c);
+          renderCasesList();
+        } else {
           localStorage.removeItem(CASE_SEL_STORAGE_KEY);
           selectedCaseId = null;
           selectedCaseNumber = null;
@@ -597,6 +868,7 @@
       async function loadCases() {
         const cases = await api("/cases");
         allCasesCache = Array.isArray(cases) ? cases : [];
+        for (const k of Object.keys(caseDocsCache)) delete caseDocsCache[k];
         renderCasesList();
       }
 
@@ -916,6 +1188,18 @@
           rb.onclick = () => {
             loadCases().catch(() => {});
           };
+
+        const docVm = el("docViewerModal");
+        if (docVm) {
+          docVm.addEventListener("click", (e) => {
+            if (e.target === docVm) closeDocViewer();
+          });
+        }
+        const docVc = el("docViewerClose");
+        if (docVc) docVc.onclick = () => closeDocViewer();
+        document.addEventListener("keydown", (e) => {
+          if (e.key === "Escape") closeDocViewer();
+        });
       }
 
       init();

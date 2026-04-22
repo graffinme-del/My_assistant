@@ -1,5 +1,6 @@
 from datetime import datetime, time, timedelta
 import json
+import mimetypes
 from typing import Any
 import re
 import shutil
@@ -866,7 +867,10 @@ def delete_document(
 
 @app.get("/documents/{document_id}/download")
 def download_document(
-    document_id: int, db: Session = Depends(get_db), _: str = Depends(require_user_header_or_query)
+    document_id: int,
+    inline: bool = Query(default=False),
+    db: Session = Depends(get_db),
+    _: str = Depends(require_user_header_or_query),
 ) -> FileResponse:
     doc = db.query(Document).filter(Document.id == document_id).first()
     if not doc:
@@ -874,7 +878,15 @@ def download_document(
     path = local_storage_path(doc)
     if not path:
         raise HTTPException(status_code=404, detail="Document file not found on disk")
-    return FileResponse(path=str(path), filename=doc.filename, media_type="application/octet-stream")
+    media_type, _ = mimetypes.guess_type(doc.filename)
+    if not media_type:
+        media_type = "application/octet-stream"
+    return FileResponse(
+        path=str(path),
+        filename=doc.filename,
+        media_type=media_type,
+        content_disposition_type="inline" if inline else "attachment",
+    )
 
 
 @app.get("/documents/{document_id}/summary")
