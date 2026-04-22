@@ -88,6 +88,10 @@ from .participant_learning import (
 )
 from .ru_date_range import describe_calendar_period_ru, parse_calendar_period_ru
 from .db import Base, engine, get_db
+from .duplicate_cleanup import (
+    handle_cross_folder_duplicate_cleanup_chat,
+    looks_like_cross_folder_duplicate_cleanup_request,
+)
 from .materials_workflow import (
     handle_compare_documents_request,
     handle_extract_deadlines_request,
@@ -401,7 +405,9 @@ def format_duplicate_documents_across_cases_report(db: Session, *, limit_groups:
     lines.append(
         "Чтобы сравнить два конкретных файла по тексту: «Сравни документы [id1] и [id2]». "
         "Чтобы объединить папки с такими дублями одной командой: "
-        "«Объедини папки, где повторяются одинаковые файлы»."
+        "«Объедини папки, где повторяются одинаковые файлы». "
+        "Чтобы **автоматически удалить лишние копии** (оставить по одному файлу в каждой группе по правилам «нужная папка»): "
+        "«Удали дубликаты между папками» или «Покажи план удаления дубликатов» (сначала превью без удаления)."
     )
     return "\n".join(lines)
 
@@ -4105,6 +4111,15 @@ async def assistant_ingest_text(
             case=get_or_create_unsorted_case(db),
             reply_text=reply_text,
             mode="cross-folder-matter-narrative",
+            refresh_summary=True,
+        )
+
+    if looks_like_cross_folder_duplicate_cleanup_request(text):
+        reply_text, dup_case = handle_cross_folder_duplicate_cleanup_chat(db, text)
+        return await finalize_reply(
+            case=dup_case if dup_case is not None else get_or_create_unsorted_case(db),
+            reply_text=reply_text,
+            mode="documents-duplicates-cleanup",
             refresh_summary=True,
         )
 

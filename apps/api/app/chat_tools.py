@@ -135,6 +135,33 @@ CHAT_TOOLS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "cleanup_duplicate_files_keep_best_copy",
+            "description": (
+                "Удалить лишние копии одного и того же **имени файла** в разных папках: остаётся одна копия "
+                "(приоритет: номер дела из имени файла совпадает с папкой; папки UNDEF/TAG/Неразобранное хуже; "
+                "можно указать предпочтительную папку). "
+                "Формулировки: «удали дубликаты», «убери повторы файлов», «оставь по одному». "
+                "Не вызывай для сравнения содержимого двух разных файлов — только для одинакового имени в разных делах."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "dry_run_only": {
+                        "type": "boolean",
+                        "description": "True — только план, без удаления. False — выполнить удаление лишних копий.",
+                    },
+                    "preferred_folder_title": {
+                        "type": "string",
+                        "description": "Если пользователь назвал папку, где оставить копии — подстрока названия (необязательно).",
+                    },
+                },
+                "required": ["dry_run_only"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "merge_folders_sharing_duplicate_filenames",
             "description": (
                 "Объединить папки автоматически: если два дела содержат файл с одним и тем же именем, "
@@ -397,6 +424,23 @@ async def run_chat_tools_router(
 
         reply = format_duplicate_documents_across_cases_report(db)
         return reply, get_or_create_unsorted_case(db), "chat-tools-list-duplicates"
+
+    if name == "cleanup_duplicate_files_keep_best_copy":
+        from .duplicate_cleanup import handle_cross_folder_duplicate_cleanup_chat
+        from .main import get_or_create_unsorted_case
+
+        dry = bool(args.get("dry_run_only"))
+        pref = str(args.get("preferred_folder_title") or "").strip()
+        parts = []
+        if dry:
+            parts.append("Покажи план удаления дубликатов без удаления.")
+        else:
+            parts.append("Удали дубликаты между папками, оставь по одному файлу.")
+        if pref:
+            parts.append(f'Приоритет папки «{pref}».')
+        parts.append(user_message.strip())
+        reply_text, out_case = handle_cross_folder_duplicate_cleanup_chat(db, " ".join(p for p in parts if p))
+        return reply_text, out_case or get_or_create_unsorted_case(db), "chat-tools-dup-cleanup"
 
     if name == "merge_folders_sharing_duplicate_filenames":
         from .main import get_or_create_unsorted_case, handle_merge_cases_linked_by_duplicate_filenames
