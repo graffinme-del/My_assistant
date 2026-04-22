@@ -30,6 +30,7 @@ class CaseOut(BaseModel):
     summary: str
     next_hearing_date: date | None
     created_at: datetime
+    updated_at: datetime
     tags: list[CaseTagOut] = []
 
     class Config:
@@ -134,6 +135,12 @@ class AssistantIngestIn(BaseModel):
     text: str
     preferred_case_number: str | None = None
     allow_case_create: bool = True
+
+
+class AssistantActiveCaseIn(BaseModel):
+    """Выбранное в UI дело — активная папка для чата (удаление «в этой папке», контекст ответов)."""
+
+    case_id: int
 
 
 class AssistantIngestOut(BaseModel):

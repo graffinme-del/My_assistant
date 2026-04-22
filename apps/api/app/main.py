@@ -115,6 +115,7 @@ from .schemas import (
     EventCreate,
     EventOut,
     HearingNoteIn,
+    AssistantActiveCaseIn,
     AssistantIngestIn,
     AssistantIngestOut,
     SummaryOut,
@@ -732,7 +733,7 @@ def create_case(
 
 @app.get("/cases", response_model=list[CaseOut])
 def list_cases(db: Session = Depends(get_db), _: str = Depends(require_user)) -> list[Case]:
-    return db.query(Case).order_by(Case.created_at.desc()).all()
+    return db.query(Case).order_by(Case.updated_at.desc(), Case.id.desc()).all()
 
 
 @app.get("/cases/{case_id}", response_model=CaseOut)
@@ -3011,6 +3012,23 @@ async def save_message_to_case_event(db: Session, text: str, cases: list[Case]) 
         f"Символов: {len(body)}."
     )
     return reply, case
+
+
+@app.post("/assistant/active-case")
+def set_assistant_active_case(
+    payload: AssistantActiveCaseIn,
+    db: Session = Depends(get_db),
+    _: str = Depends(require_user),
+) -> dict:
+    """Синхронизация выбранной в веб-панели папки с беседой (active_case)."""
+    case = db.query(Case).filter(Case.id == payload.case_id).first()
+    if not case:
+        raise HTTPException(status_code=404, detail="Case not found")
+    conversation = get_or_create_conversation(db, conversation_user_key(_))
+    conversation.active_case_id = case.id
+    db.add(conversation)
+    db.commit()
+    return {"case_id": case.id, "case_number": case.case_number, "title": case.title}
 
 
 @app.post("/assistant/ingest-text", response_model=AssistantIngestOut)

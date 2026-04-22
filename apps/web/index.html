@@ -14,17 +14,76 @@
         background: #f6f7f9;
         color: #1b1f24;
       }
-      .layout {
-        display: block;
-        min-height: 100vh;
-      }
-      .main {
-        padding: 12px;
+      .app-shell {
+        display: flex;
         height: 100vh;
         box-sizing: border-box;
+        padding: 10px;
+        gap: 10px;
+        background: #f6f7f9;
+      }
+      .sidebar {
+        width: 288px;
+        flex-shrink: 0;
         display: flex;
         flex-direction: column;
-        justify-content: flex-end;
+        max-height: 100vh;
+        box-sizing: border-box;
+      }
+      .sidebar h3 {
+        margin: 0 0 8px 0;
+        font-size: 16px;
+      }
+      #caseFilter {
+        width: 100%;
+        margin: 0 0 8px 0;
+        padding: 8px;
+        box-sizing: border-box;
+      }
+      #refreshCasesBtn {
+        width: 100%;
+        margin: 0 0 8px 0;
+        padding: 8px;
+        box-sizing: border-box;
+      }
+      .cases-scroll {
+        flex: 1;
+        min-height: 0;
+        overflow-y: auto;
+        margin-top: 4px;
+      }
+      .main-panel {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+      }
+      .chat-panel {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        overflow: hidden;
+      }
+      #activeCaseBanner {
+        font-size: 13px;
+        margin: 6px 0 8px 0;
+        padding: 8px;
+        background: #f0f3f8;
+        border-radius: 6px;
+        line-height: 1.35;
+      }
+      @media (max-width: 760px) {
+        .app-shell {
+          flex-direction: column;
+          height: auto;
+          min-height: 100vh;
+        }
+        .sidebar {
+          width: 100%;
+          max-height: 42vh;
+        }
       }
       h1, h2, h3 {
         margin-top: 0;
@@ -119,7 +178,10 @@
         color: #333 !important;
       }
       #chatLog {
-        max-height: calc(100vh - 130px) !important;
+        flex: 1;
+        min-height: 140px;
+        max-height: none !important;
+        overflow-y: auto;
       }
       .chatInputWrap {
         border: 1px solid #d5d9df;
@@ -173,19 +235,27 @@
       .hiddenInput {
         display: none;
       }
-      #emptyState {
-        width: min(1100px, 100%);
-        margin: 0 auto;
-      }
     </style>
   </head>
   <body>
-    <div class="layout">
-      <main class="main">
-        <div id="emptyState" class="card">
-          <h3 style="margin-bottom:6px;">My Assistant</h3>
-          <div id="healthStatus" class="muted" data-ui-build="2026-04-02d">Проверка API… (сборка 2026-04-02d)</div>
-          <div id="chatLog" class="list" style="max-height: 360px;"></div>
+    <div class="app-shell">
+      <aside class="sidebar card">
+        <h3>Дела</h3>
+        <input
+          id="caseFilter"
+          type="search"
+          autocomplete="off"
+          placeholder="Поиск по названию или номеру…"
+        />
+        <button id="refreshCasesBtn" type="button">Обновить список</button>
+        <div id="casesList" class="cases-scroll"></div>
+      </aside>
+      <div class="main-panel">
+        <div id="emptyState" class="card chat-panel">
+          <h3 style="margin-bottom: 6px;">My Assistant</h3>
+          <div id="healthStatus" class="muted" data-ui-build="2026-04-02e">Проверка API… (сборка 2026-04-02e)</div>
+          <div id="activeCaseBanner" class="muted">Загрузка списка дел…</div>
+          <div id="chatLog" class="list"></div>
           <div class="chatInputWrap">
             <div class="composerRow">
               <input id="docFilesInput" class="hiddenInput" type="file" multiple accept=".zip,.pdf,.txt,.md,.csv,.log,.xlsx,.doc,.docx,.rtf,.jpg,.jpeg,.png,.webp,.mp3,.mp4" />
@@ -195,12 +265,12 @@
               <button id="sendChatBtn" class="tinyIconBtn sendBtn" type="button" title="Отправить">↑</button>
             </div>
           </div>
-          <div id="uploadHint" class="muted" style="margin-top:8px;"></div>
-          <div id="bulkResult" class="muted" style="margin-top:4px;"></div>
+          <div id="uploadHint" class="muted" style="margin-top: 8px;"></div>
+          <div id="bulkResult" class="muted" style="margin-top: 4px;"></div>
           <button id="clearChatBtn" class="subtleBtn" type="button" title="Очистить чат">🗑 Очистить</button>
         </div>
 
-        <div id="caseWorkspace" style="display:none;">
+        <div id="caseWorkspace" style="display: none;">
           <div class="card">
             <h2 id="caseHeader">Карточка дела</h2>
             <div id="caseMeta" class="muted"></div>
@@ -246,7 +316,7 @@
             </section>
           </div>
         </div>
-      </main>
+      </div>
     </div>
     <script>
       /**
@@ -321,7 +391,106 @@
           return localStorage.getItem("apiToken") || "owner-dev-token";
         }
       };
+      const CASE_SEL_STORAGE_KEY = "assistantSelectedCaseId";
       let selectedCaseId = null;
+      let selectedCaseNumber = null;
+      let allCasesCache = [];
+
+      function escapeHtml(s) {
+        const d = document.createElement("div");
+        d.textContent = s == null ? "" : String(s);
+        return d.innerHTML;
+      }
+
+      function textHasExplicitCaseNumber(text) {
+        return /\b[АA]\d{1,4}-\d{1,7}\/\d{2,4}\b/i.test(text || "");
+      }
+
+      function updateActiveCaseBanner() {
+        const node = el("activeCaseBanner");
+        if (!node) return;
+        if (!selectedCaseId) {
+          node.textContent =
+            "Активное дело не выбрано. Выберите папку слева — тогда «удали все документы в этой папке» и загрузка файлов пойдут в выбранное дело.";
+          return;
+        }
+        const c = allCasesCache.find((x) => x.id === selectedCaseId);
+        node.textContent = c
+          ? `Активное дело: ${c.title} (${c.case_number}). Загрузка файлов и команда «в этой папке» относятся к нему. Если в сообщении указать другой номер дела — он важнее.`
+          : `Активное дело id ${selectedCaseId}.`;
+      }
+
+      function renderCasesList() {
+        const list = el("casesList");
+        if (!list) return;
+        const q = (el("caseFilter") && el("caseFilter").value ? el("caseFilter").value : "")
+          .trim()
+          .toLowerCase();
+        list.innerHTML = "";
+        const filtered = !q
+          ? allCasesCache
+          : allCasesCache.filter((c) => {
+              const t = (c.title || "").toLowerCase();
+              const n = (c.case_number || "").toLowerCase();
+              return t.includes(q) || n.includes(q);
+            });
+        for (const c of filtered) {
+          const item = document.createElement("div");
+          item.className = "case-item" + (selectedCaseId === c.id ? " active" : "");
+          item.innerHTML =
+            "<strong>" +
+            escapeHtml(c.title) +
+            "</strong><div class=\"muted\">" +
+            escapeHtml(c.case_number) +
+            "</div>";
+          item.onclick = () => selectSidebarCase(c);
+          list.appendChild(item);
+        }
+        if (!filtered.length) {
+          const empty = document.createElement("div");
+          empty.className = "muted";
+          empty.textContent = "Ничего не найдено. Смените поиск или обновите список.";
+          list.appendChild(empty);
+        }
+      }
+
+      async function selectSidebarCase(c) {
+        selectedCaseId = c.id;
+        selectedCaseNumber = c.case_number;
+        try {
+          localStorage.setItem(CASE_SEL_STORAGE_KEY, String(c.id));
+          await api("/assistant/active-case", {
+            method: "POST",
+            body: JSON.stringify({ case_id: c.id })
+          });
+        } catch (err) {
+          console.warn("active-case", err);
+        }
+        updateActiveCaseBanner();
+        renderCasesList();
+      }
+
+      async function restoreSidebarSelection() {
+        const raw = localStorage.getItem(CASE_SEL_STORAGE_KEY);
+        if (!raw) {
+          updateActiveCaseBanner();
+          return;
+        }
+        const id = parseInt(raw, 10);
+        if (!id) {
+          updateActiveCaseBanner();
+          return;
+        }
+        const c = allCasesCache.find((x) => x.id === id);
+        if (c) await selectSidebarCase(c);
+        else {
+          localStorage.removeItem(CASE_SEL_STORAGE_KEY);
+          selectedCaseId = null;
+          selectedCaseNumber = null;
+          updateActiveCaseBanner();
+          renderCasesList();
+        }
+      }
 
       const el = (id) => document.getElementById(id);
 
@@ -427,15 +596,8 @@
 
       async function loadCases() {
         const cases = await api("/cases");
-        const list = el("casesList");
-        list.innerHTML = "";
-        for (const c of cases) {
-          const item = document.createElement("div");
-          item.className = `case-item ${selectedCaseId === c.id ? "active" : ""}`;
-          item.innerHTML = `<strong>${c.title}</strong><div class="muted">${c.case_number} | ${c.status}</div>`;
-          item.onclick = () => selectCase(c.id);
-          list.appendChild(item);
-        }
+        allCasesCache = Array.isArray(cases) ? cases : [];
+        renderCasesList();
       }
 
       async function createCase() {
@@ -628,9 +790,14 @@
         el("chatText").value = "";
         appendChat("user", text);
         try {
+          const pref =
+            textHasExplicitCaseNumber(text) ? null : selectedCaseNumber || null;
           const result = await api("/assistant/ingest-text", {
             method: "POST",
-            body: JSON.stringify({ text })
+            body: JSON.stringify({
+              text,
+              preferred_case_number: pref
+            })
           });
           const hasReply =
             result.reply != null && String(result.reply).trim() !== "";
@@ -689,6 +856,7 @@
             }
           }
           el("bulkResult").textContent = `Загрузка завершена. Успешно: ${ok}, ошибок: ${failed}.`;
+          loadCases().catch(() => {});
         } catch (e) {
           el("bulkResult").textContent = "Ошибка загрузки: " + (e && e.message ? e.message : String(e));
         }
@@ -736,6 +904,18 @@
         }
 
         checkHealth().catch(() => {});
+        loadCases()
+          .then(() => restoreSidebarSelection())
+          .catch(() => {
+            updateActiveCaseBanner();
+          });
+        const cf = el("caseFilter");
+        if (cf) cf.oninput = () => renderCasesList();
+        const rb = el("refreshCasesBtn");
+        if (rb)
+          rb.onclick = () => {
+            loadCases().catch(() => {});
+          };
       }
 
       init();
