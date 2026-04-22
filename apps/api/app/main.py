@@ -480,13 +480,15 @@ def extract_saved_message_body_for_case(text: str) -> str:
 
 
 def looks_like_delete_documents_command(text: str) -> bool:
-    """Удаление файлов из приложения (не путать с «удали задачи КАД»)."""
+    """Удаление файлов из приложения (не путать с «удали задачи КАД»). Русский + English delete/remove."""
     t = (text or "").lower()
-    if not any(k in t for k in ("удали", "удалить", "стереть", "убери", "убрать")):
+    has_del_ru = any(k in t for k in ("удали", "удалить", "стереть", "убери", "убрать"))
+    has_del_en = bool(re.search(r"\b(delete|deletes|deleted|remove|removes|erase)\b", t, flags=re.IGNORECASE))
+    if not has_del_ru and not has_del_en:
         return False
-    if "задач" in t and "документ" not in t and "файл" not in t and "pdf" not in t:
+    if "задач" in t and "документ" not in t and "файл" not in t and "pdf" not in t and "document" not in t:
         return False
-    if "папк" in t and "документ" not in t and "файл" not in t:
+    if "папк" in t and "документ" not in t and "файл" not in t and "document" not in t and "file" not in t:
         return False
     return any(
         k in t
@@ -499,6 +501,12 @@ def looks_like_delete_documents_command(text: str) -> bool:
             "pdf",
             "материал",
             "вложен",
+        )
+    ) or bool(
+        re.search(
+            r"\b(documents?|docs?|files?|pdf|attachments?)\b",
+            t,
+            flags=re.IGNORECASE,
         )
     )
 
@@ -926,8 +934,24 @@ def delete_documents_hard(db: Session, docs: list[Document]) -> list[str]:
     return removed
 
 
+def _tokenize_delete_hint_words(h: str) -> list[str]:
+    """Слова для поиска: кириллица и латиница, ё→е; без слишком коротких (кроме как часть фразы)."""
+    s = (h or "").strip().lower()
+    s = s.replace("ё", "е")
+    words = re.findall(r"[a-zа-я]{3,}", s, flags=re.IGNORECASE)
+    out: list[str] = []
+    seen: set[str] = set()
+    for w in words:
+        wn = w.lower()
+        if wn in seen:
+            continue
+        seen.add(wn)
+        out.append(w)
+    return out
+
+
 def _collect_documents_matching_delete_hints(db: Session, hints: list[str]) -> list[Document]:
-    """Совпадение по имени файла или по извлечённому тексту PDF (extracted_text)."""
+    """Имя файла или текст PDF. Если целая фраза не находится (разные пробелы в PDF), все значимые слова должны встречаться."""
     collected: dict[int, Document] = {}
     for h in hints:
         if re.search(r"[АAаa]\d{1,4}-\d{1,7}/\d{2,4}", h):
@@ -935,29 +959,49 @@ def _collect_documents_matching_delete_hints(db: Session, hints: list[str]) -> l
         h_safe = re.sub(r"[%_\x00]", "", h).strip()[:500]
         if len(h_safe) < 3:
             continue
-        q = (
-            db.query(Document)
-            .filter(
-                or_(
-                    Document.filename.ilike(f"%{h_safe}%"),
-                    Document.extracted_text.ilike(f"%{h_safe}%"),
+        words = _tokenize_delete_hint_words(h_safe)
+        q = db.query(Document)
+        if len(words) >= 2:
+            for w in words:
+                w_esc = re.sub(r"[%_\x00]", "", w)[:80]
+                if len(w_esc) < 3:
+                    continue
+                q = q.filter(
+                    or_(
+                        Document.filename.ilike(f"%{w_esc}%"),
+                        Document.extracted_text.ilike(f"%{w_esc}%"),
+                    )
                 )
+            q = q.order_by(Document.id.desc()).limit(300)
+            for d in q:
+                collected[d.id] = d
+        else:
+            w0 = words[0] if words else h_safe
+            w0 = re.sub(r"[%_\x00]", "", w0)[:500]
+            if len(w0) < 3:
+                continue
+            q = (
+                q.filter(
+                    or_(
+                        Document.filename.ilike(f"%{w0}%"),
+                        Document.extracted_text.ilike(f"%{w0}%"),
+                    )
+                )
+                .order_by(Document.id.desc())
+                .limit(250)
             )
-            .order_by(Document.id.desc())
-            .limit(250)
-        )
-        for d in q:
-            collected[d.id] = d
+            for d in q:
+                collected[d.id] = d
     return list(collected.values())
 
 
 def _extract_delete_target_phrases(text: str) -> list[str]:
-    """Кавычки, «для …», «по фио …», «по Фамилия Имя …» (но не «по делу …» — это КАД)."""
+    """Кавычки; для/for + ФИО; по Фамилия … (не по делу); English for Name."""
     out: list[str] = []
     seen: set[str] = set()
 
     def add(s: str) -> None:
-        v = (s or "").strip()
+        v = (s or "").strip().strip(".,;:")
         if len(v) >= 3 and v.lower() not in seen:
             seen.add(v.lower())
             out.append(v)
@@ -965,11 +1009,25 @@ def _extract_delete_target_phrases(text: str) -> list[str]:
     for a, b in re.findall(r'"([^"]+)"|«([^»]+)»', text or ""):
         add((a or b).strip())
     for m in re.finditer(
-        r"(?:для|по\s+фио)\s+([А-Яа-яЁё][А-Яа-яЁё'\-]*(?:\s+[А-Яа-яЁё][А-Яа-яЁё'\-]*){0,6})",
+        r"(?:для|по\s+фио)\s+([А-Яа-яЁёA-Za-z][А-Яа-яЁёA-Za-z'\-]*(?:\s+[А-Яа-яЁёA-Za-z][А-Яа-яЁёA-Za-z'\-]*){0,6})",
         text or "",
         flags=re.IGNORECASE,
     ):
         add(m.group(1).strip())
+    m_en = re.search(
+        r"\b(?:for|about)\s+([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё'\-]*(?:\s+[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё'\-]*){0,6})\s*[!?.…]*\s*$",
+        (text or "").strip(),
+        flags=re.IGNORECASE,
+    )
+    if m_en:
+        add(m_en.group(1).strip())
+    m_en2 = re.search(
+        r"\b(?:for|about)\s+([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё'\-]*(?:\s+[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё'\-]*){1,6})(?=\s*[!?.]|$)",
+        text or "",
+        flags=re.IGNORECASE,
+    )
+    if m_en2:
+        add(m_en2.group(1).strip())
     m2 = re.search(
         r"(?<![а-яё])по\s+(?!делу\b)([А-Яа-яЁё][А-Яа-яЁё'\-]*(?:\s+[А-Яа-яЁё][А-Яа-яЁё'\-]*){1,6})(?:\s*[!?.…]*)?(?:\s*$|\n)",
         text or "",
@@ -981,7 +1039,9 @@ def _extract_delete_target_phrases(text: str) -> list[str]:
 
 
 def parse_document_ids_for_delete_command(text: str) -> list[int]:
-    ids = [int(x) for x in re.findall(r"\[(\d+)\]", text or "")]
+    raw = text or ""
+    ids = [int(x) for x in re.findall(r"\[(\d+)\]", raw)]
+    ids.extend(int(x) for x in re.findall(r"(?i)\bdoc[.:]?\s*(\d+)\b", raw))
     if ids:
         return sorted(set(ids))
     m = re.search(
@@ -1048,9 +1108,17 @@ def handle_delete_documents_chat(db: Session, text: str, conversation: Conversat
     if hints:
         docs = _collect_documents_matching_delete_hints(db, hints)
         if not docs:
+            lat = hints[0] and all((not c.isalpha()) or ord(c) < 128 for c in hints[0])
+            cyr_hint = (
+                " В PDF обычно русское написание ФИО — попробуйте ту же фразу кириллицей "
+                "(«Вартанов Эмиль Валерьевич»), либо «удали документ 214» / «удали все документы дела А53-13969/2026»."
+                if lat
+                else ""
+            )
             return (
-                f'Не нашёл документов, где в имени файла или в тексте PDF встречается «{hints[0]}». '
-                "Проверьте написание или удалите по номеру дела: «удали все документы дела А53-13969/2026»."
+                f'Не нашёл документов, где в имени файла или в тексте PDF встречаются все значимые слова из «{hints[0]}». '
+                "Проверьте написание или удалите по номеру дела."
+                + cyr_hint
             )
         removed = delete_documents_hard(db, docs)
         return (
