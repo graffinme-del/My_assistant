@@ -37,6 +37,20 @@ def parse_document_id_list(text: str, available_ids: set[int]) -> list[int]:
     return found[:24]
 
 
+def parse_document_ids_global_from_text(text: str, db: Session) -> list[int]:
+    """Id из текста [123] — любые документы в базе (для сравнения между папками)."""
+    seen: set[int] = set()
+    ordered: list[int] = []
+    for m in re.finditer(r"\[(\d+)\]", text or ""):
+        i = int(m.group(1))
+        if i in seen:
+            continue
+        seen.add(i)
+        if db.query(Document).filter(Document.id == i).first():
+            ordered.append(i)
+    return ordered[:24]
+
+
 def infer_draft_kind(text: str) -> str:
     t = text.lower()
     pairs = [
@@ -88,13 +102,43 @@ def looks_like_materials_draft_request(text: str) -> bool:
     )
 
 
+def looks_like_cross_case_duplicate_scan_request(text: str) -> bool:
+    """Поиск одинаковых файлов / дубликатов между папками (не точечное сравнение двух текстов)."""
+    t = (text or "").lower()
+    if any(k in t for k in ("сравни", "сравнение", "сравнить", "отличи", "различия", "дифф", "diff")) and any(
+        k in t for k in ("что изменилось", "отличия", "различия", "версии", "редакц")
+    ):
+        return False
+    dup = any(
+        k in t
+        for k in (
+            "одинаков",
+            "дубликат",
+            "дубли",
+            "повторяющ",
+            "повтор ",
+            "совпадающ",
+            "копии файлов",
+            "одни и те же файлы",
+        )
+    )
+    if not dup:
+        return False
+    return True
+
+
 def looks_like_compare_documents_request(text: str) -> bool:
     t = text.lower()
+    if looks_like_cross_case_duplicate_scan_request(text):
+        return False
     if not any(
         k in t
         for k in [
             "сравни",
             "сравнение",
+            "сравнить",
+            "сопоставь",
+            "сопоставить",
             "что изменилось",
             "отличия",
             "различия",
@@ -105,9 +149,12 @@ def looks_like_compare_documents_request(text: str) -> bool:
         return False
     return (
         "документ" in t
+        or "файл" in t
         or "[" in text
         or bool(re.search(r"\b\d+\s+(?:и|с)\s+\d+\b", t))
         or bool(re.search(r"\bдва\s+документ", t))
+        or "разных папк" in t
+        or "в разных папк" in t
     )
 
 
@@ -220,18 +267,24 @@ async def handle_compare_documents_request(
     available = {d.id for d in all_docs}
     ids = parse_document_id_list(text, available)
     if len(ids) < 2:
+        ids = parse_document_ids_global_from_text(text, db)
+    if len(ids) < 2:
         return (
-            "Нужны два документа по номерам в этом деле. Пример: "
-            "«Сравни документы [12] и [45]» или «сравни документ 3 и 7»."
+            "Нужны два документа по номерам, например: «Сравни документы [12] и [45]» — "
+            "номера можно взять из любой папки."
         )
     a, b = ids[0], ids[1]
-    selected = _docs_by_ids(all_docs, [a, b])
-    if len(selected) != 2:
-        return "Не удалось найти оба документа в текущем деле."
-    da, doc_b = selected[0], selected[1]
+    da = db.query(Document).filter(Document.id == a).first()
+    doc_b = db.query(Document).filter(Document.id == b).first()
+    if not da or not doc_b:
+        return "Не удалось найти оба документа по id."
 
     ta = _trim(da.extracted_text or "", _MAX_DOC_CHARS)
     tb = _trim(doc_b.extracted_text or "", _MAX_DOC_CHARS)
+    ca = db.query(Case).filter(Case.id == da.case_id).first()
+    cb = db.query(Case).filter(Case.id == doc_b.case_id).first()
+    loc_a = f"«{ca.title}» ({ca.case_number})" if ca else "?"
+    loc_b = f"«{cb.title}» ({cb.case_number})" if cb else "?"
     system = (
         "Ты помощник для сравнения двух текстовых версий судебных или договорных документов. "
         "Ответь по-русски: 1) краткое резюме отличий; 2) маркированный список существенных изменений "
@@ -239,9 +292,8 @@ async def handle_compare_documents_request(
         "Не придумывай факты, опирайся только на переданные тексты."
     )
     user = (
-        f"Дело: «{case.title}».\n"
-        f"Документ A [{da.id}] {da.filename}:\n{ta}\n\n"
-        f"Документ B [{doc_b.id}] {doc_b.filename}:\n{tb}"
+        f"Документ A в папке {loc_a}: [{da.id}] {da.filename}\n{ta}\n\n"
+        f"Документ B в папке {loc_b}: [{doc_b.id}] {doc_b.filename}\n{tb}"
     )
     try:
         out = await llm_system_user(system, user, timeout=120.0)

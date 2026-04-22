@@ -93,6 +93,7 @@ from .materials_workflow import (
     handle_extract_deadlines_request,
     handle_materials_draft_request,
     looks_like_compare_documents_request,
+    looks_like_cross_case_duplicate_scan_request,
     looks_like_extract_deadlines_request,
     looks_like_materials_draft_request,
 )
@@ -353,6 +354,56 @@ def find_duplicate_document(
         if doc_name == norm_name and doc_text == norm_text:
             return doc
     return None
+
+
+def format_duplicate_documents_across_cases_report(db: Session, *, limit_groups: int = 50) -> str:
+    """Список файлов с одинаковым нормализованным именем в разных папках."""
+    from collections import defaultdict
+
+    groups: dict[str, list[tuple[Document, Case]]] = defaultdict(list)
+    for d in db.query(Document).all():
+        c = db.query(Case).filter(Case.id == d.case_id).first()
+        if not c:
+            continue
+        key = normalize_document_signature(d.filename, "")[0]
+        if len(key) < 4:
+            continue
+        groups[key].append((d, c))
+
+    lines: list[str] = [
+        "Одинаковое имя файла (после нормализации) встречается в нескольких папках:",
+        "",
+    ]
+    shown = 0
+    for _key, items in sorted(groups.items(), key=lambda x: (-len(x[1]), x[0])):
+        case_ids = {c.id for _, c in items}
+        if len(case_ids) < 2:
+            continue
+        shown += 1
+        if shown > limit_groups:
+            lines.append(f"… и другие группы (показано не больше {limit_groups}).")
+            break
+        d0, c0 = items[0]
+        lines.append(f"** {d0.filename} ** — копий: {len(items)}, папок: {len(case_ids)}")
+        for d, c in items[:18]:
+            lines.append(
+                f"  • [{d.id}] папка: «{c.title}» ({c.case_number}) | скачать: /api/documents/{d.id}/download"
+            )
+        if len(items) > 18:
+            lines.append(f"  … ещё {len(items) - 18} строк в этой группе.")
+        lines.append("")
+
+    if shown == 0:
+        return (
+            "Не найдено совпадений имён файлов между разными папками. "
+            "(Если имена отличаются пробелами или регистром, они всё равно сгруппируются.)"
+        )
+    lines.append(
+        "Чтобы сравнить два конкретных файла по тексту: «Сравни документы [id1] и [id2]». "
+        "Чтобы объединить папки с такими дублями одной командой: "
+        "«Объедини папки, где повторяются одинаковые файлы»."
+    )
+    return "\n".join(lines)
 
 
 def looks_like_documents_list_request(text: str) -> bool:
@@ -3159,6 +3210,120 @@ def handle_merge_cases_chat(db: Session, text: str) -> tuple[str, Case | None]:
     return head + "\n".join(lines_body), target
 
 
+def looks_like_merge_duplicate_folders_request(text: str) -> bool:
+    """Объединить папки автоматически, если в них дублируются одни и те же имена файлов."""
+    t = (text or "").lower()
+    if not re.search(r"\b(?:объедини|соедини|слей|смержи)\b", t):
+        return False
+    return any(
+        k in t
+        for k in (
+            "дубл",
+            "одинаков",
+            "одно дело",
+            "одно и то же",
+            "повтор",
+            "совпадающ",
+            "совпадению файлов",
+            "по файлам",
+            "где те же файлы",
+            "склей дубли",
+        )
+    )
+
+
+def handle_merge_cases_linked_by_duplicate_filenames(db: Session) -> tuple[str, Case | None]:
+    """Связные компоненты: дела A и B связаны, если есть одинаковое имя файла в обоих. UNSORTED не участвует."""
+    from collections import defaultdict
+
+    groups: dict[str, list[tuple[int, int]]] = defaultdict(list)  # norm_name -> [(doc_id, case_id)]
+    for d in db.query(Document).all():
+        c = db.query(Case).filter(Case.id == d.case_id).first()
+        if not c or (c.case_number or "").upper() == "UNSORTED":
+            continue
+        key = normalize_document_signature(d.filename, "")[0]
+        if len(key) < 4:
+            continue
+        groups[key].append((d.id, c.id))
+
+    adj: dict[int, set[int]] = defaultdict(set)
+    for _fname, rows in groups.items():
+        cids = {cid for _, cid in rows}
+        if len(cids) < 2:
+            continue
+        cl = list(cids)
+        for i in range(len(cl)):
+            for j in range(i + 1, len(cl)):
+                adj[cl[i]].add(cl[j])
+                adj[cl[j]].add(cl[i])
+
+    if not adj:
+        return (
+            "Нет пар папок с одинаковыми именами файлов — объединять нечего. "
+            "Сначала попросите отчёт: «найди одинаковые документы в разных папках».",
+            None,
+        )
+
+    visited: set[int] = set()
+    components: list[list[int]] = []
+    for start in adj:
+        if start in visited:
+            continue
+        stack = [start]
+        visited.add(start)
+        comp: list[int] = []
+        while stack:
+            x = stack.pop()
+            comp.append(x)
+            for y in adj[x]:
+                if y not in visited:
+                    visited.add(y)
+                    stack.append(y)
+        components.append(comp)
+
+    merged_lines: list[str] = []
+    last_target: Case | None = None
+    total_merged_folders = 0
+    for comp in components:
+        if len(comp) < 2:
+            continue
+        cases = [db.query(Case).filter(Case.id == cid).first() for cid in comp]
+        cases = [c for c in cases if c and (c.case_number or "").upper() != "UNSORTED"]
+        if len(cases) < 2:
+            continue
+        target = _pick_merge_target_case(db, cases)
+        sources = [c for c in cases if c.id != target.id]
+        sub: list[str] = []
+        for src in sources:
+            n = _move_all_case_content_to_target(db, src, target)
+            sub.append(f"«{src.title}» ({src.case_number}) → перенесено записей/документов: {n}")
+            db.add(
+                CaseEvent(
+                    case_id=target.id,
+                    event_type="case_merge",
+                    body=f"Авто-объединение по дублям файлов из «{src.title}» ({src.case_number})",
+                )
+            )
+            db.delete(src)
+            total_merged_folders += 1
+        merged_lines.append(
+            f"В целевую папку «{target.title}» ({target.case_number}):\n"
+            + "\n".join(f"  — {s}" for s in sub)
+        )
+        last_target = target
+
+    if not merged_lines:
+        return (
+            "Связных групп папок по совпадению имён файлов не найдено (или все дела уже разделены).",
+            None,
+        )
+    db.commit()
+    if last_target:
+        db.refresh(last_target)
+    head = f"Объединил папки по совпадению имён файлов. Убрано лишних папок: {total_merged_folders}.\n\n"
+    return head + "\n\n".join(merged_lines), last_target
+
+
 def looks_like_delete_all_empty_folders(text: str) -> bool:
     """Удалить все дела/папки, в которых нет ни одного документа (пустые карточки)."""
     t = (text or "").lower()
@@ -3880,6 +4045,16 @@ async def assistant_ingest_text(
             refresh_summary=target_case is not None,
         )
 
+    if looks_like_merge_duplicate_folders_request(text):
+        reply_text, dup_merge_case = handle_merge_cases_linked_by_duplicate_filenames(db)
+        case_for_reply = dup_merge_case if dup_merge_case is not None else get_or_create_unsorted_case(db)
+        return await finalize_reply(
+            case=case_for_reply,
+            reply_text=reply_text,
+            mode="cases-merge-duplicates",
+            refresh_summary=dup_merge_case is not None,
+        )
+
     if looks_like_delete_all_empty_folders(text):
         reply_text, empty_del_case = handle_delete_all_empty_case_folders_chat(db, conversation)
         case_for_reply = empty_del_case if empty_del_case is not None else get_or_create_unsorted_case(db)
@@ -4129,6 +4304,15 @@ async def assistant_ingest_text(
             reply_text=reply_text,
             mode="materials-draft",
             refresh_summary=True,
+        )
+
+    if looks_like_cross_case_duplicate_scan_request(text):
+        reply_text = format_duplicate_documents_across_cases_report(db)
+        unsorted_case = get_or_create_unsorted_case(db)
+        return await finalize_reply(
+            case=unsorted_case,
+            reply_text=reply_text,
+            mode="documents-duplicates-across-folders",
         )
 
     if looks_like_compare_documents_request(text):

@@ -124,6 +124,29 @@ CHAT_TOOLS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "list_duplicate_files_across_folders",
+            "description": (
+                "Показать файлы с одинаковым именем, которые лежат в разных папках (делах). "
+                "Формулировки: «есть ли дубликаты», «одинаковые документы в папках», «проверь повторы файлов»."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "merge_folders_sharing_duplicate_filenames",
+            "description": (
+                "Объединить папки автоматически: если два дела содержат файл с одним и тем же именем, "
+                "слить такие группы в одну папку (целевую выбирает сервер: приоритет делу с «настоящим» номером арбитража). "
+                "Не вызывай, если пользователь явно назвал две конкретные папки через «и» — тогда достаточно обычного объединения вручную."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "collect_documents_into_folder",
             "description": (
                 "Пользователь хочет собрать документы в новую «папку» (в продукте это отдельное дело/case). "
@@ -332,6 +355,18 @@ async def run_chat_tools_router(
         from .main import get_or_create_unsorted_case
 
         return reply, get_or_create_unsorted_case(db), "chat-tools-kad-files-list"
+
+    if name == "list_duplicate_files_across_folders":
+        from .main import format_duplicate_documents_across_cases_report, get_or_create_unsorted_case
+
+        reply = format_duplicate_documents_across_cases_report(db)
+        return reply, get_or_create_unsorted_case(db), "chat-tools-list-duplicates"
+
+    if name == "merge_folders_sharing_duplicate_filenames":
+        from .main import get_or_create_unsorted_case, handle_merge_cases_linked_by_duplicate_filenames
+
+        reply_text, target_case = handle_merge_cases_linked_by_duplicate_filenames(db)
+        return reply_text, target_case or get_or_create_unsorted_case(db), "chat-tools-merge-duplicate-folders"
 
     if name == "collect_documents_into_folder":
         from .main import (
