@@ -53,6 +53,8 @@ class Settings(BaseSettings):
     # Автосводка длинных сообщений в чат по делу (переписка юристов и т.д.). Отключить: CASE_NOTE_DIGEST=0
     case_note_digest_enabled: bool = True
     case_note_digest_min_chars: int = 200
+    # ФИО через запятую — подсказка при маршрутизации документов и нескольких делах
+    assistant_owner_participants: str = ""
 
     @field_validator("app_port", mode="before")
     @classmethod

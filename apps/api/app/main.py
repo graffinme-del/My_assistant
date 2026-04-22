@@ -69,6 +69,11 @@ from .court_sync_service import (
 )
 from .config import settings
 from .document_batch_sort import format_auto_sort_reply, run_auto_sort_unsorted
+from .participant_learning import (
+    build_participant_context_for_llm,
+    handle_remember_participant_chat,
+    learn_participant_tags_from_document,
+)
 from .ru_date_range import describe_calendar_period_ru, parse_calendar_period_ru
 from .db import Base, engine, get_db
 from .materials_workflow import (
@@ -1183,10 +1188,12 @@ async def ingest_document(
             case_confidence = 0.97
 
     all_cases = db.query(Case).all()
+    participant_ctx = build_participant_context_for_llm(db)
     llm_route = await llm_document_routing(
         filename=safe_name,
         text=extracted_text,
         available_case_numbers=[c.case_number for c in all_cases],
+        participant_context=participant_ctx,
     )
 
     if llm_route:
@@ -1281,6 +1288,9 @@ async def ingest_document(
     db.commit()
     db.refresh(doc)
     index_document_for_retrieval(db, doc)
+    learn_participant_tags_from_document(
+        db, case=matched_case, filename=safe_name, extracted_text=extracted_text
+    )
 
     return DocumentIngestOut(
         document=doc,
@@ -1491,6 +1501,9 @@ async def bulk_ingest(
                 db.commit()
                 db.refresh(doc)
                 index_document_for_retrieval(db, doc)
+                learn_participant_tags_from_document(
+                    db, case=matched_case, filename=original_name, extracted_text=extracted_text
+                )
                 ingested_files += 1
     except zipfile.BadZipFile:
         raise HTTPException(status_code=400, detail="ZIP поврежден или не распаковывается.")
@@ -3047,6 +3060,15 @@ async def assistant_ingest_text(
             case=case_ul,
             reply_text=reply_ul,
             mode="upload-location",
+        )
+
+    rp_participant = handle_remember_participant_chat(db, text)
+    if rp_participant is not None:
+        unsorted_case = get_or_create_unsorted_case(db)
+        return await finalize_reply(
+            case=unsorted_case,
+            reply_text=rp_participant,
+            mode="participant-link",
         )
 
     if looks_like_court_search_command(text):

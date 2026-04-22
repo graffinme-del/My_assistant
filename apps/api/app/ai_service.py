@@ -413,7 +413,12 @@ def find_case_by_hint(cases: list[Case], hint: str, *, db: Session | None = None
             if not tag_norm:
                 continue
             if tag_norm in norm_hint or norm_hint in tag_norm:
-                score += 0.7 if tag.kind == "alias" else 0.45
+                if tag.kind == "participant":
+                    score += 0.72
+                elif tag.kind == "alias":
+                    score += 0.7
+                else:
+                    score += 0.45
         if score >= 0.65:
             scored.append((case, score))
 
@@ -551,7 +556,12 @@ def match_case(db: Session, filename: str, text: str, preferred_case_id: int | N
             if not tag_token or len(tag_token) < 3:
                 continue
             if tag_token in corpus:
-                score += 0.7 if tag.kind == "alias" else 0.45
+                if tag.kind == "participant":
+                    score += 0.72
+                elif tag.kind == "alias":
+                    score += 0.7
+                else:
+                    score += 0.45
         if score > best_score:
             best_score = score
             best = case
@@ -619,6 +629,7 @@ async def llm_document_routing(
     filename: str,
     text: str,
     available_case_numbers: list[str],
+    participant_context: str = "",
 ) -> dict[str, Any] | None:
     if not settings.openai_api_key:
         return None
@@ -630,11 +641,20 @@ async def llm_document_routing(
         '{"category":"...","case_number":"...","confidence":0.0,"short_note":"..."}\n'
         "category выбирай из: court_act, power_of_attorney, claim, review, complaint, evidence, correspondence, other.\n"
         "case_number выбери из списка доступных номеров дел, либо пустую строку если не уверен.\n"
+        "Если в тексте явно указан номер дела — он приоритетнее.\n"
+        "Если номера нет, но есть ФИО участника из списка ниже — выбери case_number того дела, где этот участник указан.\n"
         "confidence от 0 до 1.\n\n"
         f"Доступные номера дел: {available_case_numbers}\n"
-        f"Имя файла: {filename}\n"
-        f"Текст:\n{text_sample}"
     )
+    ctx = (participant_context or "").strip()
+    if ctx:
+        prompt += f"Участники по делам (подсказка):\n{ctx}\n\n"
+    owner = (settings.assistant_owner_participants or "").strip()
+    if owner:
+        prompt += (
+            f"Владелец ассистента / клиент (если ФИО совпадают с текстом, предпочти связанные с ним дела): {owner}\n\n"
+        )
+    prompt += f"Имя файла: {filename}\nТекст:\n{text_sample}"
     raw = await _llm_chat(prompt, timeout=60.0)
     try:
         import json
