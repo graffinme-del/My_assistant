@@ -1181,24 +1181,156 @@ def parse_document_ids_for_delete_command(text: str) -> list[int]:
     return []
 
 
-def handle_delete_documents_chat(db: Session, text: str, conversation: Conversation) -> str | None:
+def extract_document_ids_from_latest_assistant_message(db: Session, conversation: Conversation) -> list[int]:
+    """Id вида [213] из последнего ответа ассистента (поиск, список файлов) — для «удали этот документ»."""
+    m = (
+        db.query(ConversationMessage)
+        .filter(
+            ConversationMessage.conversation_id == conversation.id,
+            ConversationMessage.role == "assistant",
+        )
+        .order_by(ConversationMessage.created_at.desc())
+        .first()
+    )
+    if not m or not (m.content or "").strip():
+        return []
+    return sorted({int(x) for x in re.findall(r"\[(\d+)\]", m.content)})
+
+
+def _looks_like_this_document_anaphora(text: str) -> bool:
+    t = (text or "").lower()
+    return any(
+        k in t
+        for k in (
+            "этот документ",
+            "эту документ",
+            "этот файл",
+            "эту загрузку",
+            "эти документы",
+            "эти файлы",
+            "тот документ",
+            "тот файл",
+            "найденн",
+            "из результата",
+            "из списка",
+            "показанн",
+            "выше ",
+        )
+    )
+
+
+def _wants_delete_containing_folder(text: str) -> bool:
+    """Составной запрос: убрать файл(ы) и папку/дело, где они лежат."""
+    t = (text or "").lower()
+    if "документ" not in t and "файл" not in t:
+        return False
+    if "папк" not in t and not re.search(r"\bдел[а-яё]*\b", t):
+        return False
+    return any(
+        k in t
+        for k in (
+            "и папку",
+            "и папк",
+            "папку в которой",
+            "папке в которой",
+            "папку, в которой",
+            "вместе с папк",
+            "папку тоже",
+            "и саму папку",
+            "и само дело",
+            "дело в котором",
+        )
+    )
+
+
+def execute_delete_documents_and_optional_folder(
+    db: Session,
+    *,
+    document_ids: list[int],
+    also_delete_containing_folder: bool,
+    user_message: str = "",
+) -> tuple[str, Case | None]:
+    """Удаляет документы; при флаге — затем удаляет дело целиком (остаток уходит в неразобранное)."""
+    doc_ids = sorted({int(x) for x in document_ids if int(x) > 0})
+    if not doc_ids:
+        return "Не указаны номера документов.", None
+    docs = db.query(Document).filter(Document.id.in_(doc_ids)).all()
+    found_ids = {d.id for d in docs}
+    missing = [i for i in doc_ids if i not in found_ids]
+    if not docs:
+        return (
+            "Не нашёл документы с такими номерами. Пример: удали документы 214 287 или удали документ 214.",
+            None,
+        )
+    case_for_reply = db.query(Case).filter(Case.id == docs[0].case_id).first()
+
+    if also_delete_containing_folder:
+        case_ids = {d.case_id for d in docs}
+        if len(case_ids) != 1:
+            return (
+                "Указанные документы из разных папок. Уточните, какую папку удалить целиком, или удалите по шагам.",
+                case_for_reply,
+            )
+        cid = next(iter(case_ids))
+        folder_case = db.query(Case).filter(Case.id == cid).first()
+        if not folder_case or (folder_case.case_number or "").upper() == "UNSORTED":
+            removed = delete_documents_hard(db, docs)
+            lines = ["Удалено из приложения (файл и поиск по тексту):"] + [f"• {r}" for r in removed]
+            if missing:
+                lines.append(f"Не найдены id: {', '.join(str(i) for i in missing)}.")
+            return "\n".join(lines), get_or_create_unsorted_case(db)
+
+        removed = delete_documents_hard(db, docs)
+        doc_lines = ["Удалено из приложения (файл и поиск по тексту):"] + [f"• {r}" for r in removed]
+        if missing:
+            doc_lines.append(f"Не найдены id: {', '.join(str(i) for i in missing)}.")
+        hint = folder_case.case_number or folder_case.title
+        folder_reply, unsorted = handle_delete_case_folder_chat(
+            db, user_message or "удали папку", hint_override=hint
+        )
+        return "\n\n".join(["\n".join(doc_lines), folder_reply]), unsorted
+
+    removed = delete_documents_hard(db, docs)
+    lines = ["Удалено из приложения (файл и поиск по тексту):"] + [f"• {r}" for r in removed]
+    if missing:
+        lines.append(f"Не найдены id: {', '.join(str(i) for i in missing)}.")
+    return "\n".join(lines), case_for_reply
+
+
+def handle_delete_documents_chat(
+    db: Session, text: str, conversation: Conversation
+) -> tuple[str, Case | None] | None:
     """Чат: удалить документы по id, по номеру дела или по фрагменту имени файла (в кавычках)."""
     if not looks_like_delete_documents_command(text):
         return None
     low = (text or "").lower()
+    fallback_case = conversation.active_case or get_or_create_unsorted_case(db)
 
     doc_ids = parse_document_ids_for_delete_command(text)
+    if not doc_ids and _looks_like_this_document_anaphora(text):
+        doc_ids = extract_document_ids_from_latest_assistant_message(db, conversation)
     if doc_ids:
+        if _wants_delete_containing_folder(text):
+            return execute_delete_documents_and_optional_folder(
+                db,
+                document_ids=doc_ids,
+                also_delete_containing_folder=True,
+                user_message=text,
+            )
         docs = db.query(Document).filter(Document.id.in_(doc_ids)).all()
         if not docs:
-            return "Не нашёл документы с такими номерами. Пример: удали документы 214 287 или удали документ 214."
+            return (
+                "Не нашёл документы с такими номерами. Пример: удали документы 214 287 или удали документ 214.",
+                fallback_case,
+            )
         found_ids = {d.id for d in docs}
         missing = [i for i in doc_ids if i not in found_ids]
         removed = delete_documents_hard(db, docs)
         lines = ["Удалено из приложения (файл и поиск по тексту):"] + [f"• {r}" for r in removed]
         if missing:
             lines.append(f"Не найдены id: {', '.join(str(i) for i in missing)}.")
-        return "\n".join(lines)
+        case_reply = db.query(Case).filter(Case.id == docs[0].case_id).first() or fallback_case
+        return "\n".join(lines), case_reply
 
     wants_all = any(
         w in low
@@ -1221,11 +1353,15 @@ def handle_delete_documents_chat(db: Session, text: str, conversation: Conversat
     if wants_all and case:
         docs = db.query(Document).filter(Document.case_id == case.id).all()
         if not docs:
-            return f'В деле «{case.title}» ({case.case_number}) нет сохранённых документов.'
+            return (
+                f'В деле «{case.title}» ({case.case_number}) нет сохранённых документов.',
+                case,
+            )
         removed = delete_documents_hard(db, docs)
         return (
             f'Удалено файлов из дела «{case.title}» ({case.case_number}): {len(removed)}.\n'
-            + "\n".join(f"• {r}" for r in removed)
+            + "\n".join(f"• {r}" for r in removed),
+            case,
         )
 
     hints = _extract_delete_target_phrases(text)
@@ -1242,14 +1378,17 @@ def handle_delete_documents_chat(db: Session, text: str, conversation: Conversat
             return (
                 f'Не нашёл документов, где в имени файла или в тексте PDF встречаются все значимые слова из «{hints[0]}». '
                 "Проверьте написание или удалите по номеру дела."
-                + cyr_hint
+                + cyr_hint,
+                fallback_case,
             )
         removed = delete_documents_hard(db, docs)
+        case_reply = db.query(Case).filter(Case.id == docs[0].case_id).first() or fallback_case
         return (
             f"Удалено по совпадению с фразой в имени файла или в тексте PDF ({len(removed)} шт.):\n"
             + "\n".join(f"• {r}" for r in removed)
             + "\n\nЗапросы в КАД лучше указывать с номером дела или ссылкой на карточку — "
-            "по одному короткому имени поиск может подтянуть чужие дела."
+            "по одному короткому имени поиск может подтянуть чужие дела.",
+            case_reply,
         )
 
     if wants_all and not case:
@@ -1257,14 +1396,17 @@ def handle_delete_documents_chat(db: Session, text: str, conversation: Conversat
             "Чтобы удалить всё лишнее, укажите номер дела, например: "
             "«удали все документы дела А53-13969/2026», "
             "или откройте папку слева и напишите «удали все документы в этой папке», "
-            "или «удали все документы по Вартанов Эмиль Валерьевич» (поиск по имени файла и тексту PDF)."
+            "или «удали все документы по Вартанов Эмиль Валерьевич» (поиск по имени файла и тексту PDF).",
+            fallback_case,
         )
     return (
         "Напишите, что именно удалить:\n"
         "• по номерам: «удали документы 214 287»;\n"
         "• всё по делу: «удали все документы дела А53-13969/2026»;\n"
         "• всё в открытой папке: «удали все документы в этой папке»;\n"
-        "• по ФИО/фразе в PDF: «удали все документы по Вартанов Эмиль Валерьевич» или «удали файлы «Вартанов»»."
+        "• по ФИО/фразе в PDF: «удали все документы по Вартанов Эмиль Валерьевич» или «удали файлы «Вартанов»»;\n"
+        "• после поиска: «удали этот документ и папку, где он лежит».",
+        fallback_case,
     )
 
 
@@ -3676,9 +3818,10 @@ async def assistant_ingest_text(
             refresh_summary=True,
         )
 
-    del_reply = handle_delete_documents_chat(db, text, conversation)
-    if del_reply:
-        case_for_reply = conversation.active_case or get_or_create_unsorted_case(db)
+    del_out = handle_delete_documents_chat(db, text, conversation)
+    if del_out:
+        del_reply, del_case = del_out
+        case_for_reply = del_case or conversation.active_case or get_or_create_unsorted_case(db)
         return await finalize_reply(
             case=case_for_reply,
             reply_text=del_reply,

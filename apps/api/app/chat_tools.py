@@ -16,7 +16,7 @@ from .config import settings
 from .court_kad_search import looks_like_court_download_count_question, looks_like_kad_downloaded_documents_list
 from .court_sync_service import format_kad_downloaded_documents_list, format_recent_download_jobs_status
 from .ru_date_range import describe_calendar_period_ru, parse_calendar_period_ru
-from .models import Case, Conversation, Document
+from .models import Case, Conversation, ConversationMessage, Document
 
 # OpenAI-compatible tools (function calling)
 CHAT_TOOLS: list[dict[str, Any]] = [
@@ -53,6 +53,37 @@ CHAT_TOOLS: list[dict[str, Any]] = [
                     },
                 },
                 "required": ["scope", "queries"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_documents_and_folder",
+            "description": (
+                "Удалить конкретные загруженные документы по id (в чате они помечены как [123]) и при необходимости "
+                "сразу удалить папку/дело, в котором они лежали (остальные файлы этого дела уйдут в неразобранное). "
+                "Используй, когда пользователь говорит «удали этот документ и папку», «убери файл и само дело» "
+                "или ссылается на последний найденный документ. "
+                "document_ids возьми из последних сообщений ассистента в контексте (строки с [id]). "
+                "Не вызывай, если нужно удалить только папку без привязки к конкретным id — тогда delete_case_folder."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "document_ids": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "minItems": 1,
+                        "maxItems": 40,
+                        "description": "Id документов из ответов ассистента, например 213 из «[213] имя.pdf».",
+                    },
+                    "also_delete_containing_folder": {
+                        "type": "boolean",
+                        "description": "True, если нужно удалить дело/папку целиком после удаления перечисленных файлов.",
+                    },
+                },
+                "required": ["document_ids", "also_delete_containing_folder"],
             },
         },
     },
@@ -143,14 +174,29 @@ def _router_system_prompt(db: Session, conversation: Conversation) -> str:
     rows = db.query(Case).order_by(Case.id.desc()).limit(48).all()
     lines = [f"- «{c.title}» — {c.case_number}" for c in rows]
     catalog = "\n".join(lines) if lines else "(папок нет)"
+    hist_rows = (
+        db.query(ConversationMessage)
+        .filter(ConversationMessage.conversation_id == conversation.id)
+        .order_by(ConversationMessage.created_at.desc())
+        .limit(10)
+        .all()
+    )
+    hist_rows.reverse()
+    transcript = "\n".join(
+        f"{r.role}: {(r.content or '')[:3500]}" for r in hist_rows
+    )
+    if not transcript.strip():
+        transcript = "(истории сообщений пока нет)"
     return (
         "Ты маршрутизатор намерений для ассистента по судебным материалам. "
         "У пользователя «папки» = дела (cases). "
         "Вызови ровно один инструмент, только если запрос явно требует этого действия в приложении. "
         "Если пользователь просто общается, просит объяснить или обобщить без поиска по файлам, удаления папки, "
-        "переноса в новую папку или работы с КАД — не вызывай инструменты.\n\n"
+        "переноса в новую папку или работы с КАД — не вызывай инструменты.\n"
+        "Ссылкам «этот документ», «найденный файл» соответствуют номера в квадратных скобках [213] в последних сообщениях assistant.\n\n"
         f"Активная папка в чате: {active}\n"
-        f"Известные папки (кратко):\n{catalog}\n"
+        f"Известные папки (кратко):\n{catalog}\n\n"
+        f"Последние реплики (новее внизу):\n{transcript}\n"
     )
 
 
@@ -221,6 +267,27 @@ async def run_chat_tools_router(
             reply = search_documents_union_queries(command_case, command_docs, queries)
             return reply, command_case, "chat-tools-search-case"
         return None
+
+    if name == "delete_documents_and_folder":
+        from .main import execute_delete_documents_and_optional_folder, get_or_create_unsorted_case
+
+        raw_ids = args.get("document_ids") or []
+        try:
+            doc_ids = [int(x) for x in raw_ids]
+        except (TypeError, ValueError):
+            return None
+        also = bool(args.get("also_delete_containing_folder"))
+        if not doc_ids:
+            return None
+        reply_text, out_case = execute_delete_documents_and_optional_folder(
+            db,
+            document_ids=doc_ids,
+            also_delete_containing_folder=also,
+            user_message=user_message,
+        )
+        if out_case is None:
+            out_case = get_or_create_unsorted_case(db)
+        return reply_text, out_case, "chat-tools-delete-docs-and-folder"
 
     if name == "delete_case_folder":
         from .main import get_or_create_unsorted_case, handle_delete_case_folder_chat
