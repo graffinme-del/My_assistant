@@ -51,6 +51,7 @@ from .court_kad_search import (
     looks_like_court_download_status_question,
     looks_like_court_search_command,
     looks_like_kad_downloaded_documents_list,
+    looks_like_stored_arbitr_case_number,
     parse_court_search_request,
     try_resolve_kad_folder_title_to_case_number,
 )
@@ -96,9 +97,12 @@ from .materials_workflow import (
 )
 from .models import (
     Case,
+    CaseEmbedding,
     CaseEvent,
     CaseTag,
     Conversation,
+    ConversationMessage,
+    CourtCaseSource,
     CourtSyncJob,
     Document,
     PendingMovePlan,
@@ -650,7 +654,7 @@ def looks_like_chronology_request(text: str) -> bool:
 def extract_search_query(text: str) -> str:
     lowered = text.lower()
     # «поищи» раньше «ищи», иначе срабатывает подстрока «ищи» внутри «поищи» и запрос обрезается неверно.
-    for marker in ["поищи", "найди", "поиск", "ищи", "покажи документы с", "документы с"]:
+    for marker in ["поищи", "найди", "поиск", "ищи", "покажи документы с", "документы с", "покажи"]:
         idx = lowered.find(marker)
         if idx >= 0:
             return text[idx + len(marker) :].strip(" :.-")
@@ -665,9 +669,69 @@ def looks_like_documents_search_request(text: str) -> bool:
         t,
     ):
         return False
+    if looks_like_global_documents_search(text):
+        return False
     return any(k in t for k in ["найди", "поиск", "ищи", "поищи"]) and any(
-        k in t for k in ["док", "файл", "асв", "банк", "определен", "договор", "жалоб", "акт"]
+        k in t
+        for k in [
+            "док",
+            "файл",
+            "асв",
+            "банк",
+            "определен",
+            "договор",
+            "жалоб",
+            "акт",
+            "имя",
+            "фио",
+            "содержа",
+        ]
     )
+
+
+def looks_like_global_documents_search(text: str) -> bool:
+    """Поиск по тексту/имени файла во всех папках (делах)."""
+    t = (text or "").lower()
+    if re.search(
+        r"(?:поищи|найди|ищи|поиск)\s+(?:в|из)\s+кад|кад\.arbitr|картотек[аеи]?\s+арбитраж",
+        t,
+    ):
+        return False
+    scope = (
+        "во всех папках",
+        "по всем папкам",
+        "по всем делам",
+        "во всех делах",
+        "везде по документ",
+        "по всем документ",
+        "сквозной поиск",
+        "глобально",
+        "по всем файлам",
+        "во всех файлах",
+    )
+    if not any(s in t for s in scope):
+        return False
+    return any(k in t for k in ("найди", "поищи", "ищи", "поиск", "покажи"))
+
+
+def normalize_global_search_query(raw: str) -> str:
+    """Убирает служебные слова из извлечённого запроса глобального поиска."""
+    s = (raw or "").strip()
+    s = re.sub(
+        r"^(?:во\s+всех\s+папках|по\s+всем\s+папкам|по\s+всем\s+делам|во\s+всех\s+делах|везде|глобально)\s*[,:.-]*\s*",
+        "",
+        s,
+        flags=re.I,
+    )
+    s = re.sub(r"^документы?\s*", "", s, flags=re.I)
+    s = re.sub(
+        r"^(?:содержащ(?:ие|их)?|содержащие\s+имя|содержащие\s+текст|где\s+есть|с\s+текстом)\s+",
+        "",
+        s,
+        flags=re.I,
+    )
+    s = re.sub(r"^(?:имя|фио|фамилию|текст)\s+", "", s, flags=re.I)
+    return s.strip(" ,.:-—")
 
 
 def looks_like_single_doc_summary_request(text: str) -> bool:
@@ -2672,6 +2736,247 @@ def search_documents(case: Case, docs: list[Document], query: str) -> str:
     return "\n".join(lines)
 
 
+def search_documents_global(db: Session, user_text: str, *, limit: int = 40) -> str:
+    """Поиск документов по всем делам (имя файла и извлечённый текст PDF)."""
+    hints = _extract_delete_target_phrases(user_text)
+    raw_q = extract_search_query(user_text)
+    if not hints:
+        nq = normalize_global_search_query(raw_q)
+        if len(nq) >= 2:
+            hints = [nq]
+    if not hints:
+        return (
+            "Не понял, что искать во всех папках. Пример: «найди во всех папках документы с именем Эмилия» "
+            "или «поиск по всем делам: Рочева»."
+        )
+    collected: dict[int, Document] = {}
+    for h in hints:
+        for d in _collect_documents_matching_delete_hints(db, [h]):
+            collected[d.id] = d
+    total = len(collected)
+    matched = sorted(collected.values(), key=lambda d: d.id, reverse=True)[:limit]
+    if not matched:
+        return f'По запросу «{"; ".join(hints)}» в документах всех папок ничего не найдено.'
+    case_ids = {d.case_id for d in matched}
+    cases_map = {c.id: c for c in db.query(Case).filter(Case.id.in_(case_ids)).all()}
+    lines = [
+        f"Нашёл {total} документ(ов) во всех папках по запросу «{' / '.join(hints[:4])}»"
+        + (f" (показываю {len(matched)}):" if total > len(matched) else ":")
+    ]
+    for doc in matched:
+        c = cases_map.get(doc.case_id)
+        cnum = c.case_number if c else "?"
+        ctitle = c.title if c else "?"
+        if ctitle and len(ctitle) > 52:
+            ctitle = ctitle[:50] + "…"
+        lines.append(
+            f"- [{doc.id}] {doc.filename} | папка: {ctitle} ({cnum}) | скачать: /api/documents/{doc.id}/download"
+        )
+    if total > limit:
+        lines.append(f"… всего совпадений: {total}. Сузьте фразу в кавычках для точного поиска.")
+    return "\n".join(lines)
+
+
+def _move_all_case_content_to_target(db: Session, source: Case, target: Case) -> int:
+    """Перенос документов (с чанками), задач, событий и тегов source → target. Возвращает число документов."""
+    n = 0
+    for doc in db.query(Document).filter(Document.case_id == source.id).all():
+        doc.case_id = target.id
+        db.add(doc)
+        sync_document_chunks(db, doc)
+        n += 1
+    db.query(Task).filter(Task.case_id == source.id).update({Task.case_id: target.id}, synchronize_session=False)
+    db.query(CaseEvent).filter(CaseEvent.case_id == source.id).update(
+        {CaseEvent.case_id: target.id}, synchronize_session=False
+    )
+    existing = {
+        (t.kind, t.value.strip().lower())
+        for t in db.query(CaseTag).filter(CaseTag.case_id == target.id).all()
+    }
+    for tag in db.query(CaseTag).filter(CaseTag.case_id == source.id).all():
+        key = (tag.kind, tag.value.strip().lower())
+        if key not in existing:
+            db.add(CaseTag(case_id=target.id, value=tag.value, kind=tag.kind))
+            existing.add(key)
+    db.query(CaseTag).filter(CaseTag.case_id == source.id).delete(synchronize_session=False)
+    db.query(PendingMovePlan).filter(PendingMovePlan.case_id == source.id).update(
+        {PendingMovePlan.case_id: target.id}, synchronize_session=False
+    )
+    db.query(Conversation).filter(Conversation.active_case_id == source.id).update(
+        {Conversation.active_case_id: target.id}, synchronize_session=False
+    )
+    db.query(ConversationMessage).filter(ConversationMessage.case_id == source.id).update(
+        {ConversationMessage.case_id: target.id}, synchronize_session=False
+    )
+    db.query(CaseEmbedding).filter(CaseEmbedding.case_id == source.id).update(
+        {CaseEmbedding.case_id: target.id}, synchronize_session=False
+    )
+    db.query(CourtCaseSource).filter(CourtCaseSource.case_id == source.id).update(
+        {CourtCaseSource.case_id: target.id}, synchronize_session=False
+    )
+    return n
+
+
+def _pick_merge_target_case(db: Session, cases: list[Case]) -> Case:
+    """Приоритет: «настоящий» номер арбитража, не TAG-*, больше документов."""
+    scored: list[tuple[int, int, Case]] = []
+    for c in cases:
+        score = 0
+        cn = c.case_number or ""
+        if looks_like_stored_arbitr_case_number(cn):
+            score += 200
+        if cn.upper().startswith("TAG-"):
+            score -= 50
+        nd = db.query(Document).filter(Document.case_id == c.id).count()
+        score += min(nd, 80)
+        scored.append((score, c.id, c))
+    scored.sort(key=lambda x: (-x[0], -x[1]))
+    return scored[0][2]
+
+
+def parse_merge_case_hints(text: str) -> list[str]:
+    t = (text or "").strip()
+    quoted = [a or b for a, b in re.findall(r'«([^»]+)»|"([^"]+)"', t)]
+    if len(quoted) >= 2:
+        return [q.strip() for q in quoted if len(q.strip()) >= 2][:15]
+    m = re.search(
+        r"(?:объедини|соедини|слей|смержи)\s+(?:эти\s+)?(?:папки|папку|дела|дело)\s+(.+)$",
+        t,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if not m:
+        return []
+    blob = re.sub(r"[.!?…]+$", "", m.group(1).strip())
+    parts = re.split(r"\s+\bи\b\s+", blob, flags=re.IGNORECASE)
+    out: list[str] = []
+    for p in parts:
+        p = re.sub(r"^(?:папк[ауеи]?\s+|дел[оа]\s+)", "", p, flags=re.I).strip().strip(' "\'«»')
+        if len(p) >= 2:
+            out.append(p)
+    return out[:15]
+
+
+def looks_like_merge_cases_request(text: str) -> bool:
+    t = (text or "").lower()
+    if not re.search(r"\b(?:объедини|соедини|слей|смержи)\b", t):
+        return False
+    return bool(re.search(r"\b(?:папк|дел)", t))
+
+
+def handle_merge_cases_chat(db: Session, text: str) -> tuple[str, Case | None]:
+    hints = parse_merge_case_hints(text)
+    if len(hints) < 2:
+        return (
+            "Укажите минимум две папки. Примеры:\n"
+            "• объедини папки «Банкротство Эмиль» и «Дело А40-19021/2025»\n"
+            "• объедини папки TAG-26076AAD и A40-19021/2025",
+            None,
+        )
+    all_cases = db.query(Case).all()
+    resolved: list[Case] = []
+    seen: set[int] = set()
+    for h in hints:
+        case: Case | None = None
+        ext = extract_case_number(h)
+        if ext:
+            norm = normalize_arbitr_case_number(ext)
+            case = db.query(Case).filter(Case.case_number == norm).first()
+        if not case:
+            case = find_case_by_hint(all_cases, h, db=db)
+        if not case:
+            return f'Не нашёл папку по подсказке «{h}». Уточните название или номер дела.', None
+        if case.id not in seen:
+            seen.add(case.id)
+            resolved.append(case)
+    if len(resolved) < 2:
+        return "Нужны две разные папки (сейчас совпадают или найдена одна).", None
+    if any((x.case_number or "").upper() == "UNSORTED" for x in resolved):
+        return "Объединение с папкой «Неразобранное» (UNSORTED) не поддерживается.", None
+    target = _pick_merge_target_case(db, resolved)
+    sources = [c for c in resolved if c.id != target.id]
+    lines_body: list[str] = []
+    total_docs = 0
+    for src in sources:
+        n = _move_all_case_content_to_target(db, src, target)
+        total_docs += n
+        lines_body.append(f"— «{src.title}» ({src.case_number}): перенесено документов: {n}")
+        db.add(
+            CaseEvent(
+                case_id=target.id,
+                event_type="case_merge",
+                body=f"Объединено из «{src.title}» ({src.case_number})",
+            )
+        )
+        db.delete(src)
+    db.commit()
+    db.refresh(target)
+    head = (
+        f"Объединил папки в одну. Целевая папка: «{target.title}» ({target.case_number}). "
+        f"Всего перенесено документов: {total_docs}.\n"
+    )
+    return head + "\n".join(lines_body), target
+
+
+def looks_like_delete_case_folder_request(text: str) -> bool:
+    t = (text or "").lower()
+    if not re.search(r"\b(?:удали|убери|удалить)\b", t):
+        return False
+    if not re.search(r"\b(?:папк|дело)\b", t):
+        return False
+    if re.search(r"\b(?:документ|файл)\b", t):
+        return False
+    return True
+
+
+def parse_delete_case_folder_hint(text: str) -> str:
+    t = (text or "").strip()
+    m = re.search(
+        r"(?:удали|убери|удалить)\s+(?:папк[ау]?|дело)\s+(?:«([^»]+)»|\"([^\"]+)\"|'([^']+)')",
+        t,
+        flags=re.I,
+    )
+    if m:
+        return next(g for g in m.groups() if g).strip()
+    m = re.search(r"(?:удали|убери|удалить)\s+(?:папк[ау]?|дело)\s+(.+)$", t, flags=re.I | re.DOTALL)
+    if m:
+        return re.sub(r"[.!?…]+$", "", m.group(1).strip()).strip(' "\'«»')
+    return ""
+
+
+def handle_delete_case_folder_chat(db: Session, text: str) -> tuple[str, Case | None]:
+    hint = parse_delete_case_folder_hint(text)
+    if not hint:
+        return (
+            "Не понял, какую папку удалить. Примеры:\n"
+            "• удали папку «Банкротство Эмиль»\n"
+            "• удали папку A40-97353/2020\n"
+            "Документы будут перенесены в «Неразобранное», затем папка удалится.",
+            None,
+        )
+    all_cases = db.query(Case).all()
+    case: Case | None = None
+    ext = extract_case_number(hint)
+    if ext:
+        norm = normalize_arbitr_case_number(ext)
+        case = db.query(Case).filter(Case.case_number == norm).first()
+    if not case:
+        case = find_case_by_hint(all_cases, hint, db=db)
+    if not case:
+        return f'Не нашёл папку по подсказке «{hint}».', None
+    if (case.case_number or "").upper() == "UNSORTED":
+        return "Папку «Неразобранное» удалить нельзя.", None
+    unsorted = get_or_create_unsorted_case(db)
+    n = _move_all_case_content_to_target(db, case, unsorted)
+    tit, num = case.title, case.case_number
+    db.delete(case)
+    db.commit()
+    db.refresh(unsorted)
+    return (
+        f"Папка «{tit}» ({num}) удалена. Документов и связанных записей перенесено в неразобранное: {n}.",
+        unsorted,
+    )
+
+
 _RECENT_UPLOAD_LOOKBACK_MINUTES = 45
 
 
@@ -3181,6 +3486,26 @@ async def assistant_ingest_text(
             refresh_summary=target_case is not None,
         )
 
+    if looks_like_merge_cases_request(text):
+        reply_text, target_case = handle_merge_cases_chat(db, text)
+        case_for_reply = target_case if target_case is not None else get_or_create_unsorted_case(db)
+        return await finalize_reply(
+            case=case_for_reply,
+            reply_text=reply_text,
+            mode="cases-merge",
+            refresh_summary=target_case is not None,
+        )
+
+    if looks_like_delete_case_folder_request(text):
+        reply_text, del_folder_case = handle_delete_case_folder_chat(db, text)
+        case_for_reply = del_folder_case if del_folder_case is not None else get_or_create_unsorted_case(db)
+        return await finalize_reply(
+            case=case_for_reply,
+            reply_text=reply_text,
+            mode="case-folder-delete",
+            refresh_summary=True,
+        )
+
     del_reply = handle_delete_documents_chat(db, text, conversation)
     if del_reply:
         case_for_reply = conversation.active_case or get_or_create_unsorted_case(db)
@@ -3390,6 +3715,15 @@ async def assistant_ingest_text(
     if looks_like_documents_analyze_request(text):
         reply_text = await summarize_documents_for_case(command_case, command_docs, chronology=False)
         return await finalize_reply(case=command_case, reply_text=reply_text, mode="documents-analyze")
+
+    if looks_like_global_documents_search(text):
+        reply_text = search_documents_global(db, text, limit=45)
+        unsorted_case = get_or_create_unsorted_case(db)
+        return await finalize_reply(
+            case=unsorted_case,
+            reply_text=reply_text,
+            mode="documents-search-global",
+        )
 
     if looks_like_documents_search_request(text):
         query = extract_search_query(text)
