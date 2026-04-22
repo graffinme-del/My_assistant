@@ -30,6 +30,7 @@ from .ai_service import (
     llm_digest_incoming_case_note,
     llm_disambiguate_document_among_cases,
     llm_parse_case_tag_update,
+    llm_parse_delete_case_folder_request,
     llm_document_routing,
     llm_participant_clarification_message,
     llm_summary,
@@ -2960,6 +2961,44 @@ def looks_like_delete_case_folder_request(text: str) -> bool:
     return True
 
 
+def might_be_delete_case_folder_llm(text: str) -> bool:
+    """Слабая эвристика: возможно, речь об удалении папки — тогда добираем смысл через LLM."""
+    t = (text or "").lower()
+    if any(x in t for x in ("не удали", "не удаляй", "не убирай", "не удалить")):
+        return False
+    if not any(k in t for k in ("удали", "удалить", "убери", "убрать")):
+        return False
+    if any(k in t for k in ("документ", "файл", "pdf", "вложен", "attachment")):
+        return False
+    if "папк" in t:
+        return True
+    if re.search(r"\bдел[а-яё]*\b", t):
+        return True
+    if "folder" in t or re.search(r"\bcase\b", t, flags=re.IGNORECASE):
+        return True
+    return False
+
+
+async def resolve_delete_folder_hint(
+    text: str,
+    cases: list[Case],
+    *,
+    active_case: Case | None,
+) -> str | None:
+    if looks_like_delete_case_folder_request(text):
+        h = parse_delete_case_folder_hint(text)
+        if h:
+            return h
+    if not might_be_delete_case_folder_llm(text):
+        return None
+    if not settings.openai_api_key.strip():
+        return None
+    try:
+        return await llm_parse_delete_case_folder_request(text, cases, active_case=active_case)
+    except Exception:
+        return None
+
+
 def parse_delete_case_folder_hint(text: str) -> str:
     t = (text or "").strip()
     # Между глаголом и «папку/дело» допускаются слова вроде «полностью», «навсегда».
@@ -2977,8 +3016,13 @@ def parse_delete_case_folder_hint(text: str) -> str:
     return ""
 
 
-def handle_delete_case_folder_chat(db: Session, text: str) -> tuple[str, Case | None]:
-    hint = parse_delete_case_folder_hint(text)
+def handle_delete_case_folder_chat(
+    db: Session,
+    text: str,
+    *,
+    hint_override: str | None = None,
+) -> tuple[str, Case | None]:
+    hint = hint_override.strip() if hint_override else parse_delete_case_folder_hint(text)
     if not hint:
         return (
             "Не понял, какую папку удалить. Примеры:\n"
@@ -3530,8 +3574,15 @@ async def assistant_ingest_text(
             refresh_summary=target_case is not None,
         )
 
-    if looks_like_delete_case_folder_request(text):
-        reply_text, del_folder_case = handle_delete_case_folder_chat(db, text)
+    del_folder_hint = await resolve_delete_folder_hint(
+        text,
+        cases,
+        active_case=conversation.active_case,
+    )
+    if del_folder_hint:
+        reply_text, del_folder_case = handle_delete_case_folder_chat(
+            db, text, hint_override=del_folder_hint
+        )
         case_for_reply = del_folder_case if del_folder_case is not None else get_or_create_unsorted_case(db)
         return await finalize_reply(
             case=case_for_reply,

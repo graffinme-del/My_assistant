@@ -526,6 +526,71 @@ async def llm_parse_case_tag_update(text: str, cases: list[Case]) -> dict[str, A
     return parsed if parsed["tags"] and parsed["case_hint"] else None
 
 
+def _strip_json_fence(raw: str) -> str:
+    s = (raw or "").strip()
+    if s.startswith("```"):
+        s = re.sub(r"^```(?:json)?\s*", "", s, flags=re.IGNORECASE)
+        s = re.sub(r"\s*```\s*$", "", s)
+    return s.strip()
+
+
+async def llm_parse_delete_case_folder_request(
+    text: str,
+    cases: list[Case],
+    *,
+    active_case: Case | None = None,
+) -> str | None:
+    """
+    Когда жёсткие шаблоны не извлекли подсказку, модель решает, удалить ли папку (дело) целиком,
+    и какую строку сопоставить с существующими делами (номер или фрагмент названия).
+    """
+    if not settings.openai_api_key.strip():
+        return None
+    case_lines = [
+        f"- «{c.title}» — номер: {c.case_number!r}"
+        for c in cases[:55]
+    ]
+    active_line = ""
+    if active_case is not None:
+        active_line = (
+            f"Сейчас в интерфейсе открыта папка: «{active_case.title}» ({active_case.case_number}).\n"
+        )
+    system = (
+        "Ты классификатор намерений для приложения «папки = судебные дела». Пользователь пишет по-русски.\n"
+        "Нужно понять: просит ли он УДАЛИТЬ ИЗ ПРИЛОЖЕНИЯ саму ПАПКУ/ДЕЛО (карточку дела), а не отдельные файлы, "
+        "не задачи КАД и не документы на сайте суда.\n"
+        'Верни ТОЛЬКО один JSON-объект без пояснений:\n'
+        '{"delete_folder":true/false,"case_hint":"","confidence":0.0}\n'
+        "case_hint — короткая строка для поиска в списке: номер дела (как в интерфейсе) или ключевые слова из названия. "
+        "Если имеется в виду «эта/текущая папка» — подставь название или номер открытой папки из контекста.\n"
+        "Если речь об удалении файлов, PDF, вложений или «документов» — delete_folder:false, confidence ниже 0.5.\n"
+        "Если delete_folder:false — case_hint оставь пустой строкой."
+    )
+    user = (
+        f"{active_line}"
+        "Список папок:\n"
+        + "\n".join(case_lines)
+        + f"\n\nСообщение пользователя:\n{(text or '')[:4000]}"
+    )
+    raw = await llm_system_user(system, user, timeout=35.0)
+    try:
+        parsed = json.loads(_strip_json_fence(raw))
+    except Exception:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    if not parsed.get("delete_folder"):
+        return None
+    try:
+        conf = float(parsed.get("confidence") or 0.0)
+    except (TypeError, ValueError):
+        conf = 0.0
+    if conf < 0.72:
+        return None
+    hint = str(parsed.get("case_hint") or "").strip()
+    return hint or None
+
+
 def match_case(db: Session, filename: str, text: str, preferred_case_id: int | None = None) -> tuple[Case | None, float]:
     if preferred_case_id:
         case = db.query(Case).filter(Case.id == preferred_case_id).first()
