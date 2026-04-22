@@ -104,6 +104,19 @@ class PendingMovePlan(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class PendingSemanticPlan(Base):
+    """План смысловой перестройки (кластеры дел и т.п.), ждёт подтверждения в чате."""
+
+    __tablename__ = "pending_semantic_plans"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_key: Mapped[str] = mapped_column(String(80), index=True)
+    plan_kind: Mapped[str] = mapped_column(String(40), default="case_clusters", index=True)
+    payload_json: Mapped[str] = mapped_column(Text, default="{}")
+    preview_text: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class Conversation(Base):
     __tablename__ = "conversations"
 

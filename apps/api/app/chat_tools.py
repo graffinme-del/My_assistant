@@ -147,6 +147,20 @@ CHAT_TOOLS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "propose_semantic_case_clusters",
+            "description": (
+                "Смысловой анализ всех папок: найти группы дел, относящихся к одной реальной истории "
+                "(например банкротство и множество исков с разными номерами; связанные споры). "
+                "Даёт черновик групп и ждёт подтверждения пользователя перед объединением. "
+                "Формулировки: «проанализируй папки по смыслу», «что объединить по сути», «одно дело разные номера», "
+                "«кластеризация дел». Не вызывай для простого «объедини папку А и папку Б» без запроса анализа всего набора."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "collect_documents_into_folder",
             "description": (
                 "Пользователь хочет собрать документы в новую «папку» (в продукте это отдельное дело/case). "
@@ -367,6 +381,13 @@ async def run_chat_tools_router(
 
         reply_text, target_case = handle_merge_cases_linked_by_duplicate_filenames(db)
         return reply_text, target_case or get_or_create_unsorted_case(db), "chat-tools-merge-duplicate-folders"
+
+    if name == "propose_semantic_case_clusters":
+        from .main import conversation_user_key, get_or_create_unsorted_case
+        from .matter_intelligence import preview_semantic_workspace_clusters
+
+        reply_text, _ = await preview_semantic_workspace_clusters(db, conversation_user_key(user_role))
+        return reply_text, get_or_create_unsorted_case(db), "chat-tools-semantic-clusters-preview"
 
     if name == "collect_documents_into_folder":
         from .main import (
