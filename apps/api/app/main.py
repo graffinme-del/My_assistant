@@ -791,6 +791,64 @@ def looks_like_documents_search_request(text: str) -> bool:
     )
 
 
+def looks_like_cross_folder_matter_narrative_request(text: str) -> bool:
+    """Сквозная история по теме/лицу через все папки (не просто список файлов)."""
+    t = (text or "").lower()
+    narrative = any(
+        k in t
+        for k in (
+            "полный расклад",
+            "полный разбор",
+            "полную картину",
+            "расклад по",
+            "разбор по",
+            "хронолог",
+            "таймлайн",
+            "от первого",
+            "до последнего",
+            "единая история",
+            "связное повествование",
+            "связн повеств",
+            "печальн",
+            "вся история",
+            "расскажи историю",
+            "опиши историю",
+            "сквозной разбор",
+            "сквозная история",
+        )
+    )
+    matter = any(
+        k in t
+        for k in (
+            "банкротств",
+            "конкурсн",
+            "несостоятельн",
+            "финансовым оздоровлением",
+            "арбитражн управля",
+        )
+    )
+    cross = any(
+        k in t
+        for k in (
+            "все папк",
+            "всех папк",
+            "по всем папк",
+            "во всех папк",
+            "по всем делам",
+            "во всех делах",
+            "весь архив",
+            "везде в",
+            "по всем документ",
+            "во всех документ",
+        )
+    )
+    if narrative and matter:
+        return True
+    if narrative and cross:
+        return True
+    return False
+
+
 def looks_like_global_documents_search(text: str) -> bool:
     """Поиск по тексту/имени файла во всех папках (делах)."""
     t = (text or "").lower()
@@ -4036,6 +4094,17 @@ async def assistant_ingest_text(
             reply_text=reply_text,
             mode="case-tags",
             created_case=created_case,
+            refresh_summary=True,
+        )
+
+    if looks_like_cross_folder_matter_narrative_request(text):
+        from .matter_narrative import build_cross_folder_matter_narrative
+
+        reply_text = await build_cross_folder_matter_narrative(db, text)
+        return await finalize_reply(
+            case=get_or_create_unsorted_case(db),
+            reply_text=reply_text,
+            mode="cross-folder-matter-narrative",
             refresh_summary=True,
         )
 

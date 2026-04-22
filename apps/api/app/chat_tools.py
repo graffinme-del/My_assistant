@@ -147,6 +147,28 @@ CHAT_TOOLS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "cross_folder_matter_narrative",
+            "description": (
+                "Пользователь просит связную хронологическую историю по теме или лицу **через все папки/дела**: "
+                "например полный расклад банкротства с разными номерами процессов, «печальная история», "
+                "от первого документа до последнего, таймлайн по всему архиву. "
+                "НЕ для простого списка «найди файлы с фамилией» без запроса повествования."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_request": {
+                        "type": "string",
+                        "description": "Дословно или кратко переформулированный запрос пользователя для поиска и тона ответа.",
+                    },
+                },
+                "required": ["user_request"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "propose_semantic_case_clusters",
             "description": (
                 "Смысловой анализ всех папок: найти группы дел, относящихся к одной реальной истории "
@@ -388,6 +410,16 @@ async def run_chat_tools_router(
 
         reply_text, _ = await preview_semantic_workspace_clusters(db, conversation_user_key(user_role))
         return reply_text, get_or_create_unsorted_case(db), "chat-tools-semantic-clusters-preview"
+
+    if name == "cross_folder_matter_narrative":
+        from .main import get_or_create_unsorted_case
+        from .matter_narrative import build_cross_folder_matter_narrative
+
+        u = str(args.get("user_request") or user_message or "").strip()
+        if len(u) < 8:
+            u = user_message
+        reply_text = await build_cross_folder_matter_narrative(db, u)
+        return reply_text, get_or_create_unsorted_case(db), "chat-tools-cross-folder-narrative"
 
     if name == "collect_documents_into_folder":
         from .main import (
