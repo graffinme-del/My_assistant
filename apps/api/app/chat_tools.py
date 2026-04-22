@@ -90,6 +90,18 @@ CHAT_TOOLS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "delete_all_empty_folders",
+            "description": (
+                "Удалить все «пустые» папки (дела), в которых нет ни одного загруженного документа/файла. "
+                "Папку «Неразобранное» не трогать. Типичные формулировки: «удали пустые папки», «убери дела без документов», "
+                "«очисти папки где нет файлов». Не вызывай, если нужно удалить одну конкретную папку по названию."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "delete_case_folder",
             "description": (
                 "Пользователь хочет удалить из приложения целиком папку/дело (карточку дела). "
@@ -267,6 +279,12 @@ async def run_chat_tools_router(
             reply = search_documents_union_queries(command_case, command_docs, queries)
             return reply, command_case, "chat-tools-search-case"
         return None
+
+    if name == "delete_all_empty_folders":
+        from .main import get_or_create_unsorted_case, handle_delete_all_empty_case_folders_chat
+
+        reply_text, out_case = handle_delete_all_empty_case_folders_chat(db, conversation)
+        return reply_text, out_case or get_or_create_unsorted_case(db), "chat-tools-delete-empty-folders"
 
     if name == "delete_documents_and_folder":
         from .main import execute_delete_documents_and_optional_folder, get_or_create_unsorted_case

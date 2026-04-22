@@ -3159,8 +3159,40 @@ def handle_merge_cases_chat(db: Session, text: str) -> tuple[str, Case | None]:
     return head + "\n".join(lines_body), target
 
 
+def looks_like_delete_all_empty_folders(text: str) -> bool:
+    """Удалить все дела/папки, в которых нет ни одного документа (пустые карточки)."""
+    t = (text or "").lower()
+    if not re.search(r"\b(?:удали|удалить|убери|убрать|очисти)\b", t):
+        return False
+    if "папк" not in t and not re.search(r"\bдел[а-яё]*\b", t):
+        return False
+    emptyish = (
+        "пуст" in t
+        or "без документ" in t
+        or "нет документ" in t
+        or "ни одного документ" in t
+        or "ни одного файла" in t
+        or "не содержат документ" in t
+        or "не содержит документ" in t
+        or "не содержащ" in t
+        or "без файлов" in t
+        or "без вложен" in t
+    )
+    if not emptyish:
+        return False
+    if "все" in t or "всё" in t or "кажд" in t:
+        return True
+    if "пуст" in t:
+        return True
+    if "без документ" in t or "без файлов" in t or "нет документ" in t:
+        return True
+    return False
+
+
 def looks_like_delete_case_folder_request(text: str) -> bool:
     t = (text or "").lower()
+    if looks_like_delete_all_empty_folders(text):
+        return False
     if not re.search(r"\b(?:удали|убери|удалить)\b", t):
         return False
     # «папку», «папке» — не совпадут с \bпапк\b (после «к» буква «у»).
@@ -3174,6 +3206,8 @@ def looks_like_delete_case_folder_request(text: str) -> bool:
 def might_be_delete_case_folder_llm(text: str) -> bool:
     """Слабая эвристика: возможно, речь об удалении папки — тогда добираем смысл через LLM."""
     t = (text or "").lower()
+    if looks_like_delete_all_empty_folders(text):
+        return False
     if any(x in t for x in ("не удали", "не удаляй", "не убирай", "не удалить")):
         return False
     if not any(k in t for k in ("удали", "удалить", "убери", "убрать")):
@@ -3222,7 +3256,11 @@ def parse_delete_case_folder_hint(text: str) -> str:
         return next(g for g in m.groups() if g).strip()
     m = re.search(_cmd + r"(.+)$", t, flags=re.I | re.DOTALL)
     if m:
-        return re.sub(r"[.!?…]+$", "", m.group(1).strip()).strip(' "\'«»')
+        raw = re.sub(r"[.!?…]+$", "", m.group(1).strip()).strip(' "\'«»')
+        # Не принимать описательный хвост за имя папки («…папки не содержащие документов»).
+        if re.match(r"^(?:не\s+содержа|содержащ(?:ие|их)?\s)", raw, flags=re.I):
+            return ""
+        return raw
     return ""
 
 
@@ -3263,6 +3301,47 @@ def handle_delete_case_folder_chat(
         f"Папка «{tit}» ({num}) удалена. Документов и связанных записей перенесено в неразобранное: {n}.",
         unsorted,
     )
+
+
+def handle_delete_all_empty_case_folders_chat(
+    db: Session, conversation: Conversation
+) -> tuple[str, Case | None]:
+    """Удаляет все Case без Document (кроме UNSORTED); задачи/события/теги — в неразобранное."""
+    unsorted = get_or_create_unsorted_case(db)
+    to_delete: list[Case] = []
+    for c in db.query(Case).order_by(Case.id.asc()).all():
+        if (c.case_number or "").upper() == "UNSORTED":
+            continue
+        n_docs = db.query(Document).filter(Document.case_id == c.id).count()
+        if n_docs == 0:
+            to_delete.append(c)
+    if not to_delete:
+        return (
+            "Пустых папок не найдено: у каждого дела есть хотя бы один документ, либо осталась только «Неразобранное».",
+            conversation.active_case or unsorted,
+        )
+    active_id = conversation.active_case_id
+    removed_titles: list[str] = []
+    for c in to_delete:
+        _move_all_case_content_to_target(db, c, unsorted)
+        tit, num = c.title, c.case_number
+        db.delete(c)
+        removed_titles.append(f"«{tit}» ({num})")
+    db.commit()
+    db.refresh(unsorted)
+    if active_id and not db.query(Case).filter(Case.id == active_id).first():
+        conversation.active_case_id = unsorted.id
+        db.add(conversation)
+        db.commit()
+    lines = [
+        f"Удалено пустых папок: {len(to_delete)}. Файлов в них не было; задачи, события и теги перенесены в «Неразобранное».",
+        "",
+        "Список:",
+    ]
+    lines.extend(f"• {x}" for x in removed_titles[:45])
+    if len(removed_titles) > 45:
+        lines.append(f"… и ещё {len(removed_titles) - 45}.")
+    return "\n".join(lines), unsorted
 
 
 _RECENT_UPLOAD_LOOKBACK_MINUTES = 45
@@ -3799,6 +3878,16 @@ async def assistant_ingest_text(
             reply_text=reply_text,
             mode="cases-merge",
             refresh_summary=target_case is not None,
+        )
+
+    if looks_like_delete_all_empty_folders(text):
+        reply_text, empty_del_case = handle_delete_all_empty_case_folders_chat(db, conversation)
+        case_for_reply = empty_del_case if empty_del_case is not None else get_or_create_unsorted_case(db)
+        return await finalize_reply(
+            case=case_for_reply,
+            reply_text=reply_text,
+            mode="case-empty-folders-delete",
+            refresh_summary=True,
         )
 
     del_folder_hint = await resolve_delete_folder_hint(
