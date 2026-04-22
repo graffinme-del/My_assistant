@@ -433,6 +433,13 @@ def looks_like_manual_move_request(text: str) -> bool:
 
 def looks_like_bulk_folder_by_keywords_request(text: str) -> bool:
     t = text.lower()
+    if (
+        any(k in t for k in ("перенеси", "перемести", "отправь"))
+        and ("все документ" in t or "все файлы" in t)
+        and "содерж" in t
+        and ("в папк" in t or "папку " in t or "в дел" in t)
+    ):
+        return True
     return any(k in t for k in ["создай папк", "создай дело", "создай папку", "новая папка", "новое дело"]) and any(
         k in t
         for k in [
@@ -567,6 +574,8 @@ def looks_like_move_all_from_active_case_to_folder(text: str) -> bool:
     if looks_like_show_documents_in_folder_only(text):
         return False
     t = text.lower()
+    if "содерж" in t:
+        return False
     if "создай папк" in t or "создай дело" in t:
         return False
     if ("папк" not in t and "дело" not in t) or not any(k in t for k in ["документ", "файл", "материал"]):
@@ -2196,21 +2205,43 @@ def move_documents_by_chat_command(db: Session, text: str) -> str:
 
 
 def parse_bulk_folder_request(text: str) -> tuple[str, list[str]] | None:
+    low = (text or "").lower()
     title = ""
     m = re.search(r'создай\s+(?:папк[ау]?|дело)\s*[:"«]?\s*([^"\n».]+)', text, flags=re.IGNORECASE)
     if m:
         title = m.group(1).strip(" .:-\"«»")
-    quoted = [q.strip() for q in re.findall(r'"([^"]+)"|«([^»]+)»', text) for q in q if q.strip()]
+    if not title:
+        m_dest = re.search(
+            r"в\s+(?:папк[ау]?|дело)\s+(?:«([^»]+)»|\"([^\"]+)\")",
+            text or "",
+            flags=re.IGNORECASE,
+        )
+        if m_dest:
+            title = (m_dest.group(1) or m_dest.group(2) or "").strip()
+    quoted = [q.strip() for q in re.findall(r'"([^"]+)"|«([^»]+)»', text or "") for q in q if q.strip()]
     keywords: list[str] = []
-    if "содерж" in text.lower():
-        tail = re.split(r"содерж[а-я]*\s*[:]", text, flags=re.IGNORECASE)
+
+    m_mid = re.search(
+        r"содерж[а-я]*(?:\s+фамили[юи])?\s*(.+?)\s+в\s+(?:папк|дело)",
+        text or "",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if m_mid:
+        raw_kw = (m_mid.group(1) or "").strip(" ,.:;\"'«»")
+        raw_kw = re.sub(r"^фамили[юи]\s+", "", raw_kw, flags=re.IGNORECASE).strip()
+        if raw_kw:
+            keywords = [raw_kw]
+
+    if "содерж" in low and not keywords:
+        tail = re.split(r"содерж[а-я]*\s*[:]", text or "", flags=re.IGNORECASE)
         if len(tail) > 1:
             raw = tail[-1]
+            raw = re.split(r"\s+в\s+(?:папк|дело)", raw, flags=re.IGNORECASE)[0]
             keywords = [p.strip(" .:-\"«»") for p in re.split(r"[,\n;]+", raw) if p.strip(" .:-\"«»")]
     if not title and quoted:
-        title = quoted[0]
+        title = quoted[-1]
     if not keywords:
-        keywords = quoted[1:] if len(quoted) > 1 else []
+        keywords = quoted[:-1] if len(quoted) > 1 and title and quoted[-1] == title else (quoted[1:] if len(quoted) > 1 else [])
     deduped: list[str] = []
     seen: set[str] = set()
     for value in keywords:
