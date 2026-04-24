@@ -12,7 +12,7 @@ import zipfile
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from sqlalchemy import inspect, or_, text
+from sqlalchemy import func, inspect, or_, text
 from sqlalchemy.orm import Session
 
 from .assistant_context import (
@@ -459,10 +459,79 @@ def parse_explicit_document_ids_for_open(text: str) -> list[int]:
     return []
 
 
+def parse_document_filename_hint_for_open(text: str) -> str | None:
+    """Имя файла из «покажи документ foo.pdf» или из кавычек «…»."""
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    for pat in (
+        r"«([^»]{2,}\.\w{2,10})»",
+        r'"([^"]{2,}\.\w{2,10})"',
+        r"'([^']{2,}\.\w{2,10})'",
+    ):
+        m = re.search(pat, raw, flags=re.IGNORECASE)
+        if m:
+            s = m.group(1).strip()
+            if len(s) >= 5:
+                return s
+    m = re.search(
+        r"(?i)(?:документ|файл)(?:\s+мне)?\s+(\S+?\.\w{2,10})\b",
+        raw,
+    )
+    if m:
+        return m.group(1).strip().rstrip(".,;:")
+    m = re.search(
+        r"(?i)\b([a-zа-яё0-9._-]{4,}\.(?:pdf|docx?|rtf|zip|png|jpe?g|webp))\b",
+        raw,
+    )
+    if m and re.search(
+        r"(?i)(покажи|покажите|дай|открой|просмотр|скачай|нужен|нужна|файл|документ|download)",
+        raw,
+    ):
+        return m.group(1).strip()
+    return None
+
+
+def _ilike_contains(column, needle: str):
+    esc = (
+        needle.replace("\\", "\\\\")
+        .replace("%", "\\%")
+        .replace("_", "\\_")
+    )
+    return column.ilike(f"%{esc}%", escape="\\")
+
+
+def find_documents_by_filename_hint(db: Session, hint: str, *, limit: int = 12) -> list[Document]:
+    hint = (hint or "").strip().replace("\\", "/").split("/")[-1].strip()
+    if len(hint) < 4:
+        return []
+    hlow = hint.lower()
+    exact = (
+        db.query(Document)
+        .filter(func.lower(Document.filename) == hlow)
+        .order_by(Document.id.desc())
+        .limit(limit)
+        .all()
+    )
+    if exact:
+        return exact
+    return (
+        db.query(Document)
+        .filter(_ilike_contains(Document.filename, hint))
+        .order_by(Document.id.desc())
+        .limit(limit)
+        .all()
+    )
+
+
 def looks_like_single_document_open_request(text: str) -> bool:
-    """«Дай документ 254», «покажи файл [12]» — не список всей папки."""
+    """«Дай документ 254», «покажи файл [12]», «документ foo.pdf» — не список всей папки."""
     ids = parse_explicit_document_ids_for_open(text)
-    if not ids or len(ids) > 5:
+    fh = parse_document_filename_hint_for_open(text)
+    if ids:
+        if len(ids) > 5:
+            return False
+    elif not fh or len(fh.strip()) < 5:
         return False
     t = (text or "").lower()
     verbs = (
@@ -504,9 +573,17 @@ def looks_like_single_document_open_request(text: str) -> bool:
         )
     ):
         return False
-    if any(n in t for n in ("документ", "файл", "pdf", "вложен")) or re.search(r"\[\d+\]", text or ""):
-        return True
-    return False
+    if ids:
+        if any(n in t for n in ("документ", "файл", "pdf", "вложен")) or re.search(
+            r"\[\d+\]", text or ""
+        ):
+            return True
+        return False
+    return bool(fh) and (
+        "документ" in t
+        or "файл" in t
+        or bool(re.search(r"\.(pdf|docx?|rtf|zip|png|jpe?g|webp)\b", fh, re.I))
+    )
 
 
 def looks_like_documents_list_request(text: str) -> bool:
@@ -4456,11 +4533,9 @@ async def assistant_ingest_text(
         ids_early = parse_explicit_document_ids_for_open(text)
         parts_early: list[str] = []
         reply_case_early: Case | None = None
-        for did in (ids_early or [])[:5]:
-            doc = db.query(Document).filter(Document.id == did).first()
-            if not doc:
-                parts_early.append(f"Документ **[{did}]** не найден (возможно, неверный номер).")
-                continue
+
+        def _append_open_doc_reply(doc: Document) -> None:
+            nonlocal reply_case_early
             c = db.query(Case).filter(Case.id == doc.case_id).first()
             reply_case_early = c or reply_case_early
             ct = c.title if c else "?"
@@ -4473,6 +4548,36 @@ async def assistant_ingest_text(
                 f"Выжимка: напишите «выжимка {doc.id}» "
                 f"(или API /api/documents/{doc.id}/summary)"
             )
+
+        if ids_early:
+            for did in ids_early[:5]:
+                doc = db.query(Document).filter(Document.id == did).first()
+                if not doc:
+                    parts_early.append(f"Документ **[{did}]** не найден (возможно, неверный номер).")
+                    continue
+                _append_open_doc_reply(doc)
+        else:
+            hint = (parse_document_filename_hint_for_open(text) or "").strip()
+            found = find_documents_by_filename_hint(db, hint, limit=12) if hint else []
+            if not found:
+                parts_early.append(
+                    f"Файл «{hint}» не найден среди загруженных документов. "
+                    "Проверьте имя (как в списке) или откройте по номеру: покажи документ [id]."
+                )
+            elif len(found) == 1:
+                _append_open_doc_reply(found[0])
+            elif len(found) <= 5:
+                lines = "\n".join(f"- **[{d.id}]** {d.filename}" for d in found)
+                parts_early.append(
+                    f"По имени «{hint}» нашлось несколько совпадений. Уточните по номеру:\n{lines}\n\n"
+                    f"Например: покажи документ {found[0].id}"
+                )
+            else:
+                head = "\n".join(f"- **[{d.id}]** {d.filename}" for d in found[:5])
+                parts_early.append(
+                    f"По «{hint}» слишком много совпадений (показаны первые 5 из {len(found)}):\n{head}\n…\n"
+                    "Сузьте имя файла или укажите номер [id]."
+                )
         if parts_early:
             reply_open = "\n\n".join(parts_early)
             return await finalize_reply(
