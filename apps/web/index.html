@@ -692,9 +692,52 @@
         renderCasesList();
       }
 
+      function authApiHeaders() {
+        return { "X-API-Token": storage.apiToken || "owner-dev-token" };
+      }
+
+      async function fetchDocumentAsBlob(docId, { inline = false } = {}) {
+        const q = inline ? "?inline=1" : "";
+        const url = resolveApiRequestUrl(`/documents/${docId}/download${q}`);
+        const res = await fetch(url, { headers: authApiHeaders() });
+        if (!res.ok) {
+          let detail = "";
+          try {
+            detail = await res.text();
+          } catch (_e) {}
+          const hint =
+            res.status === 401
+              ? "401: нет доступа. В консоли (F12) → Application → Local Storage задайте apiToken как OWNER_TOKEN из .env сервера."
+              : String(res.status);
+          throw new Error(detail ? hint + " — " + detail.slice(0, 160) : hint);
+        }
+        return await res.blob();
+      }
+
+      function saveBlobAsDownload(blob, filename) {
+        const u = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = u;
+        a.download = filename || "document";
+        a.rel = "noopener";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(u), 120_000);
+      }
+
+      function revokeFrameBlobUrl(frame) {
+        if (!frame || !frame.dataset.blobUrl) return;
+        try {
+          URL.revokeObjectURL(frame.dataset.blobUrl);
+        } catch (_e) {}
+        delete frame.dataset.blobUrl;
+      }
+
       function closeDocViewer() {
         const modal = el("docViewerModal");
         const frame = el("docViewerFrame");
+        revokeFrameBlobUrl(frame);
         if (frame) frame.src = "about:blank";
         if (modal) {
           modal.classList.remove("open");
@@ -702,14 +745,9 @@
         }
       }
 
-      function openDocumentViewer(doc) {
-        const token = storage.apiToken;
-        const pathDn = `/documents/${doc.id}/download`;
-        const urlInline =
-          resolveApiRequestUrl(pathDn) + "?token=" + encodeURIComponent(token) + "&inline=1";
-        const urlAttach = resolveApiRequestUrl(pathDn) + "?token=" + encodeURIComponent(token);
-        const fname = (doc.filename || "").toLowerCase();
-        const ext = fname.includes(".") ? fname.split(".").pop() : "";
+      async function openDocumentViewer(doc) {
+        const fnameRaw = (doc.filename || "").toLowerCase();
+        const ext = fnameRaw.includes(".") ? fnameRaw.split(".").pop() : "";
         const iframeOk = [
           "pdf",
           "png",
@@ -727,7 +765,16 @@
 
         el("docViewerTitle").textContent = doc.filename || "Документ " + doc.id;
         const dl = el("docViewerDownload");
-        dl.href = urlAttach;
+        dl.href = "#";
+        dl.onclick = async (ev) => {
+          ev.preventDefault();
+          try {
+            const blob = await fetchDocumentAsBlob(doc.id, { inline: false });
+            saveBlobAsDownload(blob, doc.filename || "document-" + doc.id);
+          } catch (e) {
+            alert("Не удалось скачать: " + (e && e.message ? e.message : e));
+          }
+        };
 
         const frame = el("docViewerFrame");
         const fb = el("docViewerFallback");
@@ -737,10 +784,27 @@
           frame.style.display = "block";
           fb.style.display = "none";
           fb.innerHTML = "";
-          frame.src = urlInline;
+          revokeFrameBlobUrl(frame);
+          frame.src = "about:blank";
+          try {
+            const blob = await fetchDocumentAsBlob(doc.id, { inline: true });
+            const objUrl = URL.createObjectURL(blob);
+            frame.dataset.blobUrl = objUrl;
+            frame.src = objUrl;
+          } catch (e) {
+            frame.style.display = "none";
+            fb.style.display = "block";
+            fb.innerHTML = "";
+            const p1 = document.createElement("p");
+            p1.className = "error";
+            p1.textContent =
+              "Не удалось открыть файл: " + (e && e.message ? e.message : e);
+            fb.appendChild(p1);
+          }
         } else {
           frame.style.display = "none";
           frame.src = "about:blank";
+          revokeFrameBlobUrl(frame);
           fb.style.display = "block";
           fb.innerHTML = "";
           const p1 = document.createElement("p");
@@ -750,10 +814,18 @@
           fb.appendChild(p1);
           const p2 = document.createElement("p");
           const a = document.createElement("a");
-          a.href = urlAttach;
-          a.target = "_blank";
+          a.href = "#";
           a.rel = "noopener";
           a.textContent = "Скачать файл";
+          a.onclick = async (ev) => {
+            ev.preventDefault();
+            try {
+              const blob = await fetchDocumentAsBlob(doc.id, { inline: false });
+              saveBlobAsDownload(blob, doc.filename || "document-" + doc.id);
+            } catch (err) {
+              alert("Не удалось скачать: " + (err && err.message ? err.message : err));
+            }
+          };
           p2.appendChild(a);
           fb.appendChild(p2);
         }
@@ -1023,22 +1095,6 @@
 
       function renderAssistantMessage(container, text) {
         const lines = String(text).replace(/\r\n/g, "\n").split("\n");
-        const apiToken = () => storage.apiToken || "owner-dev-token";
-
-        /** Как fetch()/openDocumentViewer: учитывает localStorage apiBase, не только origin страницы. */
-        function withToken(absolutePath) {
-          let raw = String(absolutePath || "").trim();
-          const qAt = raw.indexOf("?");
-          let pathPart = qAt >= 0 ? raw.slice(0, qAt) : raw;
-          const query = qAt >= 0 ? raw.slice(qAt + 1) : "";
-          if (pathPart.startsWith("/api")) pathPart = pathPart.slice(4);
-          if (!pathPart.startsWith("/")) pathPart = "/" + pathPart.replace(/^\/+/, "");
-          let url = resolveApiRequestUrl(pathPart);
-          const params = new URLSearchParams(query);
-          params.set("token", apiToken());
-          const qs = params.toString();
-          return qs ? `${url}?${qs}` : url;
-        }
 
         function findDocUrls(lineN) {
           const re =
@@ -1118,30 +1174,37 @@
             if (visible) row.append(document.createTextNode(visible + " "));
 
             const vid = documentId;
-            const fname =
-              String(contextFilename || "").split(/\s+/)[0] || "document.pdf";
+            const fnameFull =
+              (contextFilename && contextFilename.trim()) || "document.pdf";
             if (!viewPath) viewPath = `/api/documents/${vid}/view`;
             const vA = document.createElement("a");
-            vA.href = withToken(viewPath);
+            vA.href = "#";
             vA.textContent = "Просмотр";
-            vA.target = "_blank";
             vA.rel = "noopener noreferrer";
             vA.className = "downloadBtn viewBtn";
             vA.onclick = (ev) => {
               if (ev.ctrlKey || ev.metaKey || ev.shiftKey || ev.button !== 0) return;
               ev.preventDefault();
-              openDocumentViewer({ id: Number(vid), filename: fname });
+              openDocumentViewer({ id: Number(vid), filename: fnameFull });
             };
             row.append(vA);
             row.append(document.createTextNode(" "));
 
             if (!dlPath) dlPath = `/api/documents/${vid}/download`;
             const dA = document.createElement("a");
-            dA.href = withToken(dlPath);
+            dA.href = "#";
             dA.textContent = "Скачать";
-            dA.target = "_blank";
             dA.rel = "noopener noreferrer";
             dA.className = "downloadBtn";
+            dA.onclick = async (ev) => {
+              ev.preventDefault();
+              try {
+                const blob = await fetchDocumentAsBlob(Number(vid), { inline: false });
+                saveBlobAsDownload(blob, fnameFull);
+              } catch (e) {
+                alert("Скачивание не удалось: " + (e && e.message ? e.message : e));
+              }
+            };
             row.append(dA);
             row.append(document.createTextNode(" "));
 
@@ -1169,25 +1232,32 @@
           const before = (m[1] || "").replace(/скачать:\s*$/i, "").trimEnd();
           const documentIdLegacy = m[2];
           const after = (m[4] || "").trim();
-          const legFname =
-            (contextFilename && String(contextDocId) === String(documentIdLegacy)
-              ? contextFilename
-              : "document.pdf"
-            )
-              .split(/\s+/)[0];
+          const legFnameFull =
+            contextFilename && String(contextDocId) === String(documentIdLegacy)
+              ? contextFilename.trim()
+              : "document.pdf";
           if (before) row.append(document.createTextNode(before + " "));
           const link = document.createElement("a");
-          link.href = withToken(m[3]);
+          link.href = "#";
           link.textContent = "Скачать";
-          link.target = "_blank";
           link.rel = "noopener noreferrer";
           link.className = "downloadBtn";
+          link.onclick = async (ev) => {
+            ev.preventDefault();
+            try {
+              const blob = await fetchDocumentAsBlob(Number(documentIdLegacy), {
+                inline: false,
+              });
+              saveBlobAsDownload(blob, legFnameFull);
+            } catch (e) {
+              alert("Скачивание не удалось: " + (e && e.message ? e.message : e));
+            }
+          };
           row.append(link);
           row.append(document.createTextNode(" "));
           const viewLink = document.createElement("a");
-          viewLink.href = withToken(`/api/documents/${documentIdLegacy}/view`);
+          viewLink.href = "#";
           viewLink.textContent = "Просмотр";
-          viewLink.target = "_blank";
           viewLink.rel = "noopener noreferrer";
           viewLink.className = "downloadBtn viewBtn";
           viewLink.onclick = (ev) => {
@@ -1195,7 +1265,7 @@
             ev.preventDefault();
             openDocumentViewer({
               id: Number(documentIdLegacy),
-              filename: legFname,
+              filename: legFnameFull,
             });
           };
           row.append(viewLink);
@@ -1225,9 +1295,7 @@
 
         const head = t.match(/\*\*\[(\d+)\]\*\*\s*([^\n\r]+)/);
         let docId = head ? head[1] : null;
-        const fname = head
-          ? (head[2].trim().split(/\s+/)[0] || "document.pdf")
-          : "document.pdf";
+        const fnameFull = head ? head[2].trim() || "document.pdf" : "document.pdf";
         if (!docId) {
           const vm = t.match(/\/api\/documents\/(\d+)\/view/i);
           const dm = t.match(/\/api\/documents\/(\d+)\/download/i);
@@ -1235,20 +1303,6 @@
           docId = vm ? vm[1] : dm ? dm[1] : sm ? sm[1] : null;
         }
         if (!docId) return;
-
-        const apiTok = () => storage.apiToken || "owner-dev-token";
-        function withTok(absolutePath) {
-          let raw = String(absolutePath || "").trim();
-          const qAt = raw.indexOf("?");
-          let pathPart = qAt >= 0 ? raw.slice(0, qAt) : raw;
-          const query = qAt >= 0 ? raw.slice(qAt + 1) : "";
-          if (pathPart.startsWith("/api")) pathPart = pathPart.slice(4);
-          if (!pathPart.startsWith("/")) pathPart = "/" + pathPart.replace(/^\/+/, "");
-          const url = resolveApiRequestUrl(pathPart);
-          const params = new URLSearchParams(query);
-          params.set("token", apiTok());
-          return `${url}?${params.toString()}`;
-        }
 
         const row = document.createElement("div");
         row.className = "docChatFallbackActions";
@@ -1263,25 +1317,32 @@
         row.appendChild(label);
 
         const vA = document.createElement("a");
-        vA.href = withTok(`/api/documents/${docId}/view`);
+        vA.href = "#";
         vA.textContent = "Просмотр";
-        vA.target = "_blank";
         vA.rel = "noopener noreferrer";
         vA.className = "downloadBtn viewBtn";
         vA.onclick = (ev) => {
           if (ev.ctrlKey || ev.metaKey || ev.shiftKey || ev.button !== 0) return;
           ev.preventDefault();
-          openDocumentViewer({ id: Number(docId), filename: fname });
+          openDocumentViewer({ id: Number(docId), filename: fnameFull });
         };
         row.appendChild(vA);
         row.appendChild(document.createTextNode(" "));
 
         const dA = document.createElement("a");
-        dA.href = withTok(`/api/documents/${docId}/download`);
+        dA.href = "#";
         dA.textContent = "Скачать";
-        dA.target = "_blank";
         dA.rel = "noopener noreferrer";
         dA.className = "downloadBtn";
+        dA.onclick = async (ev) => {
+          ev.preventDefault();
+          try {
+            const blob = await fetchDocumentAsBlob(Number(docId), { inline: false });
+            saveBlobAsDownload(blob, fnameFull);
+          } catch (e) {
+            alert("Скачивание не удалось: " + (e && e.message ? e.message : e));
+          }
+        };
         row.appendChild(dA);
         row.appendChild(document.createTextNode(" "));
 
