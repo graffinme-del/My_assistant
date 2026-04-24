@@ -154,6 +154,13 @@ class ConversationMessageOut(BaseModel):
         from_attributes = True
 
 
+class DocumentChatAction(BaseModel):
+    """Явные цели для кнопок «Просмотр / Скачать» в веб-чате (не зависят от разбора текста reply)."""
+
+    document_id: int
+    filename: str = ""
+
+
 class AssistantIngestOut(BaseModel):
     case_id: int
     case_number: str
@@ -164,6 +171,7 @@ class AssistantIngestOut(BaseModel):
     reply: str = ""
     user_message_id: int | None = None
     assistant_message_id: int | None = None
+    document_actions: list[DocumentChatAction] = Field(default_factory=list)
 
 
 class BulkIngestOut(BaseModel):

@@ -131,6 +131,7 @@ from .schemas import (
     AssistantIngestIn,
     AssistantIngestOut,
     ConversationMessageOut,
+    DocumentChatAction,
     SummaryOut,
     TaskCreate,
     TaskOut,
@@ -4406,6 +4407,7 @@ async def assistant_ingest_text(
         created_tasks: int = 0,
         next_hearing_date=None,
         refresh_summary: bool = False,
+        document_actions: list[DocumentChatAction] | None = None,
     ) -> AssistantIngestOut:
         conversation.active_case_id = case.id
         db.add(conversation)
@@ -4431,6 +4433,7 @@ async def assistant_ingest_text(
             reply=reply_text,
             user_message_id=user_message_row.id,
             assistant_message_id=assistant_message_row.id,
+            document_actions=list(document_actions or []),
         )
 
     cases = db.query(Case).all()
@@ -4540,10 +4543,14 @@ async def assistant_ingest_text(
         )
         ids_early = parse_explicit_document_ids_for_open(text)
         parts_early: list[str] = []
+        actions_early: list[DocumentChatAction] = []
         reply_case_early: Case | None = None
 
         def _append_open_doc_reply(doc: Document) -> None:
             nonlocal reply_case_early
+            actions_early.append(
+                DocumentChatAction(document_id=doc.id, filename=doc.filename or "document.pdf")
+            )
             c = db.query(Case).filter(Case.id == doc.case_id).first()
             reply_case_early = c or reply_case_early
             ct = c.title if c else "?"
@@ -4580,18 +4587,27 @@ async def assistant_ingest_text(
                     f"По имени «{hint}» нашлось несколько совпадений. Уточните по номеру:\n{lines}\n\n"
                     f"Например: покажи документ {found[0].id}"
                 )
+                for d in found:
+                    actions_early.append(
+                        DocumentChatAction(document_id=d.id, filename=d.filename or "document.pdf")
+                    )
             else:
                 head = "\n".join(f"- **[{d.id}]** {d.filename}" for d in found[:5])
                 parts_early.append(
                     f"По «{hint}» слишком много совпадений (показаны первые 5 из {len(found)}):\n{head}\n…\n"
                     "Сузьте имя файла или укажите номер [id]."
                 )
+                for d in found[:5]:
+                    actions_early.append(
+                        DocumentChatAction(document_id=d.id, filename=d.filename or "document.pdf")
+                    )
         if parts_early:
             reply_open = "\n\n".join(parts_early)
             return await finalize_reply(
                 case=reply_case_early or command_case_early,
                 reply_text=reply_open,
                 mode="document-open-by-id",
+                document_actions=actions_early,
             )
 
     if settings.chat_tools_router_enabled and settings.openai_api_key.strip():

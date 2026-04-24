@@ -1359,6 +1359,81 @@
         container.appendChild(row);
       }
 
+      /** Кнопки из поля API document_actions — без разбора текста (устраняет «нет кнопок»). */
+      function appendDocumentStructuredActions(container, actions) {
+        if (!container || !actions || !actions.length) return;
+        const wrap = document.createElement("div");
+        wrap.className = "docChatStructuredActions";
+        wrap.style.marginTop = "10px";
+        for (let i = 0; i < actions.length; i++) {
+          const a = actions[i];
+          const docId = Number(
+            a.document_id != null ? a.document_id : a.documentId
+          );
+          const fname =
+            String(a.filename || "document.pdf").trim() || "document.pdf";
+          if (!docId) continue;
+
+          const row = document.createElement("div");
+          row.className = "docChatStructuredRow";
+          row.style.marginTop = i ? "8px" : "0";
+          row.style.paddingTop = i ? "8px" : "0";
+          if (i) row.style.borderTop = "1px solid #e2e5e9";
+
+          const title = document.createElement("div");
+          title.style.fontSize = "12px";
+          title.style.marginBottom = "4px";
+          const b = document.createElement("strong");
+          b.textContent = "[" + docId + "] ";
+          title.appendChild(b);
+          title.appendChild(document.createTextNode(fname));
+          row.appendChild(title);
+
+          const vA = document.createElement("a");
+          vA.href = "#";
+          vA.textContent = "Просмотр";
+          vA.rel = "noopener noreferrer";
+          vA.className = "downloadBtn viewBtn";
+          vA.onclick = (ev) => {
+            if (ev.ctrlKey || ev.metaKey || ev.shiftKey || ev.button !== 0) return;
+            ev.preventDefault();
+            openDocumentViewer({ id: docId, filename: fname });
+          };
+          row.appendChild(vA);
+          row.appendChild(document.createTextNode(" "));
+
+          const dA = document.createElement("a");
+          dA.href = "#";
+          dA.textContent = "Скачать";
+          dA.rel = "noopener noreferrer";
+          dA.className = "downloadBtn";
+          dA.onclick = async (ev) => {
+            ev.preventDefault();
+            try {
+              const blob = await fetchDocumentAsBlob(docId, { inline: false });
+              saveBlobAsDownload(blob, fname);
+            } catch (e) {
+              alert("Скачивание не удалось: " + (e && e.message ? e.message : e));
+            }
+          };
+          row.appendChild(dA);
+          row.appendChild(document.createTextNode(" "));
+
+          const summaryBtn = document.createElement("a");
+          summaryBtn.href = "#";
+          summaryBtn.textContent = "Выжимка";
+          summaryBtn.className = "downloadBtn summaryBtn";
+          summaryBtn.onclick = (ev) => {
+            ev.preventDefault();
+            showDocumentSummary(docId);
+          };
+          row.appendChild(summaryBtn);
+
+          wrap.appendChild(row);
+        }
+        container.appendChild(wrap);
+      }
+
       function attachDeleteToMessageBox(box, messageId) {
         if (messageId == null || messageId === "") return;
         const mid = Number(messageId);
@@ -1387,30 +1462,41 @@
         header.appendChild(del);
       }
 
-      function appendChat(role, text, messageId) {
+      function appendChat(role, text, messageId, documentActions) {
         const log = el("chatLog");
         const box = document.createElement("div");
-        box.className = role === "user" ? "msg userMsg" : "msg assistantMsg";
+        const roleNorm = String(role || "").trim().toLowerCase();
+        const isUser = roleNorm === "user";
+        box.className = isUser ? "msg userMsg" : "msg assistantMsg";
 
         const header = document.createElement("div");
         header.className = "msgHeader";
         const who = document.createElement("span");
         who.className = "muted";
         who.style.fontSize = "12px";
-        who.textContent = role === "user" ? "Вы" : "Ассистент";
+        who.textContent = isUser ? "Вы" : "Ассистент";
         header.appendChild(who);
         box.appendChild(header);
 
         const body = document.createElement("div");
         body.className = "msgBody";
-        if (role === "assistant") {
-          try {
-            renderAssistantMessage(body, text);
-          } catch (err) {
-            console.error("renderAssistantMessage", err);
-            body.textContent = String(text || "");
+        if (!isUser) {
+          const da = Array.isArray(documentActions) ? documentActions : [];
+          if (da.length) {
+            const pre = document.createElement("div");
+            pre.style.whiteSpace = "pre-wrap";
+            pre.textContent = String(text || "");
+            body.appendChild(pre);
+            appendDocumentStructuredActions(body, da);
+          } else {
+            try {
+              renderAssistantMessage(body, text);
+            } catch (err) {
+              console.error("renderAssistantMessage", err);
+              body.textContent = String(text || "");
+            }
+            injectDocumentChatActionsIfMissing(body, text);
           }
-          injectDocumentChatActionsIfMissing(body, text);
         } else {
           const pre = document.createElement("pre");
           pre.textContent = text;
@@ -1474,7 +1560,12 @@
               ", режим " +
               result.mode;
           patchLastUserMessageId(result.user_message_id);
-          appendChat("assistant", msg, result.assistant_message_id);
+          appendChat(
+            "assistant",
+            msg,
+            result.assistant_message_id,
+            result.document_actions || result.documentActions || []
+          );
         } catch (e) {
           appendChat("assistant", "Ошибка: " + (e && e.message ? e.message : String(e)));
         }
