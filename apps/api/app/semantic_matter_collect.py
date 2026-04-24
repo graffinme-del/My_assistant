@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from .ai_service import llm_system_user
 from .case_number import arbitr_case_number_lookup_keys, normalize_arbitr_case_number
 from .config import settings
-from .models import Case, CaseTag, Conversation, Document, PendingMovePlan
+from .models import Case, CaseEvent, CaseTag, Conversation, Document, PendingMovePlan
 
 
 def _strip_json_fence(raw: str) -> str:
@@ -179,6 +179,90 @@ def resolve_optional_source_case_only(
     return None
 
 
+def wants_semantic_collect_preview_only(text: str) -> bool:
+    """Явный запрос только показать кандидатов без переноса."""
+    t = (text or "").lower()
+    if "не только список" in t or "не только покажи" in t:
+        return False
+    return any(
+        m in t
+        for m in (
+            "только список",
+            "только покажи",
+            "без переноса",
+            "не переноси пока",
+            "не переносить пока",
+            "сначала покажи",
+            "сначала список",
+            "покажи кандидат",
+            "только кандидат",
+            "предпросмотр",
+            "без автоматического переноса",
+        )
+    )
+
+
+def _doc_matches_case_numbers(doc: Document, case: Case | None) -> bool:
+    """Номер дела из карточки встречается в имени файла или начале текста PDF."""
+    if not case:
+        return False
+    cn = (case.case_number or "").strip()
+    if not cn or cn == "UNSORTED":
+        return False
+    keys = [k for k in arbitr_case_number_lookup_keys(cn) if k and len(str(k).replace(" ", "")) >= 4]
+    if not keys:
+        keys = [normalize_arbitr_case_number(cn)]
+    blob = f"{doc.filename}\n{(doc.extracted_text or '')[:4000]}"
+    blob_nospace = re.sub(r"[\s_]+", "", blob.upper())
+    for k in keys:
+        ku = str(k).upper().replace(" ", "")
+        if len(ku) < 4:
+            continue
+        if ku in blob.upper().replace(" ", "") or ku in blob_nospace:
+            return True
+    return False
+
+
+def _heuristic_semantic_move(
+    doc: Document,
+    target: Case,
+    source_only: Case | None,
+) -> tuple[bool, str]:
+    if _doc_matches_case_numbers(doc, target):
+        return True, "совпадение номера дела с целевой папкой"
+    if source_only and _doc_matches_case_numbers(doc, source_only):
+        return True, "в материале тот же номер, что у исходной папки"
+    return False, ""
+
+
+def _execute_semantic_moves(db: Session, target: Case, docs: list[Document]) -> int:
+    """Перенос без PendingMovePlan (сразу после отбора)."""
+    n = 0
+    for doc in docs:
+        old_id = doc.case_id
+        if old_id == target.id:
+            continue
+        doc.case_id = target.id
+        db.add(
+            CaseEvent(
+                case_id=target.id,
+                event_type="document_reclassified",
+                body=f'Документ "{doc.filename}" перенесён автоматически (семантический сбор).',
+            )
+        )
+        db.add(
+            CaseEvent(
+                case_id=old_id,
+                event_type="document_reclassified",
+                body=f'Документ "{doc.filename}" перенесён в «{target.title}» (семантический сбор).',
+            )
+        )
+        n += 1
+    if n:
+        db.commit()
+    return n
+
+
 def looks_like_semantic_matter_collect_request(text: str) -> bool:
     """Перенос по смыслу/контексту во целевую папку со всех остальных."""
     t = (text or "").lower()
@@ -283,7 +367,9 @@ async def _llm_classify_batch(
         "Смотри номер дела во фрагменте и в имени файла, стороны, предмет, связь с номером целевой папки.\n"
         "Если документ явно относится к **другому** самостоятельному делу (другой базовый номер без связи с целевым) — "
         "`move_to_target`: false.\n"
-        "Если неясно или мало текста — консервативно false.\n"
+        "Если **номер дела в файле/фрагменте совпадает** с номером целевой карточки (или это явно то же производство) — "
+        "`move_to_target`: true, даже при коротком фрагменте.\n"
+        "Если совсем неясно и номера нет — false.\n"
         "Верни **только JSON**: "
         '{"decisions":[{"document_id":число,"move_to_target":true/false,"reason":"кратко по-русски"}]}'
     )
@@ -375,12 +461,18 @@ async def preview_semantic_collect_into_case(
     to_move: list[Document] = []
     reasons: dict[int, str] = {}
     for doc, _src in candidates:
-        if doc.id not in decisions:
-            continue
-        move, reason = decisions[doc.id]
+        move = False
+        reason = ""
+        if doc.id in decisions:
+            move, reason = decisions[doc.id]
         if move:
             to_move.append(doc)
             reasons[doc.id] = reason
+            continue
+        ok_h, why_h = _heuristic_semantic_move(doc, target, source_only)
+        if ok_h:
+            to_move.append(doc)
+            reasons[doc.id] = why_h
 
     if not to_move:
         where = f'в папке «{source_only.title}»' if source_only else "в других папках"
@@ -389,6 +481,40 @@ async def preview_semantic_collect_into_case(
             f'«{target.title}». Проверьте распознавание PDF или уточните формулировку (ФИО, номер дела).',
             target,
         )
+
+    scope_line = (
+        f"Область разбора: **только** папка «{source_only.title}» ({source_only.case_number})."
+        if source_only
+        else "Область разбора: все папки **кроме** целевой."
+    )
+
+    preview_only = wants_semantic_collect_preview_only(text)
+    if not preview_only:
+        moved_n = _execute_semantic_moves(db, target, to_move)
+        lines = [
+            f'**Семантический сбор** — перенёс **{moved_n}** документ(ов) в «{target.title}» ({target.case_number}).',
+            "",
+            scope_line,
+            f"Просмотрено кандидатов: {len(candidates)}; отобрано к переносу: **{len(to_move)}**.",
+            "",
+            "Перенос выполнен **сразу**, чтобы не приходилось сверять список вручную. "
+            "Если нужен только предпросмотр без переноса — напишите фразу **«только список»** или **«без переноса»** в том же запросе.",
+            "",
+            "_Фрагмент перенесённых (до 15):_",
+        ]
+        for idx, doc in enumerate(to_move[:15], start=1):
+            why = reasons.get(doc.id, "")
+            if len(why) > 120:
+                why = why[:118] + "…"
+            lines.append(f"{idx}. [{doc.id}] {doc.filename} — _{why}_")
+        if len(to_move) > 15:
+            lines.append(f"... и ещё {len(to_move) - 15}.")
+        if len(candidates) >= max_candidates:
+            lines.append("")
+            lines.append(
+                f"_(Просмотрено не более {max_candidates} документов; при необходимости повторите запрос.)_"
+            )
+        return "\n".join(lines), target
 
     db.query(PendingMovePlan).filter(PendingMovePlan.case_id == target.id).delete()
     db.add(
@@ -404,19 +530,14 @@ async def preview_semantic_collect_into_case(
     )
     db.commit()
 
-    scope_line = (
-        f"Область разбора: **только** папка «{source_only.title}» ({source_only.case_number})."
-        if source_only
-        else "Область разбора: все папки **кроме** целевой."
-    )
-    lines: list[str] = [
-        f'**Семантический сбор** в папку «{target.title}» ({target.case_number}).',
+    lines = [
+        f'**Семантический сбор** (только список) в папку «{target.title}» ({target.case_number}).',
         "",
         scope_line,
         "Ниже документы, которые модель считает относящимися к этому делу по тексту и контексту.",
         f"Кандидатов просмотрено: {len(candidates)}; к переносу отобрано: **{len(to_move)}**.",
         "",
-        "Проверьте список и ответьте: `Да, перенеси все` или `Да, перенеси все, кроме 3, 7`",
+        "Чтобы выполнить перенос, ответьте: `Да, перенеси все` или `Да, перенеси все, кроме 3, 7`",
         "",
     ]
     for idx, doc in enumerate(to_move[:55], start=1):

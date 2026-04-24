@@ -3015,11 +3015,14 @@ def apply_pending_move_plan(db: Session, text: str) -> tuple[str, Case | None]:
             if raw_num:
                 alternate_moves[int(raw_num)] = alt_case
 
-    exclude_numbers = {
-        int(x)
-        for x in re.findall(r"\b(\d+)\b", text)
-        if int(x) not in alternate_moves
-    }
+    exclude_numbers: set[int] = set()
+    for m in re.finditer(
+        r"(?:кроме|исключи|исключить|не\s+переноси|без)\s*:?\s*([\d\s,;и]+)",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        for x in re.findall(r"\d+", m.group(1)):
+            exclude_numbers.add(int(x))
     docs = db.query(Document).filter(Document.id.in_(planned_ids)).order_by(Document.created_at.asc()).all()
     moved: list[str] = []
     moved_total = 0
