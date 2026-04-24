@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import defaultdict
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -22,7 +23,7 @@ def _strip_json_fence(raw: str) -> str:
     return s
 
 
-def _doc_snippet(doc: Document, limit: int = 480) -> str:
+def _doc_snippet(doc: Document, limit: int = 720) -> str:
     t = (doc.extracted_text or "").strip()
     t = re.sub(r"\s+", " ", t)[:limit]
     return t if t else "(текст не извлечён)"
@@ -202,6 +203,102 @@ def wants_semantic_collect_preview_only(text: str) -> bool:
     )
 
 
+_TAG_KIND_ORDER = {"participant": 0, "judge": 1, "alias": 2, "keyword": 3}
+
+_STOP_TOKENS = frozenset(
+    {
+        "банк",
+        "суд",
+        "дело",
+        "год",
+        "копия",
+        "лист",
+        "страница",
+        "город",
+        "улица",
+        "номер",
+        "дата",
+        "москва",
+        "россия",
+    }
+)
+
+
+def _load_case_tags_for_collect(db: Session, case_id: int, *, limit: int = 120) -> list[CaseTag]:
+    rows = (
+        db.query(CaseTag)
+        .filter(CaseTag.case_id == case_id)
+        .order_by(CaseTag.id.asc())
+        .limit(limit)
+        .all()
+    )
+    rows.sort(key=lambda t: (_TAG_KIND_ORDER.get(t.kind, 9), (t.value or "").lower()))
+    return rows
+
+
+def _tokens_from_tag_value(value: str) -> list[str]:
+    out: list[str] = []
+    for part in re.split(r"[\s,;]+", (value or "").strip()):
+        w = re.sub(r"[^А-ЯЁа-яёA-Za-z\-]", "", part)
+        wl = w.lower()
+        if len(wl) >= 4 and wl not in _STOP_TOKENS:
+            out.append(wl)
+    return out
+
+
+def _ru_token_in_blob(blob_lc: str, word: str) -> bool:
+    if len(word) < 4:
+        return False
+    if word in blob_lc:
+        return True
+    if len(word) >= 5:
+        stem = word.rstrip("аяуюоеёиыь")
+        if len(stem) >= 4 and stem in blob_lc:
+            return True
+    return False
+
+
+def _doc_matches_case_tags(doc: Document, tags: list[CaseTag]) -> tuple[bool, str]:
+    """Совпадение с участниками, алиасами, судьями и длинными ключевыми фразами из карточки."""
+    if not tags:
+        return False, ""
+    blob = f"{doc.filename}\n{(doc.extracted_text or '')[:14000]}"
+    blob_lc = blob.lower()
+
+    for t in tags:
+        if t.kind != "keyword":
+            continue
+        v = (t.value or "").strip()
+        if len(v) >= 10 and v.lower() in blob_lc:
+            shown = f"{v[:70]}…" if len(v) > 70 else v
+            return True, f"в материале есть ключевая фраза из карточки ({shown})"
+
+    participant_like = [t for t in tags if t.kind in ("participant", "alias", "judge")]
+    if not participant_like:
+        participant_like = [t for t in tags if t.kind == "keyword"]
+
+    hits = 0
+    names: list[str] = []
+    for t in participant_like:
+        toks = _tokens_from_tag_value(t.value)
+        matched = False
+        for tok in toks[:8]:
+            if _ru_token_in_blob(blob_lc, tok):
+                matched = True
+                break
+        if matched:
+            hits += 1
+            names.append((t.value or "").strip()[:55])
+
+    n_pl = len(participant_like)
+    need = 2 if n_pl >= 3 else 1
+    if hits >= need:
+        tail = ", ".join(names[:4])
+        return True, f"совпадение лиц/участников из карточки ({hits} из {n_pl}): {tail}"
+
+    return False, ""
+
+
 def _doc_matches_case_numbers(doc: Document, case: Case | None) -> bool:
     """Номер дела из карточки встречается в имени файла или начале текста PDF."""
     if not case:
@@ -227,11 +324,15 @@ def _heuristic_semantic_move(
     doc: Document,
     target: Case,
     source_only: Case | None,
+    target_tags: list[CaseTag],
 ) -> tuple[bool, str]:
     if _doc_matches_case_numbers(doc, target):
         return True, "совпадение номера дела с целевой папкой"
     if source_only and _doc_matches_case_numbers(doc, source_only):
         return True, "в материале тот же номер, что у исходной папки"
+    ok_t, why_t = _doc_matches_case_tags(doc, target_tags)
+    if ok_t:
+        return True, why_t
     return False, ""
 
 
@@ -334,16 +435,43 @@ def resolve_target_case_for_collect(
     return None
 
 
-def _target_profile_lines(db: Session, target: Case) -> str:
-    tags = db.query(CaseTag).filter(CaseTag.case_id == target.id).limit(24).all()
-    tag_line = ", ".join(f"{tg.kind}:{tg.value}" for tg in tags) or "нет"
+def _target_profile_lines(target: Case, tags: list[CaseTag]) -> str:
     keys = ", ".join(arbitr_case_number_lookup_keys(target.case_number)) or target.case_number
-    return (
-        f"Название папки: «{target.title}»\n"
-        f"Номер дела в карточке: {target.case_number}\n"
-        f"Варианты номера для сопоставления: {keys}\n"
-        f"Теги и алиасы: {tag_line}"
-    )
+    blocks: list[str] = [
+        f"Название папки: «{target.title}»",
+        f"Суд (из карточки): {target.court_name or '—'}",
+        f"Номер дела в карточке: {target.case_number}",
+        f"Варианты номера для сопоставления: {keys}",
+    ]
+    summary = (target.summary or "").strip()
+    if summary:
+        one_line = re.sub(r"\s+", " ", summary)[:2000]
+        blocks.append(f"Сводка / суть дела (из карточки):\n{one_line}")
+
+    by_kind: dict[str, list[str]] = defaultdict(list)
+    for tg in tags:
+        by_kind[tg.kind or "keyword"].append((tg.value or "").strip())
+
+    if by_kind["participant"]:
+        blocks.append(
+            "Участники и ключевые лица (те же ФИО могут встречаться в материалах с **другими номерами дел**):\n"
+            + "\n".join(f"- {v}" for v in by_kind["participant"][:45])
+        )
+    if by_kind["judge"]:
+        blocks.append(
+            "Судьи (ориентир; в смежных процессах состав может отличаться):\n"
+            + "\n".join(f"- {v}" for v in by_kind["judge"][:20])
+        )
+    if by_kind["alias"]:
+        blocks.append("Алиасы и варианты имён:\n" + "\n".join(f"- {v}" for v in by_kind["alias"][:30]))
+    if by_kind["keyword"]:
+        blocks.append(
+            "Ключевые слова и темы:\n" + "\n".join(f"- {v}" for v in by_kind["keyword"][:40])
+        )
+    if not tags:
+        blocks.append("Теги в карточке не заданы — ориентируйся на название, номер и сводку.")
+
+    return "\n\n".join(blocks)
 
 
 async def _llm_classify_batch(
@@ -362,14 +490,19 @@ async def _llm_classify_batch(
             f"| файл: {doc.filename}\n  фрагмент: {_doc_snippet(doc)}"
         )
     system = (
-        "Ты помощник по судебному архиву. Нужно решить, относится ли каждый документ **к тому же делу/истории**, "
-        "что и **целевая папка** (банкротство, цепочка процессов вокруг одного лица и т.д.).\n"
-        "Смотри номер дела во фрагменте и в имени файла, стороны, предмет, связь с номером целевой папки.\n"
-        "Если документ явно относится к **другому** самостоятельному делу (другой базовый номер без связи с целевым) — "
+        "Ты помощник по судебному архиву. Нужно решить, относится ли каждый документ **к той же истории дел**, "
+        "что и **целевая папка** (одно банкротство / одни и те же стороны / та же экономическая суть).\n"
+        "Сопоставляй не только **номер дела** в тексте и имени файла, но и:\n"
+        "- **участников** из карточки (должник, кредиторы, представители — ФИО в разных падежах);\n"
+        "- **судей** (фамилия может совпадать или отличаться в связанных заседаниях);\n"
+        "- **суть и контекст** из сводки целевой папки (банкротство того же лица, те же споры).\n"
+        "Разные **номера дел** (А40-…, А41-…) не означают автоматически «чужой документ», если те же люди и та же история.\n"
+        "Если документ явно про **другое лицо** или **иное производство без связи** с участниками целевой папки — "
         "`move_to_target`: false.\n"
-        "Если **номер дела в файле/фрагменте совпадает** с номером целевой карточки (или это явно то же производство) — "
-        "`move_to_target`: true, даже при коротком фрагменте.\n"
-        "Если совсем неясно и номера нет — false.\n"
+        "Если **номер** совпадает с целевой карточкой или это явно то же производство — `move_to_target`: true.\n"
+        "Если номер другой, но **несколько ключевых участников** из карточки явно фигурируют и контекст тот же (банкротство и т.д.) — "
+        "скорее `true`.\n"
+        "Если данных мало и связь не видна — `false`.\n"
         "Верни **только JSON**: "
         '{"decisions":[{"document_id":число,"move_to_target":true/false,"reason":"кратко по-русски"}]}'
     )
@@ -426,7 +559,8 @@ async def preview_semantic_collect_into_case(
             None,
         )
 
-    profile = _target_profile_lines(db, target)
+    target_tags = _load_case_tags_for_collect(db, target.id)
+    profile = _target_profile_lines(target, target_tags)
     source_only = resolve_optional_source_case_only(db, text, target)
 
     q = db.query(Document, Case).join(Case, Case.id == Document.case_id)
@@ -469,7 +603,7 @@ async def preview_semantic_collect_into_case(
             to_move.append(doc)
             reasons[doc.id] = reason
             continue
-        ok_h, why_h = _heuristic_semantic_move(doc, target, source_only)
+        ok_h, why_h = _heuristic_semantic_move(doc, target, source_only, target_tags)
         if ok_h:
             to_move.append(doc)
             reasons[doc.id] = why_h
