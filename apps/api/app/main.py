@@ -92,6 +92,7 @@ from .duplicate_cleanup import (
     handle_cross_folder_duplicate_cleanup_chat,
     looks_like_cross_folder_duplicate_cleanup_request,
 )
+from .semantic_matter_collect import looks_like_semantic_matter_collect_request
 from .materials_workflow import (
     handle_compare_documents_request,
     handle_extract_deadlines_request,
@@ -4181,6 +4182,18 @@ async def assistant_ingest_text(
             case=dup_case if dup_case is not None else get_or_create_unsorted_case(db),
             reply_text=reply_text,
             mode="documents-duplicates-cleanup",
+            refresh_summary=True,
+        )
+
+    if looks_like_semantic_matter_collect_request(text):
+        from .semantic_matter_collect import preview_semantic_collect_into_case
+
+        reply_text, target_case = await preview_semantic_collect_into_case(db, conversation, text)
+        case_for_reply = target_case if target_case is not None else get_or_create_unsorted_case(db)
+        return await finalize_reply(
+            case=case_for_reply,
+            reply_text=reply_text,
+            mode="semantic-matter-collect-preview",
             refresh_summary=True,
         )
 

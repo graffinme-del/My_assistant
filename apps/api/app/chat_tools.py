@@ -210,6 +210,27 @@ CHAT_TOOLS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "semantic_consolidate_into_case",
+            "description": (
+                "Отсортировать и собрать документы **из всех других папок** в одну целевую **по смыслу текста PDF и номерам дел**: "
+                "например «отсортируй документы», «оставь только относящиеся к делу …», «по контексту в папку …». "
+                "Даёт список на перенос и ждёт «Да, перенеси все». Не вызывай для простого переноса всех файлов из текущей папки без анализа смысла."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "instruction": {
+                        "type": "string",
+                        "description": "Запрос пользователя целиком: целевая папка в «кавычках», формулировка про сортировку/контекст.",
+                    },
+                },
+                "required": ["instruction"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "collect_documents_into_folder",
             "description": (
                 "Пользователь хочет собрать документы в новую «папку» (в продукте это отдельное дело/case). "
@@ -456,6 +477,16 @@ async def run_chat_tools_router(
 
         reply_text, _ = await preview_semantic_workspace_clusters(db, conversation_user_key(user_role))
         return reply_text, get_or_create_unsorted_case(db), "chat-tools-semantic-clusters-preview"
+
+    if name == "semantic_consolidate_into_case":
+        from .main import get_or_create_unsorted_case
+        from .semantic_matter_collect import preview_semantic_collect_into_case
+
+        blob = str(args.get("instruction") or user_message or "").strip()
+        if len(blob) < 8:
+            blob = user_message
+        reply_text, target_case = await preview_semantic_collect_into_case(db, conversation, blob)
+        return reply_text, target_case or get_or_create_unsorted_case(db), "chat-tools-semantic-consolidate"
 
     if name == "cross_folder_matter_narrative":
         from .main import get_or_create_unsorted_case
