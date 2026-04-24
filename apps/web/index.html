@@ -1452,28 +1452,52 @@
           .filter((x) => x.document_id > 0);
       }
 
-      /** Если сервер без поля document_actions (старый API), восстанавливаем id/имя из текста reply. */
+      /**
+       * Восстанавливает кнопки из текста: id из любых /api/documents/{id}/view|download.
+       * При mode=document-open-by-id не требуем строку «Просмотр:» (LLM/копипаст могли её убрать).
+       */
       function extractDocumentActionsFromOpenReply(reply, mode) {
         const r = String(reply || "");
         const byMode = String(mode || "") === "document-open-by-id";
-        const byShape =
-          /\*\*\[\d+\]\*\*/.test(r) &&
-          /\/api\/documents\/\d+\/view/.test(r) &&
-          /Просмотр\s*:/i.test(r);
-        if (!byMode && !byShape) return [];
-        const out = [];
-        const seen = new Set();
-        const re = /\*\*\[(\d+)\]\*\*\s+([^\n\r]+)/g;
+        const ids = new Set();
         let m;
-        while ((m = re.exec(r)) !== null) {
+        const rePath = /\/api\/documents\/(\d+)\/(?:view|download)/gi;
+        while ((m = rePath.exec(r)) !== null) {
           const id = Number(m[1]);
-          const fn = (m[2] || "").trim() || "document.pdf";
-          if (id && !seen.has(id)) {
-            seen.add(id);
-            out.push({ document_id: id, filename: fn });
-          }
+          if (id > 0) ids.add(id);
         }
-        return out.slice(0, 8);
+        if (!ids.size) return [];
+
+        if (!byMode) {
+          const looksDocReply =
+            /папка/i.test(r) ||
+            /выжимк/i.test(r) ||
+            /просмотр/i.test(r) ||
+            /скачать/i.test(r) ||
+            /\*\*\[\d+\]\*\*/.test(r) ||
+            /\[\d+\]\s+[^\n]+\.(?:pdf|docx?|zip)/i.test(r);
+          if (!looksDocReply) return [];
+        }
+
+        const fnameById = new Map();
+        const reBold = /\*\*\[(\d+)\]\*\*\s*([^\n\r]+)/g;
+        while ((m = reBold.exec(r)) !== null) {
+          fnameById.set(Number(m[1]), ((m[2] || "").trim() || "document.pdf"));
+        }
+        const reLine = /^\[(\d+)\]\s+([^\n\r]+)/gm;
+        while ((m = reLine.exec(r)) !== null) {
+          const id = Number(m[1]);
+          if (!fnameById.has(id))
+            fnameById.set(id, ((m[2] || "").trim() || "document.pdf"));
+        }
+
+        return Array.from(ids)
+          .sort((a, b) => a - b)
+          .slice(0, 12)
+          .map((id) => ({
+            document_id: id,
+            filename: fnameById.get(id) || "document-" + id + ".pdf",
+          }));
       }
 
       function mergeDocumentActions(a, b) {
@@ -1550,6 +1574,18 @@
               body.textContent = String(text || "");
             }
             injectDocumentChatActionsIfMissing(body, text);
+          }
+          const t = String(text || "");
+          if (
+            !body.querySelector("a.downloadBtn") &&
+            /\/api\/documents\/\d+\/(?:view|download)/i.test(t)
+          ) {
+            const rescue = extractDocumentActionsFromOpenReply(
+              t,
+              "document-open-by-id"
+            );
+            if (rescue.length) appendDocumentStructuredActions(body, rescue);
+            else injectDocumentChatActionsIfMissing(body, t);
           }
         } else {
           const pre = document.createElement("pre");
@@ -1674,6 +1710,8 @@
 
       function init() {
         normalizeApiBaseOnLoad();
+        const chatLogEl = el("chatLog");
+        if (chatLogEl) chatLogEl.dataset.chatUi = "v4-doc-actions";
         // Simplified UI: chat + file upload
         const mic = el("micBtn");
         const send = el("sendChatBtn");
