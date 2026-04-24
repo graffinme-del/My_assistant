@@ -1022,14 +1022,32 @@
       }
 
       function renderAssistantMessage(container, text) {
-        const lines = String(text).split("\n");
+        const lines = String(text).replace(/\r\n/g, "\n").split("\n");
         const apiToken = () => storage.apiToken || "owner-dev-token";
-        const withToken = (path) => {
-          const p = String(path || "").startsWith("/")
-            ? path
-            : "/" + String(path || "").replace(/^\/+/, "");
-          return `${window.location.origin}${p}?token=${encodeURIComponent(apiToken())}`;
-        };
+
+        /** Как fetch()/openDocumentViewer: учитывает localStorage apiBase, не только origin страницы. */
+        function withToken(absolutePath) {
+          let raw = String(absolutePath || "").trim();
+          const qAt = raw.indexOf("?");
+          let pathPart = qAt >= 0 ? raw.slice(0, qAt) : raw;
+          const query = qAt >= 0 ? raw.slice(qAt + 1) : "";
+          if (pathPart.startsWith("/api")) pathPart = pathPart.slice(4);
+          if (!pathPart.startsWith("/")) pathPart = "/" + pathPart.replace(/^\/+/, "");
+          let url = resolveApiRequestUrl(pathPart);
+          const params = new URLSearchParams(query);
+          params.set("token", apiToken());
+          const qs = params.toString();
+          return qs ? `${url}?${qs}` : url;
+        }
+
+        function findDocUrls(lineN) {
+          const re =
+            /(\/api\/documents\/(\d+)\/(view|download|summary))(?:\?[^\s)`'"]*)?/gi;
+          const out = [];
+          let m;
+          while ((m = re.exec(lineN)) !== null) out.push(m);
+          return out;
+        }
 
         function normalizeLine(s) {
           return String(s)
@@ -1038,6 +1056,7 @@
         }
 
         let contextDocId = null;
+        let contextFilename = null;
 
         for (const line of lines) {
           const raw = line;
@@ -1050,15 +1069,29 @@
           }
 
           const lineN = normalizeLine(raw);
-          const idHead = lineN.match(/(?:\*\*)?\[(\d+)\](?:\*\*)?/);
-          if (idHead) contextDocId = idHead[1];
+          const starHead = lineN.match(/^\*\*\[(\d+)\]\*\*\s+(.+)$/);
+          const squareHead = lineN.match(/^\[(\d+)\]\s+(.+)$/);
+          if (starHead) {
+            contextDocId = starHead[1];
+            contextFilename = starHead[2].trim();
+          } else if (squareHead) {
+            contextDocId = squareHead[1];
+            contextFilename = squareHead[2].trim();
+          } else if (/^\s*-\s*\[/.test(lineN)) {
+            const listBr = lineN.match(/\[(\d+)\]\s+(.+?)\s+\(/);
+            if (listBr) {
+              contextDocId = listBr[1];
+              contextFilename = listBr[2].trim();
+            }
+          } else {
+            const idOnly = lineN.match(/(?:\*\*)?\[(\d+)\](?:\*\*)?/);
+            if (idOnly) contextDocId = idOnly[1];
+          }
 
           const row = document.createElement("div");
           row.style.whiteSpace = "pre-wrap";
 
-          const urlRe =
-            /(\/api\/documents\/(\d+)\/(view|download|summary))(?:\?[^\s)`'"]*)?/gi;
-          const matches = [...lineN.matchAll(urlRe)];
+          const matches = findDocUrls(lineN);
 
           let viewPath = null;
           let dlPath = null;
@@ -1085,6 +1118,8 @@
             if (visible) row.append(document.createTextNode(visible + " "));
 
             const vid = documentId;
+            const fname =
+              String(contextFilename || "").split(/\s+/)[0] || "document.pdf";
             if (!viewPath) viewPath = `/api/documents/${vid}/view`;
             const vA = document.createElement("a");
             vA.href = withToken(viewPath);
@@ -1092,6 +1127,11 @@
             vA.target = "_blank";
             vA.rel = "noopener noreferrer";
             vA.className = "downloadBtn viewBtn";
+            vA.onclick = (ev) => {
+              if (ev.ctrlKey || ev.metaKey || ev.shiftKey || ev.button !== 0) return;
+              ev.preventDefault();
+              openDocumentViewer({ id: Number(vid), filename: fname });
+            };
             row.append(vA);
             row.append(document.createTextNode(" "));
 
@@ -1129,6 +1169,12 @@
           const before = (m[1] || "").replace(/скачать:\s*$/i, "").trimEnd();
           const documentIdLegacy = m[2];
           const after = (m[4] || "").trim();
+          const legFname =
+            (contextFilename && String(contextDocId) === String(documentIdLegacy)
+              ? contextFilename
+              : "document.pdf"
+            )
+              .split(/\s+/)[0];
           if (before) row.append(document.createTextNode(before + " "));
           const link = document.createElement("a");
           link.href = withToken(m[3]);
@@ -1144,6 +1190,14 @@
           viewLink.target = "_blank";
           viewLink.rel = "noopener noreferrer";
           viewLink.className = "downloadBtn viewBtn";
+          viewLink.onclick = (ev) => {
+            if (ev.ctrlKey || ev.metaKey || ev.shiftKey || ev.button !== 0) return;
+            ev.preventDefault();
+            openDocumentViewer({
+              id: Number(documentIdLegacy),
+              filename: legFname,
+            });
+          };
           row.append(viewLink);
           const summaryBtn = document.createElement("a");
           summaryBtn.href = "#";
