@@ -1251,6 +1251,57 @@ _HINT_SEARCH_SKIP_WORDS = frozenset(
     }
 )
 
+# Поиск в одной папке: порог по числу фраз (см. search_documents_union_queries).
+_STRICT_LONG_PHRASE_LEN = 12
+_STRICT_STRONG_TOKEN_LEN = 8
+
+
+def _normalize_union_search_queries(queries: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for q in queries:
+        s = (q or "").strip()
+        if len(s) < 2:
+            continue
+        k = s.lower().replace("ё", "е")
+        if k in _HINT_SEARCH_SKIP_WORDS:
+            continue
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(s)
+    return out
+
+
+def _document_search_haystack(doc: Document, *, limit: int = 120_000) -> str:
+    return f"{doc.filename}\n{doc.category}\n{doc.extracted_text or ''}"[:limit].lower()
+
+
+def _union_search_hit_detail(doc: Document, queries_norm: list[str]) -> tuple[list[str], bool]:
+    hay = _document_search_haystack(doc)
+    hit: list[str] = []
+    for q in queries_norm:
+        ql = q.lower().replace("ё", "е")
+        if len(ql) >= 2 and ql in hay:
+            hit.append(q)
+    has_long = any(len(h) >= _STRICT_LONG_PHRASE_LEN for h in hit)
+    return hit, has_long
+
+
+def _union_search_strict_enough(nq: int, hit_queries: list[str], has_long: bool) -> bool:
+    nh = len(hit_queries)
+    if nq <= 0 or nh <= 0:
+        return False
+    if nq == 1:
+        return True
+    if nh >= 2:
+        return True
+    if has_long:
+        return True
+    if nq == 2 and nh == 1 and any(len(q) >= _STRICT_STRONG_TOKEN_LEN for q in hit_queries):
+        return True
+    return False
+
 
 def _tokenize_delete_hint_words(h: str) -> list[str]:
     """Слова для поиска: кириллица и латиница, ё→е; без слишком коротких (кроме как часть фразы)."""
@@ -3152,14 +3203,37 @@ def search_documents_global_with_hints(db: Session, hints: list[str], *, limit: 
     for h in hints:
         for d in _collect_documents_matching_delete_hints(db, [h]):
             collected[d.id] = d
-    total = len(collected)
-    matched = sorted(collected.values(), key=lambda d: d.id, reverse=True)[:limit]
+
+    hints_norm = _normalize_union_search_queries(hints)
+    strict_ids: set[int] | None = None
+    if len(hints_norm) >= 2:
+        strict_ids = set()
+        for d in collected.values():
+            hit_list, has_long = _union_search_hit_detail(d, hints_norm)
+            if hit_list and _union_search_strict_enough(len(hints_norm), hit_list, has_long):
+                strict_ids.add(d.id)
+        if not strict_ids:
+            strict_ids = None
+
+    pool = (
+        [collected[i] for i in sorted(strict_ids, reverse=True)]
+        if strict_ids is not None
+        else list(collected.values())
+    )
+    note = ""
+    if strict_ids is not None:
+        note = " (строгий отбор по нескольким фразам)"
+    elif len(hints_norm) >= 2 and collected:
+        note = " (широкий отбор; уточните фразы — строгих совпадений не нашлось)"
+
+    total = len(pool)
+    matched = sorted(pool, key=lambda d: d.id, reverse=True)[:limit]
     if not matched:
         return f'По запросу «{"; ".join(hints)}» в документах всех папок ничего не найдено.'
     case_ids = {d.case_id for d in matched}
     cases_map = {c.id: c for c in db.query(Case).filter(Case.id.in_(case_ids)).all()}
     lines = [
-        f"Нашёл {total} документ(ов) во всех папках по запросу «{' / '.join(hints[:4])}»"
+        f"Нашёл {total} документ(ов) во всех папках по запросу «{' / '.join(hints[:4])}»{note}"
         + (f" (показываю {len(matched)}):" if total > len(matched) else ":")
     ]
     for doc in matched:
@@ -3193,31 +3267,68 @@ def search_documents_global(db: Session, user_text: str, *, limit: int = 40) -> 
 
 
 def search_documents_union_queries(case: Case, docs: list[Document], queries: list[str]) -> str:
-    """Поиск в одном деле: достаточно вхождения любой из фраз (как сформулировала модель)."""
+    """
+    Поиск в одном деле. При **нескольких** фразах от модели — не чистое ИЛИ: нужно либо ≥2 совпадения,
+    либо одна длинная фраза (≥12 симв.), иначе много ложных срабатываний в неразобранном.
+    Если по строгим правилам пусто — показываем мягкий список с предупреждением.
+    """
     if not docs:
         return f'По делу «{case.title}» пока нет документов.'
-    qn = [q.strip().lower() for q in queries if len(q.strip()) >= 2]
-    if not qn:
-        return "Уточните, что искать."
-    matched: list[Document] = []
-    seen: set[int] = set()
+    queries_norm = _normalize_union_search_queries(queries)
+    if not queries_norm:
+        return "Уточните, что искать (слишком общие или пустые фразы отфильтрованы)."
+    nq = len(queries_norm)
+
+    scored: list[tuple[int, Document, list[str]]] = []
+    relaxed: list[tuple[int, Document, list[str]]] = []
     for doc in docs:
-        hay = f"{doc.filename}\n{doc.category}\n{doc.extracted_text or ''}".lower()
-        if any(q in hay for q in qn):
-            if doc.id not in seen:
-                seen.add(doc.id)
-                matched.append(doc)
-    if not matched:
-        show = ", ".join(repr(q) for q in queries[:5])
-        return f"По фразам {show} в деле «{case.title}» ничего не найдено."
-    lines = [
-        f'Нашёл {len(matched)} документ(ов) в деле «{case.title}» (совпала любая из фраз):',
-    ]
-    for doc in matched[:25]:
-        lines.append(f'- [{doc.id}] {doc.filename} | {doc.category} | скачать: /api/documents/{doc.id}/download')
-    if len(matched) > 25:
-        lines.append(f"... и ещё {len(matched) - 25}.")
-    return "\n".join(lines)
+        hit_list, has_long = _union_search_hit_detail(doc, queries_norm)
+        if not hit_list:
+            continue
+        nh = len(hit_list)
+        relaxed.append((nh, doc, hit_list))
+        if _union_search_strict_enough(nq, hit_list, has_long):
+            scored.append((nh, doc, hit_list))
+
+    def _lines_for(
+        rows: list[tuple[int, Document, list[str]]],
+        *,
+        strict: bool,
+    ) -> list[str]:
+        rows = sorted(rows, key=lambda x: (-x[0], -x[1].id))
+        label = (
+            "строгий отбор: минимум две разные поисковые фразы в файле/тексте, "
+            "или одна фраза не короче 12 символов, или (при двух фразах в запросе) одно совпадение длиной ≥8 символов"
+            if strict
+            else "мягкий режим: совпала любая из фраз (возможны лишние документы — проверяйте выжимку)"
+        )
+        out_l = [
+            f"Нашёл {len(rows)} документ(ов) в деле «{case.title}» ({label}):",
+        ]
+        for _nh, doc, hits in rows[:25]:
+            hint = ", ".join(hits[:3]) + ("…" if len(hits) > 3 else "")
+            out_l.append(
+                f"- [{doc.id}] {doc.filename} | {doc.category} | совпало: {hint} | "
+                f"скачать: /api/documents/{doc.id}/download"
+            )
+        if len(rows) > 25:
+            out_l.append(f"... и ещё {len(rows) - 25}.")
+        return out_l
+
+    if scored:
+        return "\n".join(_lines_for(scored, strict=True))
+
+    if relaxed:
+        lines = _lines_for(relaxed, strict=False)
+        lines.append("")
+        lines.append(
+            "_По **строгим** правилам (несколько независимых совпадений) ничего не нашлось — "
+            "показан широкий список. Уточните запрос (ФИО целиком, номер дела) или откройте выжимки._"
+        )
+        return "\n".join(lines)
+
+    show = ", ".join(repr(q) for q in queries_norm[:5])
+    return f"По фразам {show} в деле «{case.title}» ничего не найдено."
 
 
 def _move_all_case_content_to_target(db: Session, source: Case, target: Case) -> int:
