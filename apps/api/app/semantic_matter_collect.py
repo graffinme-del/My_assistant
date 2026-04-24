@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from collections import defaultdict
@@ -511,7 +512,7 @@ async def _llm_classify_batch(
         f"Запрос пользователя:\n{user_instruction[:1200]}\n\n"
         "Кандидаты:\n" + "\n".join(lines)
     )
-    raw = await llm_system_user(system, user_block, timeout=140.0, max_tokens=3500)
+    raw = await llm_system_user(system, user_block, timeout=95.0, max_tokens=3200)
     if not raw.strip():
         return {}
     try:
@@ -583,13 +584,22 @@ async def preview_semantic_collect_into_case(
         )
 
     decisions: dict[int, tuple[bool, str]] = {}
-    for i in range(0, len(candidates), batch_size):
-        part = await _llm_classify_batch(
-            target=target,
-            target_profile=profile,
-            user_instruction=text,
-            batch=candidates[i : i + batch_size],
-        )
+    batches: list[list[tuple[Document, Case]]] = [
+        candidates[i : i + batch_size] for i in range(0, len(candidates), batch_size)
+    ]
+    sem = asyncio.Semaphore(4)
+
+    async def _one_batch(batch: list[tuple[Document, Case]]) -> dict[int, tuple[bool, str]]:
+        async with sem:
+            return await _llm_classify_batch(
+                target=target,
+                target_profile=profile,
+                user_instruction=text,
+                batch=batch,
+            )
+
+    parts = await asyncio.gather(*[_one_batch(b) for b in batches])
+    for part in parts:
         decisions.update(part)
 
     to_move: list[Document] = []
