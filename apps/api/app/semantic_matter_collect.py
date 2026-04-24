@@ -52,10 +52,77 @@ def _all_quoted_chunks(text: str) -> list[str]:
     return out
 
 
+_VERB_AFTER_I = re.compile(
+    r"^\s*(?:напиши|отправь|создай|покажи|дай|сделай|скажи|сообщи|добавь|удали|повтори|уточни)",
+    re.IGNORECASE,
+)
+
+
+def _trim_unquoted_hint_fragment(raw: str) -> str:
+    s = (raw or "").strip().strip("\"'«»")
+    s = re.sub(r"\s+", " ", s)
+    for sep in (" и ", " или "):
+        if sep in s:
+            left, right = s.split(sep, 1)
+            if _VERB_AFTER_I.match(right or ""):
+                s = left.strip()
+                break
+    parts = s.split()
+    if len(parts) > 12:
+        s = " ".join(parts[:12])
+    if len(s) > 120:
+        s = s[:120].rsplit(" ", 1)[0]
+    return s.strip()
+
+
+def _unquoted_collect_target_hints(t: str) -> list[str]:
+    """Название цели без кавычек: в папку / в дело (в порядке появления)."""
+    hints: list[str] = []
+    dest_patterns = (
+        r"перенеси(?:те)?[\s\S]{0,520}?\bв\s+папк[уеиоа]\s+([^.!?\n]+)",
+        r"собери(?:те)?[\s\S]{0,520}?\bв\s+папк[уеиоа]\s+([^.!?\n]+)",
+        r"\bв\s+папк[уеиоа]\s+([^.!?\n]+)",
+        r"\bв\s+дело\s+([^.!?\n]+)",
+    )
+    for pat in dest_patterns:
+        for m in re.finditer(pat, t, flags=re.IGNORECASE):
+            h = _trim_unquoted_hint_fragment(m.group(1))
+            if len(h) >= 2:
+                hints.append(h)
+    return hints
+
+
+def _unquoted_relation_target_hints(t: str) -> list[str]:
+    """по делу / к делу / относящиеся к делу — если явной цели «в папку» нет."""
+    hints: list[str] = []
+    for pat in (
+        r"\bпо\s+делу\s+([^.!?\n]+)",
+        r"\bк\s+делу\s+([^.!?\n]+)",
+        r"\bотносящ(?:иеся)?\s+к\s+делу\s+([^.!?\n]+)",
+    ):
+        for m in re.finditer(pat, t, flags=re.IGNORECASE):
+            h = _trim_unquoted_hint_fragment(m.group(1))
+            if len(h) >= 2:
+                hints.append(h)
+    return hints
+
+
+def _unquoted_source_from_prosmotr(text: str) -> str:
+    t = _normalize_quotes(text or "")
+    m = re.search(
+        r"просмотр(?:и|ите)\s+(?:всю\s+)?папк[уеиоа]\s+([^.!?\n,;:]+)",
+        t,
+        flags=re.IGNORECASE,
+    )
+    if not m:
+        return ""
+    return _trim_unquoted_hint_fragment(m.group(1))
+
+
 def parse_semantic_collect_target_hint(text: str) -> str:
     """
-    Целевая папка из запроса: сначала явное «в папку "…"», иначе последняя кавычка
-    (часто первая — номер дела-источник, последняя — куда собрать).
+    Целевая папка: явное «в папку …» (с кавычками или без), иначе последняя кавычка,
+    иначе «по делу …» / «к делу …» без кавычек.
     """
     t = _normalize_quotes(text or "")
     for pat in (
@@ -67,9 +134,15 @@ def parse_semantic_collect_target_hint(text: str) -> str:
         m = re.search(pat, t, flags=re.IGNORECASE | re.DOTALL)
         if m:
             return m.group(1).strip()
+    udest = _unquoted_collect_target_hints(t)
+    if udest:
+        return udest[-1]
     chunks = _all_quoted_chunks(t)
     if chunks:
         return chunks[-1].strip()
+    urel = _unquoted_relation_target_hints(t)
+    if urel:
+        return urel[-1]
     return ""
 
 
@@ -78,21 +151,32 @@ def resolve_optional_source_case_only(
     text: str,
     target: Case,
 ) -> Case | None:
-    """Две и более кавычек: первая часто папка-источник (например номер дела), последняя — совпадает с целью."""
-    from .main import find_case_by_hint
+    """Ограничить разбор одной папкой: две кавычки, «просмотри папку …» или номер до «в папку»."""
+    from .main import extract_move_source_case_number, find_case_by_hint
+
+    all_cases = db.query(Case).all()
 
     chunks = _all_quoted_chunks(text or "")
-    if len(chunks) < 2:
-        return None
-    first = chunks[0].strip()
-    last = chunks[-1].strip()
-    if first.lower() == last.lower():
-        return None
-    all_cases = db.query(Case).all()
-    src = find_case_by_hint(all_cases, first, db=db)
-    if not src or src.id == target.id:
-        return None
-    return src
+    if len(chunks) >= 2:
+        first = chunks[0].strip()
+        last = chunks[-1].strip()
+        if first.lower() != last.lower():
+            src = find_case_by_hint(all_cases, first, db=db)
+            if src and src.id != target.id:
+                return src
+
+    pro = _unquoted_source_from_prosmotr(text or "")
+    if pro:
+        src = find_case_by_hint(all_cases, pro, db=db)
+        if src and src.id != target.id:
+            return src
+
+    raw_num = extract_move_source_case_number(text or "")
+    if raw_num:
+        src = db.query(Case).filter(Case.case_number == raw_num).first()
+        if src and src.id != target.id:
+            return src
+    return None
 
 
 def looks_like_semantic_matter_collect_request(text: str) -> bool:
@@ -250,9 +334,9 @@ async def preview_semantic_collect_into_case(
     target = resolve_target_case_for_collect(db, conversation, text)
     if not target:
         return (
-            "Не получилось сопоставить **целевую папку** с карточкой дела. Напишите по-обычному, например: "
-            "«…перенеси подходящие документы в папку \"Банкротство Эмиль\"» — подойдут и обычные кавычки \"…\". "
-            "Либо откройте нужную папку слева и добавьте во фразу «в текущую папку».",
+            "Не получилось сопоставить **целевую папку** с карточкой дела. Напишите, куда собрать, например: "
+            "«…перенеси подходящие в папку Банкротство Эмиль» или «…в папку А40-12345/2025» — **кавычки не нужны**. "
+            "Либо откройте нужную папку слева и добавьте «в текущую папку».",
             None,
         )
 
