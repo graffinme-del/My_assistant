@@ -1434,6 +1434,60 @@
         container.appendChild(wrap);
       }
 
+      function normalizeDocumentActionsFromApi(result) {
+        if (!result) return [];
+        const raw =
+          result.document_actions ||
+          result.documentActions ||
+          result.chat_document_actions;
+        if (!Array.isArray(raw) || !raw.length) return [];
+        return raw
+          .map((x) => ({
+            document_id: Number(
+              x.document_id != null ? x.document_id : x.documentId
+            ),
+            filename:
+              String(x.filename || "document.pdf").trim() || "document.pdf",
+          }))
+          .filter((x) => x.document_id > 0);
+      }
+
+      /** Если сервер без поля document_actions (старый API), восстанавливаем id/имя из текста reply. */
+      function extractDocumentActionsFromOpenReply(reply, mode) {
+        const r = String(reply || "");
+        const byMode = String(mode || "") === "document-open-by-id";
+        const byShape =
+          /\*\*\[\d+\]\*\*/.test(r) &&
+          /\/api\/documents\/\d+\/view/.test(r) &&
+          /Просмотр\s*:/i.test(r);
+        if (!byMode && !byShape) return [];
+        const out = [];
+        const seen = new Set();
+        const re = /\*\*\[(\d+)\]\*\*\s+([^\n\r]+)/g;
+        let m;
+        while ((m = re.exec(r)) !== null) {
+          const id = Number(m[1]);
+          const fn = (m[2] || "").trim() || "document.pdf";
+          if (id && !seen.has(id)) {
+            seen.add(id);
+            out.push({ document_id: id, filename: fn });
+          }
+        }
+        return out.slice(0, 8);
+      }
+
+      function mergeDocumentActions(a, b) {
+        const map = new Map();
+        for (const arr of [a, b]) {
+          if (!Array.isArray(arr)) continue;
+          for (const x of arr) {
+            if (!x || !x.document_id) continue;
+            if (!map.has(x.document_id)) map.set(x.document_id, x);
+          }
+        }
+        return Array.from(map.values());
+      }
+
       function attachDeleteToMessageBox(box, messageId) {
         if (messageId == null || messageId === "") return;
         const mid = Number(messageId);
@@ -1524,7 +1578,8 @@
           const log = el("chatLog");
           log.innerHTML = "";
           for (const row of rows) {
-            appendChat(row.role, row.content, row.id);
+            const histActs = extractDocumentActionsFromOpenReply(row.content, null);
+            appendChat(row.role, row.content, row.id, histActs);
           }
         } catch (_e) {
           /* совместимость со старым API */
@@ -1560,12 +1615,11 @@
               ", режим " +
               result.mode;
           patchLastUserMessageId(result.user_message_id);
-          appendChat(
-            "assistant",
-            msg,
-            result.assistant_message_id,
-            result.document_actions || result.documentActions || []
+          const docActs = mergeDocumentActions(
+            normalizeDocumentActionsFromApi(result),
+            extractDocumentActionsFromOpenReply(msg, result.mode)
           );
+          appendChat("assistant", msg, result.assistant_message_id, docActs);
         } catch (e) {
           appendChat("assistant", "Ошибка: " + (e && e.message ? e.message : String(e)));
         }
