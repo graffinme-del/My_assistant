@@ -464,6 +464,113 @@ def parse_explicit_document_ids_for_open(text: str) -> list[int]:
     return []
 
 
+def looks_like_local_folder_document_count_question(text: str) -> bool:
+    """«Сколько документов в этой папке / в деле …» — счётчик в приложении, не выгрузка из КАД."""
+    lowered = (text or "").lower()
+    if "сколько" not in lowered:
+        return False
+    if not any(w in lowered for w in ("документ", "файл", "материал")):
+        return False
+    kad_markers = (
+        "кад",
+        "kad.arbitr",
+        "картотек",
+        "скачан",
+        "скачал",
+        "скачано",
+        "удалось скачать",
+        "удалось сохранить",
+        "фонов",
+        "из кад",
+        "с кад",
+        "parser api",
+        "parser-api",
+        "parserapi",
+    )
+    if any(k in lowered for k in kad_markers):
+        return False
+    if "папк" in lowered:
+        return True
+    if bool(re.search(r"\b(в|во|о|к|по)\s+дел", lowered)):
+        return True
+    if "это дело" in lowered or "этом деле" in lowered or "этой папке" in lowered or "этой папки" in lowered:
+        return True
+    if re.search(r'[«"][^»"]{2,}[»"]', text or "") or re.search(
+        r"'[^']{2,120}'", text or ""
+    ):
+        return True
+    return False
+
+
+def _extract_local_folder_title_hint_for_count(text: str) -> str:
+    h = (extract_case_hint_from_folder_phrase(text) or "").strip()
+    if h:
+        return h
+    for a, b in re.findall(r'«([^»]+)»|"([^"]+)"', text or ""):
+        chunk = (a or b).strip()
+        if len(chunk) >= 2:
+            return chunk
+    m = re.search(r"'([^']{2,120})'", text or "")
+    if m:
+        return m.group(1).strip()
+    return ""
+
+
+def _ru_doc_count_label(n: int) -> str:
+    n_abs = abs(n) % 100
+    n1 = n_abs % 10
+    if 11 <= n_abs <= 19:
+        return f"{n} документов"
+    if n1 == 1:
+        return f"{n} документ"
+    if 2 <= n1 <= 4:
+        return f"{n} документа"
+    return f"{n} документов"
+
+
+def handle_local_folder_document_count_chat(
+    db: Session,
+    text: str,
+    conversation: Conversation,
+    *,
+    preferred_case_number: str | None = None,
+) -> tuple[str, Case] | None:
+    if not looks_like_local_folder_document_count_question(text):
+        return None
+    all_cases = db.query(Case).all()
+    hint = _extract_local_folder_title_hint_for_count(text)
+    fallback_case = conversation.active_case or get_or_create_unsorted_case(db)
+    target: Case | None = None
+    if hint:
+        target = find_case_by_hint(all_cases, hint, db=db)
+        if not target:
+            return (
+                f'Папку (дело) по фразе «{hint}» не нашёл. Уточните название как в списке слева или откройте папку '
+                "и спросите: «сколько документов в этой папке?»",
+                fallback_case,
+            )
+    if not target and not hint and preferred_case_number:
+        cn = normalize_arbitr_case_number(preferred_case_number)
+        if cn:
+            target = db.query(Case).filter(Case.case_number == cn).first()
+    if not target:
+        ac = conversation.active_case
+        if ac:
+            target = db.query(Case).filter(Case.id == ac.id).first()
+    if not target:
+        return (
+            "Укажите папку в кавычках (как в списке слева) или откройте нужное дело в боковой панели — "
+            "тогда «сколько документов в этой папке?» будет считаться по ней.",
+            fallback_case,
+        )
+    n = db.query(Document).filter(Document.case_id == target.id).count()
+    return (
+        f'В папке «{target.title}» ({target.case_number}) сейчас {_ru_doc_count_label(n)} '
+        f"(файлы в приложении, привязанные к этому делу). Это не число документов, **скачанных из картотеки** арбитража.",
+        target,
+    )
+
+
 def looks_like_why_document_not_moved_to_folder_question(text: str) -> bool:
     """«Почему документ 159 не в папке … / не перенесён …» — фактический ответ по БД, без смыслового сбора."""
     raw = (text or "").strip()
@@ -4911,6 +5018,20 @@ async def assistant_ingest_text(
             case=unsorted_case,
             reply_text=rp_participant,
             mode="participant-link",
+        )
+
+    folder_count = handle_local_folder_document_count_chat(
+        db,
+        text,
+        conversation,
+        preferred_case_number=payload.preferred_case_number,
+    )
+    if folder_count:
+        reply_fc, case_fc = folder_count
+        return await finalize_reply(
+            case=case_fc,
+            reply_text=reply_fc,
+            mode="folder-document-count",
         )
 
     if looks_like_court_search_command(text):

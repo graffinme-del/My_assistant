@@ -452,6 +452,11 @@ def looks_like_court_download_count_question(text: str) -> bool:
     from .ru_date_range import parse_calendar_period_ru
 
     lowered = (text or "").lower()
+    # «Сколько документов в этой папке» — про дело в приложении, не про КАД.
+    from .main import looks_like_local_folder_document_count_question
+
+    if looks_like_local_folder_document_count_question(text):
+        return False
     if "скачай" in lowered or "найди дел" in lowered or "поставь на отслеживание" in lowered:
         return False
     if parse_calendar_period_ru(text) and "сколько" in lowered and any(
