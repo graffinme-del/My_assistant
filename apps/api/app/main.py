@@ -4769,11 +4769,10 @@ async def assistant_ingest_text(
             parts.append(
                 f"**[{doc.id}]** {doc.filename}\n"
                 f"Папка: «{ct}» ({cn})\n"
-                f"Просмотр в браузере: `/api/documents/{doc.id}/view` "
-                f"(или `/api/documents/{doc.id}/download?inline=1`)\n"
-                f"Скачать файлом: `/api/documents/{doc.id}/download`\n"
-                f"Краткая выжимка (API): `/api/documents/{doc.id}/summary` "
-                f"или в чате: «выжимка {doc.id}»"
+                f"Просмотр: /api/documents/{doc.id}/view  ·  "
+                f"Скачать: /api/documents/{doc.id}/download\n"
+                f"Выжимка: напишите «выжимка {doc.id}» "
+                f"(или API /api/documents/{doc.id}/summary)"
             )
         if parts:
             reply_text = "\n\n".join(parts)

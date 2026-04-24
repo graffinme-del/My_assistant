@@ -1024,67 +1024,94 @@
       function renderAssistantMessage(container, text) {
         const lines = String(text).split("\n");
         const apiToken = () => storage.apiToken || "owner-dev-token";
-        const withToken = (path) =>
-          `${window.location.origin}${path}?token=${encodeURIComponent(apiToken())}`;
+        const withToken = (path) => {
+          const p = String(path || "").startsWith("/")
+            ? path
+            : "/" + String(path || "").replace(/^\/+/, "");
+          return `${window.location.origin}${p}?token=${encodeURIComponent(apiToken())}`;
+        };
 
-        function stripDocApiUrls(s) {
+        function normalizeLine(s) {
           return String(s)
-            .replace(/\([^)]*`?\/api\/documents\/\d+\/download\?inline=\d+`?[^)]*\)/gi, "")
-            .replace(/`?\/?api\/documents\/\d+\/(?:view|download)(?:\?[^\s`]*)?`?/gi, "")
-            .replace(/\s{2,}/g, " ")
-            .replace(/\(\s*\)/g, "")
-            .trim();
+            .replace(/\u2018|\u2019|\u201c|\u201d/g, "'")
+            .replace(/[""„«»]/g, '"');
         }
 
+        let contextDocId = null;
+
         for (const line of lines) {
+          const raw = line;
+          if (raw.trim() === "") {
+            const emptyRow = document.createElement("div");
+            emptyRow.style.whiteSpace = "pre-wrap";
+            emptyRow.appendChild(document.createElement("br"));
+            container.appendChild(emptyRow);
+            continue;
+          }
+
+          const lineN = normalizeLine(raw);
+          const idHead = lineN.match(/(?:\*\*)?\[(\d+)\](?:\*\*)?/);
+          if (idHead) contextDocId = idHead[1];
+
           const row = document.createElement("div");
           row.style.whiteSpace = "pre-wrap";
 
-          const viewM = line.match(/(\/api\/documents\/(\d+)\/view(?:\?[^\s`']*)?)/i);
-          const dlM = line.match(/(\/api\/documents\/(\d+)\/download(?:\?[^\s`']*)?)/i);
-          const bracketM = line.match(/\[(\d+)\]/);
-          let documentId = null;
-          if (viewM) documentId = viewM[2];
-          else if (dlM) documentId = dlM[2];
-          else if (bracketM) documentId = bracketM[1];
+          const urlRe =
+            /(\/api\/documents\/(\d+)\/(view|download|summary))(?:\?[^\s)`'"]*)?/gi;
+          const matches = [...lineN.matchAll(urlRe)];
 
-          const viewPath =
-            viewM && String(documentId) === String(viewM[2]) ? viewM[1] : null;
-          const dlPath =
-            dlM && String(documentId) === String(dlM[2]) && !/\binline=/i.test(dlM[1])
-              ? dlM[1]
-              : null;
+          let viewPath = null;
+          let dlPath = null;
+          let urlDocId = null;
+          for (const m of matches) {
+            const full = m[0];
+            const id = m[2];
+            const kind = (m[3] || "").toLowerCase();
+            if (!urlDocId) urlDocId = id;
+            if (kind === "view") viewPath = m[1];
+            if (kind === "download" && !/\binline=/i.test(full)) dlPath = m[1];
+          }
 
-          if (documentId && (viewPath || dlPath)) {
-            const visible = stripDocApiUrls(line);
+          const documentId = urlDocId || contextDocId;
+          if (documentId && matches.length > 0) {
+            let visible = lineN;
+            for (const m of matches) visible = visible.split(m[0]).join(" ");
+            visible = visible
+              .replace(/[`'"]+/g, " ")
+              .replace(/\(\s*или\s*\)/gi, " ")
+              .replace(/\(\s*\)/g, "")
+              .replace(/\s{2,}/g, " ")
+              .trim();
             if (visible) row.append(document.createTextNode(visible + " "));
-            if (viewPath) {
-              const a = document.createElement("a");
-              a.href = withToken(viewPath);
-              a.textContent = "Просмотр";
-              a.target = "_blank";
-              a.rel = "noopener noreferrer";
-              a.className = "downloadBtn viewBtn";
-              row.append(a);
-              row.append(document.createTextNode(" "));
-            }
-            if (dlPath) {
-              const a = document.createElement("a");
-              a.href = withToken(dlPath);
-              a.textContent = "Скачать";
-              a.target = "_blank";
-              a.rel = "noopener noreferrer";
-              a.className = "downloadBtn";
-              row.append(a);
-              row.append(document.createTextNode(" "));
-            }
+
+            const vid = documentId;
+            if (!viewPath) viewPath = `/api/documents/${vid}/view`;
+            const vA = document.createElement("a");
+            vA.href = withToken(viewPath);
+            vA.textContent = "Просмотр";
+            vA.target = "_blank";
+            vA.rel = "noopener noreferrer";
+            vA.className = "downloadBtn viewBtn";
+            row.append(vA);
+            row.append(document.createTextNode(" "));
+
+            if (!dlPath) dlPath = `/api/documents/${vid}/download`;
+            const dA = document.createElement("a");
+            dA.href = withToken(dlPath);
+            dA.textContent = "Скачать";
+            dA.target = "_blank";
+            dA.rel = "noopener noreferrer";
+            dA.className = "downloadBtn";
+            row.append(dA);
+            row.append(document.createTextNode(" "));
+
             const summaryBtn = document.createElement("a");
             summaryBtn.href = "#";
             summaryBtn.textContent = "Выжимка";
             summaryBtn.className = "downloadBtn summaryBtn";
             summaryBtn.onclick = (ev) => {
               ev.preventDefault();
-              showDocumentSummary(Number(documentId));
+              showDocumentSummary(Number(vid));
             };
             row.append(summaryBtn);
             container.appendChild(row);
@@ -1095,7 +1122,7 @@
             /^(.*?\[(\d+)\].*?)(\/api\/documents\/\d+\/download(?:\?[^\s]*)?)(.*)$/i
           );
           if (!m) {
-            row.textContent = line;
+            row.textContent = raw;
             container.appendChild(row);
             continue;
           }
