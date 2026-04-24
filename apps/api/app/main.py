@@ -4445,6 +4445,42 @@ async def assistant_ingest_text(
             refresh_summary=True,
         )
 
+    # До LLM-router: иначе «покажи документ 254» уходит в search_documents и ответ без стабильных URL/кнопок.
+    if looks_like_single_document_open_request(text):
+        _, command_case_early = resolve_case_for_conversation(
+            db,
+            text,
+            user_role=_,
+            preferred_case_number=payload.preferred_case_number,
+        )
+        ids_early = parse_explicit_document_ids_for_open(text)
+        parts_early: list[str] = []
+        reply_case_early: Case | None = None
+        for did in (ids_early or [])[:5]:
+            doc = db.query(Document).filter(Document.id == did).first()
+            if not doc:
+                parts_early.append(f"Документ **[{did}]** не найден (возможно, неверный номер).")
+                continue
+            c = db.query(Case).filter(Case.id == doc.case_id).first()
+            reply_case_early = c or reply_case_early
+            ct = c.title if c else "?"
+            cn = c.case_number if c else "?"
+            parts_early.append(
+                f"**[{doc.id}]** {doc.filename}\n"
+                f"Папка: «{ct}» ({cn})\n"
+                f"Просмотр: /api/documents/{doc.id}/view  ·  "
+                f"Скачать: /api/documents/{doc.id}/download\n"
+                f"Выжимка: напишите «выжимка {doc.id}» "
+                f"(или API /api/documents/{doc.id}/summary)"
+            )
+        if parts_early:
+            reply_open = "\n\n".join(parts_early)
+            return await finalize_reply(
+                case=reply_case_early or command_case_early,
+                reply_text=reply_open,
+                mode="document-open-by-id",
+            )
+
     if settings.chat_tools_router_enabled and settings.openai_api_key.strip():
         try:
             from .chat_tools import run_chat_tools_router
@@ -4753,34 +4789,6 @@ async def assistant_ingest_text(
         .order_by(Document.created_at.desc())
         .all()
     )
-    if looks_like_single_document_open_request(text):
-        ids = parse_explicit_document_ids_for_open(text)
-        parts: list[str] = []
-        reply_case: Case | None = None
-        for did in (ids or [])[:5]:
-            doc = db.query(Document).filter(Document.id == did).first()
-            if not doc:
-                parts.append(f"Документ **[{did}]** не найден (возможно, неверный номер).")
-                continue
-            c = db.query(Case).filter(Case.id == doc.case_id).first()
-            reply_case = c or reply_case
-            ct = c.title if c else "?"
-            cn = c.case_number if c else "?"
-            parts.append(
-                f"**[{doc.id}]** {doc.filename}\n"
-                f"Папка: «{ct}» ({cn})\n"
-                f"Просмотр: /api/documents/{doc.id}/view  ·  "
-                f"Скачать: /api/documents/{doc.id}/download\n"
-                f"Выжимка: напишите «выжимка {doc.id}» "
-                f"(или API /api/documents/{doc.id}/summary)"
-            )
-        if parts:
-            reply_text = "\n\n".join(parts)
-            return await finalize_reply(
-                case=reply_case or command_case,
-                reply_text=reply_text,
-                mode="document-open-by-id",
-            )
 
     if looks_like_documents_list_request(text):
         reply_text = render_document_list(command_case, command_docs)
