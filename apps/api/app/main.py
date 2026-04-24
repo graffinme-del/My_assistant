@@ -464,6 +464,175 @@ def parse_explicit_document_ids_for_open(text: str) -> list[int]:
     return []
 
 
+def looks_like_why_document_not_moved_to_folder_question(text: str) -> bool:
+    """«Почему документ 159 не в папке … / не перенесён …» — фактический ответ по БД, без смыслового сбора."""
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    low = raw.lower()
+    if not any(w in low for w in ("почему", "зачем", "отчего", "как так")):
+        return False
+    ids = parse_explicit_document_ids_for_open(raw)
+    if not ids:
+        return False
+    return any(
+        k in low
+        for k in (
+            "папк",
+            "дело",
+            "перенес",
+            "перенёс",
+            "перенесен",
+            "перенесён",
+            "не в",
+            "нет в",
+            "остался",
+            "осталась",
+            "остались",
+            "лежит",
+            "находится",
+            "неразобран",
+            "unsorted",
+            "входящ",
+            "без номера",
+            "не сортир",
+            "не отсортир",
+        )
+    )
+
+
+def _pending_move_plan_for_document(db: Session, doc_id: int) -> tuple[PendingMovePlan, Case] | None:
+    plans = (
+        db.query(PendingMovePlan)
+        .order_by(PendingMovePlan.created_at.desc())
+        .limit(40)
+        .all()
+    )
+    for p in plans:
+        try:
+            raw_ids = json.loads(p.doc_ids_json or "[]")
+        except (json.JSONDecodeError, TypeError):
+            continue
+        id_set: set[int] = set()
+        for x in raw_ids if isinstance(raw_ids, list) else []:
+            try:
+                id_set.add(int(x))
+            except (TypeError, ValueError):
+                continue
+        if doc_id in id_set:
+            c = db.query(Case).filter(Case.id == p.case_id).first()
+            if c:
+                return p, c
+    return None
+
+
+def answer_why_document_not_in_target_folder(
+    db: Session, text: str
+) -> tuple[str, list[DocumentChatAction], Case | None] | None:
+    if not looks_like_why_document_not_moved_to_folder_question(text):
+        return None
+    ids = parse_explicit_document_ids_for_open(text)[:3]
+    if not ids:
+        return None
+    target_hint = (extract_case_hint_from_folder_phrase(text) or "").strip()
+    all_cases = db.query(Case).all()
+    target_case = find_case_by_hint(all_cases, target_hint, db=db) if target_hint else None
+
+    parts: list[str] = []
+    actions: list[DocumentChatAction] = []
+    reply_case: Case | None = None
+
+    for did in ids:
+        doc = db.query(Document).filter(Document.id == did).first()
+        if not doc:
+            parts.append(
+                f"Документа **[{did}]** в базе нет — переносить нечего или номер с ошибкой."
+            )
+            continue
+        actions.append(
+            DocumentChatAction(document_id=doc.id, filename=doc.filename or "document.pdf")
+        )
+        cur = db.query(Case).filter(Case.id == doc.case_id).first()
+        reply_case = cur or reply_case
+        if not cur:
+            parts.append(f"**[{doc.id}]** {doc.filename}: не удалось прочитать текущую папку (сбой связи с делом).")
+            continue
+        cur_is_unsorted = (cur.case_number or "").upper() == "UNSORTED"
+        cur_label = "«Неразобранное»" if cur_is_unsorted else f'«{cur.title}» ({cur.case_number})'
+
+        pending = _pending_move_plan_for_document(db, doc.id)
+        if target_hint and not target_case:
+            parts.append(
+                f"**[{doc.id}]** {doc.filename}\n"
+                f"Сейчас документ в папке {cur_label}.\n"
+                f'Папку «{target_hint}» по этой фразе найти не удалось — уточните название дела или добавьте алиас к делу.\n'
+                "Чтобы перенести вручную после того, как дело будет однозначно: "
+                f"«перенеси документ {doc.id} в дело <точное название>»."
+            )
+            continue
+
+        if not target_case:
+            hint_move = (
+                f"Чтобы положить в нужное дело: «перенеси документ {doc.id} в дело <название>» "
+                "(как в списке папок)."
+            )
+            if pending:
+                _, tcase = pending
+                parts.append(
+                    f"**[{doc.id}]** {doc.filename}\n"
+                    f"Сейчас в папке {cur_label}.\n"
+                    f"Есть **ожидающий план переноса** в дело «{tcase.title}» ({tcase.case_number}) — "
+                    "подтвердите перенос в чате по подсказке из предыдущего сообщения с планом "
+                    "(или отмените план и перенесите командой выше)."
+                )
+            elif cur_is_unsorted:
+                parts.append(
+                    f"**[{doc.id}]** {doc.filename}\n"
+                    f"Он всё ещё в **неразобранных** — автоматическая раскладка не отнесла его к делу "
+                    "или вы ещё не запускали перенос. "
+                    + hint_move
+                )
+            else:
+                parts.append(
+                    f"**[{doc.id}]** {doc.filename}\n"
+                    f"Сейчас документ уже лежит в деле {cur_label}. "
+                    "Система сама не перекладывает файлы без команды или без подтверждённого плана. "
+                    + hint_move
+                )
+            continue
+
+        # target_case resolved
+        if doc.case_id == target_case.id:
+            parts.append(
+                f"**[{doc.id}]** {doc.filename}\n"
+                f"Он **уже в** папке «{target_case.title}» ({target_case.case_number}). "
+                "Если в интерфейсе видите другое — обновите список документов или проверьте, что смотрите тот же номер [id]."
+            )
+        elif pending and pending[1].id == target_case.id:
+            parts.append(
+                f"**[{doc.id}]** {doc.filename}\n"
+                f"Сейчас в {cur_label}, но для него есть **план переноса** в «{target_case.title}» — перенос ещё не подтверждён."
+            )
+        elif cur_is_unsorted:
+            parts.append(
+                f"**[{doc.id}]** {doc.filename}\n"
+                f"Он **ещё в неразобранных**. В папку «{target_case.title}» его никто не переносил "
+                "(и автоматика не сопоставила с этим делом). "
+                f"Вручную: «перенеси документ {doc.id} в дело {target_case.title}»."
+            )
+        else:
+            parts.append(
+                f"**[{doc.id}]** {doc.filename}\n"
+                f"Сейчас документ в **другом** деле: {cur_label}, а не в «{target_case.title}». "
+                "Так бывает, если его положили вручную в другую папку или сработало другое правило. "
+                f"Чтобы переложить: «перенеси документ {doc.id} в дело {target_case.title}»."
+            )
+
+    if not parts:
+        return None
+    return "\n\n".join(parts), actions, reply_case
+
+
 def parse_document_filename_hint_for_open(text: str) -> str | None:
     """Имя файла из «покажи документ foo.pdf» или из кавычек «…»."""
     raw = (text or "").strip()
@@ -4519,6 +4688,16 @@ async def assistant_ingest_text(
             reply_text=reply_text,
             mode="documents-duplicates-cleanup",
             refresh_summary=True,
+        )
+
+    why_doc_reply = answer_why_document_not_in_target_folder(db, text)
+    if why_doc_reply is not None:
+        why_text, why_actions, why_case = why_doc_reply
+        return await finalize_reply(
+            case=why_case or get_or_create_unsorted_case(db),
+            reply_text=why_text,
+            mode="why-document-not-in-folder",
+            document_actions=why_actions or None,
         )
 
     if looks_like_semantic_matter_collect_request(text):
