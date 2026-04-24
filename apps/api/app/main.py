@@ -438,8 +438,76 @@ def format_duplicate_documents_across_cases_report(db: Session, *, limit_groups:
     return "\n".join(lines)
 
 
+def parse_explicit_document_ids_for_open(text: str) -> list[int]:
+    """Один или несколько id из [123], doc:123, «документ 123»."""
+    raw = (text or "").strip()
+    ids: list[int] = []
+    for m in re.finditer(r"\[(\d+)\]", raw):
+        ids.append(int(m.group(1)))
+    if ids:
+        return ids
+    for m in re.finditer(r"(?i)\bdoc(?:ument)?s?[:\s#]*(\d+)\b", raw):
+        ids.append(int(m.group(1)))
+    if ids:
+        return ids
+    m = re.search(
+        r"(?i)(?:документ|файл|pdf)(?:\s*(?:№|#|id|ид))?\s*[:\s]*(\d+)\b",
+        raw,
+    )
+    if m:
+        return [int(m.group(1))]
+    return []
+
+
+def looks_like_single_document_open_request(text: str) -> bool:
+    """«Дай документ 254», «покажи файл [12]» — не список всей папки."""
+    ids = parse_explicit_document_ids_for_open(text)
+    if not ids or len(ids) > 5:
+        return False
+    t = (text or "").lower()
+    verbs = (
+        "дай",
+        "покажи",
+        "покажите",
+        "пришли",
+        "вышли",
+        "открой",
+        "скачай",
+        "отправь",
+        "нужен",
+        "нужна",
+        "хочу посмотреть",
+        "где документ",
+        "где файл",
+        "ссылк",
+        "скачать",
+        "download",
+    )
+    if not any(v in t for v in verbs):
+        return False
+    if any(
+        x in t
+        for x in (
+            "все документы",
+            "все файлы",
+            "список документ",
+            "список файлов",
+            "какие документ",
+            "какие файлы",
+            "перечень документ",
+            "каждый документ",
+        )
+    ):
+        return False
+    if any(n in t for n in ("документ", "файл", "pdf", "вложен")) or re.search(r"\[\d+\]", text or ""):
+        return True
+    return False
+
+
 def looks_like_documents_list_request(text: str) -> bool:
     t = text.lower()
+    if looks_like_single_document_open_request(text):
+        return False
     return any(noun in t for noun in ["документ", "файл", "архив", "перечень", "реестр"]) and any(
         k in t
         for k in [
@@ -942,8 +1010,18 @@ def normalize_global_search_query(raw: str) -> str:
 
 
 def looks_like_single_doc_summary_request(text: str) -> bool:
-    t = text.lower()
-    return any(k in t for k in ["суть документа", "выжимка документа", "о чем документ", "резюме документа"])
+    t = (text or "").lower()
+    if any(k in t for k in ["суть документа", "выжимка документа", "о чем документ", "резюме документа"]):
+        return True
+    if re.search(r"(?i)\bвыжимк[аиуое]\s+(?:мне\s+)?(?:для\s+)?(?:doc|документ|файл)?\s*#?\s*\d+", t):
+        return True
+    if re.search(r"(?i)\bвыжимк[аиуое]\s+\d+", t):
+        return True
+    if re.search(r"(?i)\bсуть\s+\d+\b", t):
+        return True
+    if re.search(r"(?i)\bрезюме\s+(?:документ|файл)?\s*\d+", t):
+        return True
+    return False
 
 
 @app.get("/health")
@@ -4520,9 +4598,11 @@ async def assistant_ingest_text(
         return await finalize_reply(case=unsorted_case, reply_text=reply_text, mode="documents-grouped-by-case")
 
     if looks_like_single_doc_summary_request(text):
-        ids = [int(x) for x in re.findall(r"\b(\d+)\b", text)]
+        ids = parse_explicit_document_ids_for_open(text)
         if not ids:
-            reply_text = "Не вижу номер документа. Напишите, например: дай мне суть документа 72"
+            ids = [int(x) for x in re.findall(r"\b(\d+)\b", text or "")]
+        if not ids:
+            reply_text = "Не вижу номер документа. Напишите, например: выжимка 254 или суть документа 72"
         else:
             doc, summary_text = await build_document_summary_by_id(db, ids[0])
             reply_text = (
@@ -4656,6 +4736,34 @@ async def assistant_ingest_text(
         .order_by(Document.created_at.desc())
         .all()
     )
+    if looks_like_single_document_open_request(text):
+        ids = parse_explicit_document_ids_for_open(text)
+        parts: list[str] = []
+        reply_case: Case | None = None
+        for did in (ids or [])[:5]:
+            doc = db.query(Document).filter(Document.id == did).first()
+            if not doc:
+                parts.append(f"Документ **[{did}]** не найден (возможно, неверный номер).")
+                continue
+            c = db.query(Case).filter(Case.id == doc.case_id).first()
+            reply_case = c or reply_case
+            ct = c.title if c else "?"
+            cn = c.case_number if c else "?"
+            parts.append(
+                f"**[{doc.id}]** {doc.filename}\n"
+                f"Папка: «{ct}» ({cn})\n"
+                f"Скачать: `/api/documents/{doc.id}/download`\n"
+                f"Краткая выжимка (API): `/api/documents/{doc.id}/summary` "
+                f"или в чате: «выжимка {doc.id}»"
+            )
+        if parts:
+            reply_text = "\n\n".join(parts)
+            return await finalize_reply(
+                case=reply_case or command_case,
+                reply_text=reply_text,
+                mode="document-open-by-id",
+            )
+
     if looks_like_documents_list_request(text):
         reply_text = render_document_list(command_case, command_docs)
         return await finalize_reply(case=command_case, reply_text=reply_text, mode="documents-list")
