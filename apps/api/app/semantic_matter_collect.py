@@ -28,6 +28,73 @@ def _doc_snippet(doc: Document, limit: int = 480) -> str:
     return t if t else "(текст не извлечён)"
 
 
+def _normalize_quotes(s: str) -> str:
+    """«Умные» и типографские кавычки → обычные, чтобы парсер не ломался."""
+    return (
+        (s or "")
+        .replace("\u201c", '"')
+        .replace("\u201d", '"')
+        .replace("\u201e", '"')
+        .replace("\u00ab", "«")
+        .replace("\u00bb", "»")
+    )
+
+
+def _all_quoted_chunks(text: str) -> list[str]:
+    t = _normalize_quotes(text or "")
+    out: list[str] = []
+    for a, b in re.findall(r'«([^»]+)»|"([^"]+)"', t):
+        chunk = (a or b).strip()
+        if len(chunk) >= 2:
+            out.append(chunk)
+    for m in re.finditer(r"'([^']{2,})'", t):
+        out.append(m.group(1).strip())
+    return out
+
+
+def parse_semantic_collect_target_hint(text: str) -> str:
+    """
+    Целевая папка из запроса: сначала явное «в папку "…"», иначе последняя кавычка
+    (часто первая — номер дела-источник, последняя — куда собрать).
+    """
+    t = _normalize_quotes(text or "")
+    for pat in (
+        r'в\s+папк[уеиоа]\s+["«]([^"»]+)["»]',
+        r'в\s+дело\s+["«]([^"»]+)["»]',
+        r'перенеси(?:те)?[^.!?\n]*?\s+в\s+папк[уеиоа]\s+["«]([^"»]+)["»]',
+        r'собери(?:те)?[^.!?\n]*?\s+в\s+папк[уеиоа]\s+["«]([^"»]+)["»]',
+    ):
+        m = re.search(pat, t, flags=re.IGNORECASE | re.DOTALL)
+        if m:
+            return m.group(1).strip()
+    chunks = _all_quoted_chunks(t)
+    if chunks:
+        return chunks[-1].strip()
+    return ""
+
+
+def resolve_optional_source_case_only(
+    db: Session,
+    text: str,
+    target: Case,
+) -> Case | None:
+    """Две и более кавычек: первая часто папка-источник (например номер дела), последняя — совпадает с целью."""
+    from .main import find_case_by_hint
+
+    chunks = _all_quoted_chunks(text or "")
+    if len(chunks) < 2:
+        return None
+    first = chunks[0].strip()
+    last = chunks[-1].strip()
+    if first.lower() == last.lower():
+        return None
+    all_cases = db.query(Case).all()
+    src = find_case_by_hint(all_cases, first, db=db)
+    if not src or src.id == target.id:
+        return None
+    return src
+
+
 def looks_like_semantic_matter_collect_request(text: str) -> bool:
     """Перенос по смыслу/контексту во целевую папку со всех остальных."""
     t = (text or "").lower()
@@ -51,6 +118,11 @@ def looks_like_semantic_matter_collect_request(text: str) -> bool:
         "в одну папку по делу",
         "по номеру дел",
         "по номерам дел",
+        "перенеси подходящ",
+        "перенесите подходящ",
+        "просмотри всю папку",
+        "просмотри папку",
+        "просмотрите папку",
     )
     if not any(x in t for x in triggers):
         return False
@@ -84,7 +156,9 @@ def resolve_target_case_for_collect(
             c = db.query(Case).filter(Case.id == conversation.active_case_id).first()
             if c:
                 return c
-    title = parse_collect_folder_title(text)
+    title = parse_semantic_collect_target_hint(text)
+    if not title:
+        title = parse_collect_folder_title(text)
     if title:
         return find_case_by_hint(db.query(Case).all(), title, db=db)
     if conversation.active_case_id:
@@ -176,23 +250,29 @@ async def preview_semantic_collect_into_case(
     target = resolve_target_case_for_collect(db, conversation, text)
     if not target:
         return (
-            "Укажите целевую папку в кавычках, например: "
-            "«отсортируй документы и собери всё по делу в папку «Банкротство Эмиль»» "
-            "или откройте нужное дело слева и повторите запрос с формулировкой «в текущую папку».",
+            "Не получилось сопоставить **целевую папку** с карточкой дела. Напишите по-обычному, например: "
+            "«…перенеси подходящие документы в папку \"Банкротство Эмиль\"» — подойдут и обычные кавычки \"…\". "
+            "Либо откройте нужную папку слева и добавьте во фразу «в текущую папку».",
             None,
         )
 
     profile = _target_profile_lines(db, target)
-    all_rows = (
-        db.query(Document, Case)
-        .join(Case, Case.id == Document.case_id)
-        .filter(Document.case_id != target.id)
-        .order_by(Document.id.asc())
-        .limit(max_candidates + 5)
-        .all()
-    )
+    source_only = resolve_optional_source_case_only(db, text, target)
+
+    q = db.query(Document, Case).join(Case, Case.id == Document.case_id)
+    if source_only:
+        q = q.filter(Document.case_id == source_only.id)
+    else:
+        q = q.filter(Document.case_id != target.id)
+    all_rows = q.order_by(Document.id.asc()).limit(max_candidates + 5).all()
     candidates: list[tuple[Document, Case]] = [(d, c) for d, c in all_rows][:max_candidates]
     if not candidates:
+        if source_only:
+            return (
+                f'В папке «{source_only.title}» ({source_only.case_number}) нет документов для отбора '
+                f'или она совпадает с целевой.',
+                target,
+            )
         return (
             f'В других папках нет документов для переноса в «{target.title}» ({target.case_number}) — всё уже здесь или архив пуст.',
             target,
@@ -219,9 +299,10 @@ async def preview_semantic_collect_into_case(
             reasons[doc.id] = reason
 
     if not to_move:
+        where = f'в папке «{source_only.title}»' if source_only else "в других папках"
         return (
-            "По смыслу текста **не нашлось** документов в других папках, которые можно уверенно отнести к этой карточке. "
-            "Проверьте распознавание PDF или уточните формулировку (ФИО, номер дела).",
+            f"По смыслу текста **не нашлось** документов {where}, которые можно уверенно отнести к карточке "
+            f'«{target.title}». Проверьте распознавание PDF или уточните формулировку (ФИО, номер дела).',
             target,
         )
 
@@ -239,10 +320,16 @@ async def preview_semantic_collect_into_case(
     )
     db.commit()
 
+    scope_line = (
+        f"Область разбора: **только** папка «{source_only.title}» ({source_only.case_number})."
+        if source_only
+        else "Область разбора: все папки **кроме** целевой."
+    )
     lines: list[str] = [
         f'**Семантический сбор** в папку «{target.title}» ({target.case_number}).',
         "",
-        "Проанализированы документы из **других** папок (не из целевой). Ниже те, что модель считает относящимися к этому делу по тексту и контексту.",
+        scope_line,
+        "Ниже документы, которые модель считает относящимися к этому делу по тексту и контексту.",
         f"Кандидатов просмотрено: {len(candidates)}; к переносу отобрано: **{len(to_move)}**.",
         "",
         "Проверьте список и ответьте: `Да, перенеси все` или `Да, перенеси все, кроме 3, 7`",
