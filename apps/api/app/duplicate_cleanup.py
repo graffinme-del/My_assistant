@@ -134,6 +134,8 @@ def _heuristic_only_from_text(text: str) -> bool:
 
 def looks_like_cross_folder_duplicate_cleanup_request(text: str) -> bool:
     """Убрать лишние копии одного имени файла в разных папках."""
+    from .main import looks_like_delete_case_folder_request
+
     t = (text or "").lower()
     dup = any(
         k in t
@@ -163,6 +165,9 @@ def looks_like_cross_folder_duplicate_cleanup_request(text: str) -> bool:
             "сотри",
         )
     )
+    # «Удали папку А40-…» — удаление дела, не сценарий дубликатов (раньше ловилось из-за «удали» + «папк»).
+    if looks_like_delete_case_folder_request(text) and not dup:
+        return False
     preview = any(
         k in t
         for k in (
@@ -181,7 +186,7 @@ def looks_like_cross_folder_duplicate_cleanup_request(text: str) -> bool:
         return True
     if action and dup:
         return True
-    if action and ("папк" in t or "между папк" in t or "между дел" in t):
+    if action and ("между папк" in t or "между дел" in t):
         return True
     return False
 
