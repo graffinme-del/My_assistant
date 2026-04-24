@@ -231,6 +231,34 @@
         padding: 16px;
         background: #fff;
       }
+      .docx-preview-html {
+        font-size: 14px;
+        line-height: 1.45;
+        color: #1b1f24;
+        max-width: 100%;
+      }
+      .docx-preview-html p {
+        margin: 0 0 0.65em 0;
+      }
+      .docx-preview-html table {
+        border-collapse: collapse;
+        margin: 0.5em 0;
+        max-width: 100%;
+      }
+      .docx-preview-html td,
+      .docx-preview-html th {
+        border: 1px solid #c5cad3;
+        padding: 4px 8px;
+        vertical-align: top;
+      }
+      .docx-preview-html img {
+        max-width: 100%;
+        height: auto;
+      }
+      .docx-preview-warnings {
+        margin-top: 12px;
+        font-size: 12px;
+      }
       .muted {
         color: #5e6773;
         font-size: 13px;
@@ -475,6 +503,7 @@
         <div id="docViewerFallback"></div>
       </div>
     </div>
+    <script src="https://cdn.jsdelivr.net/npm/mammoth@1.7.0/mammoth.browser.min.js"></script>
     <script>
       /**
        * URL для запроса к API. По умолчанию — относительный путь /api/... (тот же хост и порт, что у страницы).
@@ -737,8 +766,10 @@
       function closeDocViewer() {
         const modal = el("docViewerModal");
         const frame = el("docViewerFrame");
+        const fb = el("docViewerFallback");
         revokeFrameBlobUrl(frame);
         if (frame) frame.src = "about:blank";
+        if (fb) fb.innerHTML = "";
         if (modal) {
           modal.classList.remove("open");
           modal.style.display = "none";
@@ -780,7 +811,74 @@
         const fb = el("docViewerFallback");
         const modal = el("docViewerModal");
 
-        if (iframeOk) {
+        if (ext === "doc") {
+          frame.style.display = "none";
+          frame.src = "about:blank";
+          revokeFrameBlobUrl(frame);
+          fb.style.display = "block";
+          fb.innerHTML = "";
+          const p1 = document.createElement("p");
+          p1.className = "muted";
+          p1.textContent =
+            "Просмотр в окне настроен для .docx. Файлы .doc (старый Word) скачайте и откройте в Word / LibreOffice либо сохраните копию как .docx.";
+          fb.appendChild(p1);
+          const p2 = document.createElement("p");
+          const a = document.createElement("a");
+          a.href = "#";
+          a.rel = "noopener";
+          a.textContent = "Скачать файл";
+          a.onclick = async (ev) => {
+            ev.preventDefault();
+            try {
+              const blob = await fetchDocumentAsBlob(doc.id, { inline: false });
+              saveBlobAsDownload(blob, doc.filename || "document-" + doc.id);
+            } catch (err) {
+              alert("Не удалось скачать: " + (err && err.message ? err.message : err));
+            }
+          };
+          p2.appendChild(a);
+          fb.appendChild(p2);
+        } else if (ext === "docx") {
+          frame.style.display = "none";
+          frame.src = "about:blank";
+          revokeFrameBlobUrl(frame);
+          fb.style.display = "block";
+          fb.innerHTML =
+            '<p class="muted docx-preview-status">Загрузка и преобразование документа…</p>';
+          try {
+            if (typeof mammoth === "undefined") {
+              throw new Error(
+                "Не загружена библиотека просмотра Word (mammoth). Проверьте сеть или блокировщик рекламы."
+              );
+            }
+            const blob = await fetchDocumentAsBlob(doc.id, { inline: true });
+            const result = await mammoth.convertToHtml({
+              arrayBuffer: await blob.arrayBuffer()
+            });
+            fb.innerHTML = "";
+            const wrap = document.createElement("div");
+            wrap.className = "docx-preview-html";
+            wrap.innerHTML = result.value;
+            fb.appendChild(wrap);
+            if (result.messages && result.messages.length) {
+              const warn = document.createElement("p");
+              warn.className = "muted docx-preview-warnings";
+              warn.textContent = result.messages.map((m) => m.message).join(" · ");
+              fb.appendChild(warn);
+            }
+          } catch (e) {
+            fb.innerHTML = "";
+            const p1 = document.createElement("p");
+            p1.className = "error";
+            p1.textContent =
+              "Не удалось показать .docx: " + (e && e.message ? e.message : e);
+            fb.appendChild(p1);
+            const p2 = document.createElement("p");
+            p2.className = "muted";
+            p2.textContent = "Скачайте файл кнопкой «Скачать» вверху.";
+            fb.appendChild(p2);
+          }
+        } else if (iframeOk) {
           frame.style.display = "block";
           fb.style.display = "none";
           fb.innerHTML = "";
