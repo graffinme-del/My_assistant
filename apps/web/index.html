@@ -1213,6 +1213,91 @@
         }
       }
 
+      /**
+       * Если разбор по строкам не дал кнопок (старый кэш, нестандартные переводы строк, ошибка в парсере),
+       * всё равно добавляем рабочие ссылки по любому вхождению /api/documents/{id}/ в тексте ответа.
+       */
+      function injectDocumentChatActionsIfMissing(container, text) {
+        if (!container || container.querySelector("a.downloadBtn")) return;
+        const t = String(text || "").replace(/^\uFEFF/, "");
+        if (!/\/api\/documents\/\d+\//i.test(t) && !/api\/documents\/\d+\//i.test(t))
+          return;
+
+        const head = t.match(/\*\*\[(\d+)\]\*\*\s*([^\n\r]+)/);
+        let docId = head ? head[1] : null;
+        const fname = head
+          ? (head[2].trim().split(/\s+/)[0] || "document.pdf")
+          : "document.pdf";
+        if (!docId) {
+          const vm = t.match(/\/api\/documents\/(\d+)\/view/i);
+          const dm = t.match(/\/api\/documents\/(\d+)\/download/i);
+          const sm = t.match(/\/api\/documents\/(\d+)\/summary/i);
+          docId = vm ? vm[1] : dm ? dm[1] : sm ? sm[1] : null;
+        }
+        if (!docId) return;
+
+        const apiTok = () => storage.apiToken || "owner-dev-token";
+        function withTok(absolutePath) {
+          let raw = String(absolutePath || "").trim();
+          const qAt = raw.indexOf("?");
+          let pathPart = qAt >= 0 ? raw.slice(0, qAt) : raw;
+          const query = qAt >= 0 ? raw.slice(qAt + 1) : "";
+          if (pathPart.startsWith("/api")) pathPart = pathPart.slice(4);
+          if (!pathPart.startsWith("/")) pathPart = "/" + pathPart.replace(/^\/+/, "");
+          const url = resolveApiRequestUrl(pathPart);
+          const params = new URLSearchParams(query);
+          params.set("token", apiTok());
+          return `${url}?${params.toString()}`;
+        }
+
+        const row = document.createElement("div");
+        row.className = "docChatFallbackActions";
+        row.style.marginTop = "10px";
+        row.style.paddingTop = "8px";
+        row.style.borderTop = "1px solid #e2e5e9";
+
+        const label = document.createElement("span");
+        label.className = "muted";
+        label.style.fontSize = "12px";
+        label.textContent = "Открыть документ: ";
+        row.appendChild(label);
+
+        const vA = document.createElement("a");
+        vA.href = withTok(`/api/documents/${docId}/view`);
+        vA.textContent = "Просмотр";
+        vA.target = "_blank";
+        vA.rel = "noopener noreferrer";
+        vA.className = "downloadBtn viewBtn";
+        vA.onclick = (ev) => {
+          if (ev.ctrlKey || ev.metaKey || ev.shiftKey || ev.button !== 0) return;
+          ev.preventDefault();
+          openDocumentViewer({ id: Number(docId), filename: fname });
+        };
+        row.appendChild(vA);
+        row.appendChild(document.createTextNode(" "));
+
+        const dA = document.createElement("a");
+        dA.href = withTok(`/api/documents/${docId}/download`);
+        dA.textContent = "Скачать";
+        dA.target = "_blank";
+        dA.rel = "noopener noreferrer";
+        dA.className = "downloadBtn";
+        row.appendChild(dA);
+        row.appendChild(document.createTextNode(" "));
+
+        const summaryBtn = document.createElement("a");
+        summaryBtn.href = "#";
+        summaryBtn.textContent = "Выжимка";
+        summaryBtn.className = "downloadBtn summaryBtn";
+        summaryBtn.onclick = (ev) => {
+          ev.preventDefault();
+          showDocumentSummary(Number(docId));
+        };
+        row.appendChild(summaryBtn);
+
+        container.appendChild(row);
+      }
+
       function attachDeleteToMessageBox(box, messageId) {
         if (messageId == null || messageId === "") return;
         const mid = Number(messageId);
@@ -1258,7 +1343,13 @@
         const body = document.createElement("div");
         body.className = "msgBody";
         if (role === "assistant") {
-          renderAssistantMessage(body, text);
+          try {
+            renderAssistantMessage(body, text);
+          } catch (err) {
+            console.error("renderAssistantMessage", err);
+            body.textContent = String(text || "");
+          }
+          injectDocumentChatActionsIfMissing(body, text);
         } else {
           const pre = document.createElement("pre");
           pre.textContent = text;
