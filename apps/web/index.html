@@ -1023,28 +1023,61 @@
 
       function renderAssistantMessage(container, text) {
         const lines = String(text).split("\n");
+        const apiToken = () => storage.apiToken || "owner-dev-token";
+        const withToken = (path) =>
+          `${window.location.origin}${path}?token=${encodeURIComponent(apiToken())}`;
+
+        function stripDocApiUrls(s) {
+          return String(s)
+            .replace(/\([^)]*`?\/api\/documents\/\d+\/download\?inline=\d+`?[^)]*\)/gi, "")
+            .replace(/`?\/?api\/documents\/\d+\/(?:view|download)(?:\?[^\s`]*)?`?/gi, "")
+            .replace(/\s{2,}/g, " ")
+            .replace(/\(\s*\)/g, "")
+            .trim();
+        }
+
         for (const line of lines) {
           const row = document.createElement("div");
           row.style.whiteSpace = "pre-wrap";
-          const m = line.match(/^(.*?\[(\d+)\].*?)(\/api\/documents\/\d+\/download)(.*)$/i);
-          if (!m) {
-            row.textContent = line;
-            container.appendChild(row);
-            continue;
-          }
-          const before = (m[1] || "").replace(/скачать:\s*$/i, "").trimEnd();
-          const documentId = m[2];
-          const after = (m[3] || "").trim();
-          if (before) row.append(document.createTextNode(before + " "));
-          const link = document.createElement("a");
-          const token = storage.apiToken || "owner-dev-token";
-          link.href = `${window.location.origin}${m[3]}?token=${encodeURIComponent(token)}`;
-          link.textContent = "Скачать";
-          link.target = "_blank";
-          link.rel = "noopener noreferrer";
-          link.className = "downloadBtn";
-          row.append(link);
-          if (documentId) {
+
+          const viewM = line.match(/(\/api\/documents\/(\d+)\/view(?:\?[^\s`']*)?)/i);
+          const dlM = line.match(/(\/api\/documents\/(\d+)\/download(?:\?[^\s`']*)?)/i);
+          const bracketM = line.match(/\[(\d+)\]/);
+          let documentId = null;
+          if (viewM) documentId = viewM[2];
+          else if (dlM) documentId = dlM[2];
+          else if (bracketM) documentId = bracketM[1];
+
+          const viewPath =
+            viewM && String(documentId) === String(viewM[2]) ? viewM[1] : null;
+          const dlPath =
+            dlM && String(documentId) === String(dlM[2]) && !/\binline=/i.test(dlM[1])
+              ? dlM[1]
+              : null;
+
+          if (documentId && (viewPath || dlPath)) {
+            const visible = stripDocApiUrls(line);
+            if (visible) row.append(document.createTextNode(visible + " "));
+            if (viewPath) {
+              const a = document.createElement("a");
+              a.href = withToken(viewPath);
+              a.textContent = "Просмотр";
+              a.target = "_blank";
+              a.rel = "noopener noreferrer";
+              a.className = "downloadBtn viewBtn";
+              row.append(a);
+              row.append(document.createTextNode(" "));
+            }
+            if (dlPath) {
+              const a = document.createElement("a");
+              a.href = withToken(dlPath);
+              a.textContent = "Скачать";
+              a.target = "_blank";
+              a.rel = "noopener noreferrer";
+              a.className = "downloadBtn";
+              row.append(a);
+              row.append(document.createTextNode(" "));
+            }
             const summaryBtn = document.createElement("a");
             summaryBtn.href = "#";
             summaryBtn.textContent = "Выжимка";
@@ -1054,7 +1087,46 @@
               showDocumentSummary(Number(documentId));
             };
             row.append(summaryBtn);
+            container.appendChild(row);
+            continue;
           }
+
+          const m = line.match(
+            /^(.*?\[(\d+)\].*?)(\/api\/documents\/\d+\/download(?:\?[^\s]*)?)(.*)$/i
+          );
+          if (!m) {
+            row.textContent = line;
+            container.appendChild(row);
+            continue;
+          }
+          const before = (m[1] || "").replace(/скачать:\s*$/i, "").trimEnd();
+          const documentIdLegacy = m[2];
+          const after = (m[4] || "").trim();
+          if (before) row.append(document.createTextNode(before + " "));
+          const link = document.createElement("a");
+          link.href = withToken(m[3]);
+          link.textContent = "Скачать";
+          link.target = "_blank";
+          link.rel = "noopener noreferrer";
+          link.className = "downloadBtn";
+          row.append(link);
+          row.append(document.createTextNode(" "));
+          const viewLink = document.createElement("a");
+          viewLink.href = withToken(`/api/documents/${documentIdLegacy}/view`);
+          viewLink.textContent = "Просмотр";
+          viewLink.target = "_blank";
+          viewLink.rel = "noopener noreferrer";
+          viewLink.className = "downloadBtn viewBtn";
+          row.append(viewLink);
+          const summaryBtn = document.createElement("a");
+          summaryBtn.href = "#";
+          summaryBtn.textContent = "Выжимка";
+          summaryBtn.className = "downloadBtn summaryBtn";
+          summaryBtn.onclick = (ev) => {
+            ev.preventDefault();
+            showDocumentSummary(Number(documentIdLegacy));
+          };
+          row.append(summaryBtn);
           if (after) row.append(document.createTextNode(" " + after));
           container.appendChild(row);
         }

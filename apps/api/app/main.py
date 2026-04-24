@@ -477,6 +477,11 @@ def looks_like_single_document_open_request(text: str) -> bool:
         "нужен",
         "нужна",
         "хочу посмотреть",
+        "посмотреть",
+        "просмотр",
+        "просмотри",
+        "просмотреть",
+        "отобрази",
         "где документ",
         "где файл",
         "ссылк",
@@ -704,6 +709,8 @@ def looks_like_delete_documents_command(text: str) -> bool:
 
 def looks_like_show_documents_in_folder_only(text: str) -> bool:
     """Просмотр списка («покажи документы в папке …»), не перенос из активного дела."""
+    if looks_like_single_document_open_request(text):
+        return False
     t = (text or "").lower()
     if not any(n in t for n in ["документ", "файл", "архив", "материал"]):
         return False
@@ -1236,6 +1243,16 @@ def download_document(
         media_type=media_type,
         content_disposition_type="inline" if inline else "attachment",
     )
+
+
+@app.get("/documents/{document_id}/view")
+def view_document(
+    document_id: int,
+    db: Session = Depends(get_db),
+    _: str = Depends(require_user_header_or_query),
+) -> FileResponse:
+    """Открыть файл в браузере (PDF/изображения), без принудительного скачивания."""
+    return download_document(document_id, inline=True, db=db, _=_)
 
 
 @app.get("/documents/{document_id}/summary")
@@ -4752,7 +4769,9 @@ async def assistant_ingest_text(
             parts.append(
                 f"**[{doc.id}]** {doc.filename}\n"
                 f"Папка: «{ct}» ({cn})\n"
-                f"Скачать: `/api/documents/{doc.id}/download`\n"
+                f"Просмотр в браузере: `/api/documents/{doc.id}/view` "
+                f"(или `/api/documents/{doc.id}/download?inline=1`)\n"
+                f"Скачать файлом: `/api/documents/{doc.id}/download`\n"
                 f"Краткая выжимка (API): `/api/documents/{doc.id}/summary` "
                 f"или в чате: «выжимка {doc.id}»"
             )
