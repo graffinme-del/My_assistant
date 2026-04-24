@@ -55,6 +55,11 @@ def folder_preference_hint_from_text(text: str) -> str | None:
         s = (a or b).strip()
         if len(s) >= 2:
             return s
+    from .main import extract_case_hint_from_folder_phrase
+
+    u = (extract_case_hint_from_folder_phrase(text or "") or "").strip()
+    if len(u) >= 2:
+        return u
     return None
 
 

@@ -23,7 +23,7 @@ def _strip_json_fence(raw: str) -> str:
 
 
 def _fallback_matter_hints(text: str) -> list[str]:
-    from .main import _extract_delete_target_phrases
+    from .main import _extract_delete_target_phrases, extract_case_hint_from_folder_phrase
 
     out: list[str] = []
     seen: set[str] = set()
@@ -40,6 +40,9 @@ def _fallback_matter_hints(text: str) -> list[str]:
 
     for p in _extract_delete_target_phrases(text):
         add(p)
+    fh = (extract_case_hint_from_folder_phrase(text or "") or "").strip()
+    if fh:
+        add(fh)
     for a, b in re.findall(r'"([^"]+)"|«([^»]+)»', text or ""):
         add((a or b).strip())
     for pat in (
@@ -154,8 +157,8 @@ async def build_cross_folder_matter_narrative(db: Session, user_message: str) ->
     if not hints:
         return (
             "Не удалось понять, о ком или о чём искать по всем папкам. "
-            "Напишите, например: «Дай полный расклад по банкротству Касумов Эмиль Алиевич» "
-            "или заключите ФИО в кавычки."
+            "Напишите, например: Дай полный расклад по банкротству Касумов Эмиль Алиевич "
+            "или по делу Банкротство Эмиль — кавычки не обязательны."
         )
 
     docs = _collect_documents_union(db, hints)

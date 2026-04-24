@@ -210,27 +210,50 @@ def get_or_create_unsorted_case(db: Session) -> Case:
     return case
 
 
+def _trim_unquoted_case_fragment(raw: str) -> str:
+    s = (raw or "").strip().strip("\"'«»")
+    s = re.sub(r"\s+", " ", s)
+    parts = s.split()
+    if len(parts) > 14:
+        s = " ".join(parts[:14])
+    if len(s) > 120:
+        s = s[:120].rsplit(" ", 1)[0]
+    return s.strip()
+
+
 def extract_case_hint_from_folder_phrase(text: str) -> str:
-    """Название папки/дела из «в папке …», «по делу …» — кавычки не обязательны."""
+    """Название папки/дела из «в папке …», «по делу …», «в отдельную папку …» — кавычки не обязательны."""
     head = (text or "").split("\n", 1)[0].strip()
     if not head:
         return ""
+    _q = r'(?:«([^»]+)»|"([^"]+)"|\'([^\']+)\')'
     for pat in (
-        r'(?:в|во)\s+папк[еиу]\s+(?:«([^»]+)»|"([^"]+)"|\'([^\']+)\')',
-        r'по\s+делу\s+(?:«([^»]+)»|"([^"]+)"|\'([^\']+)\')',
+        r"(?:в|во)\s+отдельн(?:ую|ой)\s+папк[уеиоа]\s+" + _q,
+        r"(?:в|во)\s+нов(?:ую|ой)\s+папк[уеиоа]\s+" + _q,
+        r"создай(?:те)?\s+папк[уеиоа]\s+" + _q,
+        r"(?:в|во)\s+папк[еиу]\s+" + _q,
+        r"в\s+дело\s+" + _q,
+        r"к\s+делу\s+" + _q,
+        r"по\s+делу\s+" + _q,
     ):
         m = re.search(pat, head, flags=re.IGNORECASE)
         if m:
             hint = next((g for g in m.groups() if g and g.strip()), "")
             if hint:
                 return hint.strip()
+    _u_end = r"(?=\s*[.!?:,;\n\u2014–]|\s*$)"
     for pat in (
-        r'(?:в|во)\s+папк[еиу]\s+(.+?)(?:\s*[.!?]|$)',
-        r'по\s+делу\s+(.+?)(?:\s*[.!?]|$)',
+        r"(?:в|во)\s+отдельн(?:ую|ой)\s+папк[уеиоа]\s+(.+?)" + _u_end,
+        r"(?:в|во)\s+нов(?:ую|ой)\s+папк[уеиоа]\s+(.+?)" + _u_end,
+        r"создай(?:те)?\s+папк[уеиоа]\s+(.+?)" + _u_end,
+        r"(?:в|во)\s+папк[еиу]\s+(.+?)" + _u_end,
+        r"\bв\s+дело\s+(.+?)" + _u_end,
+        r"\bк\s+делу\s+(.+?)" + _u_end,
+        r"\bпо\s+делу\s+(.+?)" + _u_end,
     ):
         m = re.search(pat, head, flags=re.IGNORECASE)
         if m:
-            hint = m.group(1).strip().strip('"\'«»')
+            hint = _trim_unquoted_case_fragment(m.group(1))
             if hint and len(hint) >= 2:
                 return hint
     return ""
@@ -537,12 +560,15 @@ def looks_like_save_message_to_case_request(text: str) -> bool:
 
 
 def parse_save_message_case_hint(text: str) -> str:
-    """Название дела из кавычек в начале запроса (не из длинного текста ниже)."""
+    """Название дела: кавычки или фразы «в папке …», «по делу …» (первая строка / начало)."""
     head = text.split("\n", 1)[0] if "\n" in text else text[:600]
     for pat in (r"«([^»]+)»", r'"([^"]+)"', r"'([^']+)'"):
         m = re.search(pat, head)
         if m:
             return m.group(1).strip()
+    hint_u = extract_case_hint_from_folder_phrase(head)
+    if hint_u:
+        return hint_u
     return ""
 
 
@@ -564,6 +590,15 @@ def extract_saved_message_body_for_case(text: str) -> str:
     )
     if stripped.strip() and stripped != text:
         return stripped.strip()
+    hint = parse_save_message_case_hint(text)
+    first_line = lines[0] if lines else text
+    if hint and first_line:
+        pos = first_line.lower().find(hint.lower())
+        if pos != -1:
+            tail = first_line[pos + len(hint) :].strip()
+            tail = re.sub(r"^[)\]\}»\"'.,;:\s—–\-]+", "", tail)
+            if tail:
+                return "\n".join([tail] + lines[1:]).strip() if len(lines) > 1 else tail
     return text.strip()
 
 
@@ -1459,7 +1494,7 @@ def execute_delete_documents_and_optional_folder(
 def handle_delete_documents_chat(
     db: Session, text: str, conversation: Conversation
 ) -> tuple[str, Case | None] | None:
-    """Чат: удалить документы по id, по номеру дела или по фрагменту имени файла (в кавычках)."""
+    """Чат: удалить документы по id, по номеру дела, по фразе в PDF/имени или «все в папке …» без кавычек."""
     if not looks_like_delete_documents_command(text):
         return None
     low = (text or "").lower()
@@ -1504,6 +1539,10 @@ def handle_delete_documents_chat(
     )
 
     case: Case | None = find_first_case_by_arbitr_numbers_in_text(db, text)
+    if not case and wants_all:
+        fh = extract_case_hint_from_folder_phrase(text)
+        if fh:
+            case = find_case_by_hint(db.query(Case).all(), fh, db=db)
     if not case and wants_all and any(
         p in low for p in ("этой папк", "текущ", "открыт", "в этой", "из этой", "это дело")
     ):
@@ -1560,11 +1599,11 @@ def handle_delete_documents_chat(
         )
     return (
         "Напишите, что именно удалить:\n"
-        "• по номерам: «удали документы 214 287»;\n"
-        "• всё по делу: «удали все документы дела А53-13969/2026»;\n"
-        "• всё в открытой папке: «удали все документы в этой папке»;\n"
-        "• по ФИО/фразе в PDF: «удали все документы по Вартанов Эмиль Валерьевич» или «удали файлы «Вартанов»»;\n"
-        "• после поиска: «удали этот документ и папку, где он лежит».",
+        "• по номерам: удали документы 214 287;\n"
+        "• всё по делу: удали все документы дела А53-13969/2026 или удали все документы по делу Банкротство Эмиль;\n"
+        "• всё в открытой папке: удали все документы в этой папке;\n"
+        "• по ФИО/фразе в PDF: удали все документы по Вартанов Эмиль Валерьевич;\n"
+        "• после поиска: удали этот документ и папку, где он лежит.",
         fallback_case,
     )
 
@@ -2908,8 +2947,8 @@ def preview_move_all_documents_from_active_case_to_folder(
 ) -> tuple[str, Case | None]:
     if not title:
         return (
-            'Не вижу название папки в кавычках. Пример: Собери все документы в отдельную папку «Сделка по Гримме» '
-            "или: Создай папку «Сделка по Гримме» и перенеси туда все документы, содержащие: A40-97353",
+            "Не вижу **название папки**. Пример без кавычек: «Собери все документы в отдельную папку Сделка по Гримме» "
+            "или «Создай папку Сделка по Гримме и перенеси туда все документы, содержащие: A40-97353».",
             None,
         )
     if not conversation.active_case_id:
@@ -3941,7 +3980,7 @@ async def save_message_to_case_event(db: Session, text: str, cases: list[Case]) 
     hint = parse_save_message_case_hint(text)
     if not hint:
         return (
-            "Укажите папку или дело в кавычках, например: Сохрани это сообщение в папке «Название»",
+            "Укажите папку или дело, например: Сохрани это сообщение в папке Банкротство Эмиль — кавычки не обязательны.",
             None,
         )
     case = find_case_by_hint(cases, hint, db=db)

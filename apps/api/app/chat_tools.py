@@ -221,7 +221,7 @@ CHAT_TOOLS: list[dict[str, Any]] = [
                 "properties": {
                     "instruction": {
                         "type": "string",
-                        "description": "Запрос пользователя целиком: целевая папка в «кавычках», формулировка про сортировку/контекст.",
+                        "description": "Запрос пользователя целиком: куда собрать (в папку … / по делу …), кавычки не обязательны; контекст сортировки.",
                     },
                 },
                 "required": ["instruction"],
@@ -243,7 +243,7 @@ CHAT_TOOLS: list[dict[str, Any]] = [
                 "properties": {
                     "new_folder_title": {
                         "type": "string",
-                        "description": "Название новой папки/дела. Пусто, если не названо.",
+                        "description": "Название новой папки/дела (можно без кавычек). Пусто, если не названо — сервер возьмёт из текста.",
                     },
                     "scope": {
                         "type": "string",
