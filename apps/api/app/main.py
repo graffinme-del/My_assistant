@@ -456,6 +456,10 @@ def parse_explicit_document_ids_for_open(text: str) -> list[int]:
     )
     if m:
         return [int(m.group(1))]
+    # Ответ одним числом после «уточните по номеру» и т.п.: «254»
+    m = re.fullmatch(r"#?(\d{1,6})", raw)
+    if m:
+        return [int(m.group(1))]
     return []
 
 
@@ -525,7 +529,9 @@ def find_documents_by_filename_hint(db: Session, hint: str, *, limit: int = 12) 
 
 
 def looks_like_single_document_open_request(text: str) -> bool:
-    """«Дай документ 254», «покажи файл [12]», «документ foo.pdf» — не список всей папки."""
+    """«Дай документ 254», «покажи файл [12]», «документ foo.pdf», уточнение «254» — не список всей папки."""
+    raw_stripped = (text or "").strip()
+    bare_single_doc_id = bool(re.fullmatch(r"#?\d{1,6}", raw_stripped))
     ids = parse_explicit_document_ids_for_open(text)
     fh = parse_document_filename_hint_for_open(text)
     if ids:
@@ -557,7 +563,7 @@ def looks_like_single_document_open_request(text: str) -> bool:
         "скачать",
         "download",
     )
-    if not any(v in t for v in verbs):
+    if not any(v in t for v in verbs) and not (bare_single_doc_id and ids):
         return False
     if any(
         x in t
@@ -574,8 +580,10 @@ def looks_like_single_document_open_request(text: str) -> bool:
     ):
         return False
     if ids:
-        if any(n in t for n in ("документ", "файл", "pdf", "вложен")) or re.search(
-            r"\[\d+\]", text or ""
+        if (
+            bare_single_doc_id
+            or any(n in t for n in ("документ", "файл", "pdf", "вложен"))
+            or re.search(r"\[\d+\]", text or "")
         ):
             return True
         return False
