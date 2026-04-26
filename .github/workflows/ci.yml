@@ -44,19 +44,20 @@ jobs:
     needs: api-check
     steps:
       - uses: actions/checkout@v4
+      - name: Prepare compose env files
+        run: |
+          cp -f env.example .env
+          cp -f env.example ../.env
+          cp -f env.example /tmp/my_assistant_ci.env
       - name: Validate prod compose (fixed ports + .env)
         run: |
-          cp -f env.example /tmp/my_assistant_ci.env
           docker compose --project-directory "$PWD" -f infra/compose.prod.yml --env-file /tmp/my_assistant_ci.env config >/dev/null
       - name: Validate root compose (include prod)
         run: |
-          cp -f env.example /tmp/my_assistant_ci.env
           docker compose --project-directory "$PWD" --env-file /tmp/my_assistant_ci.env config >/dev/null
       - name: Validate runtime.compose (GHCR prod)
         run: |
-          cp -f env.example /tmp/my_assistant_ci.env
           docker compose --project-directory "$PWD" -f runtime.compose.yml --env-file /tmp/my_assistant_ci.env config >/dev/null
       - name: Build containers
         run: |
-          cp -f env.example /tmp/my_assistant_ci.env
           docker compose --project-directory "$PWD" -f infra/compose.prod.yml --env-file /tmp/my_assistant_ci.env build
