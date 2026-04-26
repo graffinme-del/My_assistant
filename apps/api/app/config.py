@@ -47,6 +47,12 @@ class Settings(BaseSettings):
     parser_api_base_url: str = "https://parser-api.com/parser/arbitr_api"
     parser_api_timeout_sec: int = 120
 
+    # «Мой Арбитр» (my.arbitr.ru): внешний личный кабинет через Госуслуги/УКЭП.
+    # Ассистент помогает с маршрутом подачи и подготовкой пакета, но не хранит учётные данные и не отправляет документы сам.
+    moy_arbitr_enabled: bool = True
+    moy_arbitr_base_url: str = "https://my.arbitr.ru"
+    moy_arbitr_timeout_sec: int = 10
+
     # Естественный язык: один вызов LLM с function-calling (поиск, удаление папки, КАД, перенос в папку…).
     # См. chat_tools.py. Отключить эвристику+стоимость API: CHAT_TOOLS_ROUTER=0
     chat_tools_router_enabled: bool = True

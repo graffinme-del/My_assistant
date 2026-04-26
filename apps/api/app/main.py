@@ -102,6 +102,11 @@ from .materials_workflow import (
     looks_like_extract_deadlines_request,
     looks_like_materials_draft_request,
 )
+from .moy_arbitr import (
+    format_moy_arbitr_chat_reply,
+    moy_arbitr_connection_status,
+    looks_like_moy_arbitr_command,
+)
 from .models import (
     Case,
     CaseEmbedding,
@@ -2878,6 +2883,14 @@ def internal_parser_api_service_status(user_role: str = Depends(require_user)) -
         raise HTTPException(status_code=502, detail=f"Parser-API status: {e}") from e
 
 
+@app.get("/internal/moy-arbitr/status")
+def internal_moy_arbitr_status(user_role: str = Depends(require_user)) -> dict[str, Any]:
+    """Проверка внешнего коннектора «Мой Арбитр». Только owner."""
+    if user_role != "owner":
+        raise HTTPException(status_code=403, detail="Owner token required")
+    return moy_arbitr_connection_status()
+
+
 @app.post("/assistant/summary-from-text", response_model=AssistantSummaryOut)
 async def assistant_summary_from_text(
     payload: AssistantSummaryIn,
@@ -5033,6 +5046,11 @@ async def assistant_ingest_text(
             reply_text=reply_fc,
             mode="folder-document-count",
         )
+
+    if looks_like_moy_arbitr_command(text):
+        active_case = conversation.active_case or get_or_create_unsorted_case(db)
+        reply_text = format_moy_arbitr_chat_reply(text, active_case=conversation.active_case)
+        return await finalize_reply(case=active_case, reply_text=reply_text, mode="moy-arbitr-command")
 
     if looks_like_court_search_command(text):
         _ac = conversation.active_case
