@@ -11,6 +11,9 @@ from .config import settings
 from .models import Case
 
 
+MOY_ARBITR_QUERY_PREFIX = "moy_arbitr_"
+
+
 DEFAULT_MOY_ARBITR_BASE_URL = "https://my.arbitr.ru"
 
 
@@ -18,6 +21,13 @@ DEFAULT_MOY_ARBITR_BASE_URL = "https://my.arbitr.ru"
 class MoyArbitrSection:
     title: str
     reason: str
+
+
+@dataclass
+class MoyArbitrSearchRequest:
+    query_type: str
+    query_value: str
+    run_mode: str = "preview"
 
 
 def _base_url() -> str:
@@ -46,6 +56,28 @@ def looks_like_moy_arbitr_command(text: str) -> bool:
     return any(marker in lowered for marker in filing_markers)
 
 
+def looks_like_moy_arbitr_search_command(text: str) -> bool:
+    lowered = (text or "").casefold()
+    if not any(m in lowered for m in ("мой арбитр", "моем арбитре", "моём арбитре", "my.arbitr")):
+        return False
+    return any(
+        m in lowered
+        for m in (
+            "найди",
+            "поищи",
+            "поиск",
+            "скачай",
+            "загрузи",
+            "материалы",
+            "документы",
+            "проверь",
+            "участник",
+            "инн",
+            "огрн",
+        )
+    )
+
+
 def extract_moy_arbitr_case_number(text: str) -> str:
     raw = text or ""
     m = re.search(
@@ -58,6 +90,98 @@ def extract_moy_arbitr_case_number(text: str) -> str:
     if not m:
         return ""
     return normalize_arbitr_case_number(m.group(1))
+
+
+def _normalize_digits(value: str) -> str:
+    return re.sub(r"\D+", "", value or "")
+
+
+def parse_moy_arbitr_search_request(text: str) -> MoyArbitrSearchRequest | None:
+    raw = text or ""
+    lowered = raw.casefold()
+    if not looks_like_moy_arbitr_search_command(raw):
+        return None
+
+    case_number = extract_moy_arbitr_case_number(raw)
+    if case_number:
+        return MoyArbitrSearchRequest(
+            query_type="moy_arbitr_case_number",
+            query_value=case_number,
+            run_mode="download" if any(w in lowered for w in ("скачай", "загрузи", "материалы", "документы")) else "preview",
+        )
+
+    m_inn = re.search(r"\bинн\b[:\s]*([\d\s]{10,15})", raw, flags=re.IGNORECASE)
+    if m_inn:
+        inn = _normalize_digits(m_inn.group(1))
+        if inn:
+            return MoyArbitrSearchRequest(
+                query_type="moy_arbitr_inn",
+                query_value=inn,
+                run_mode="download" if any(w in lowered for w in ("скачай", "загрузи")) else "preview",
+            )
+
+    m_ogrn = re.search(r"\bогрн\b[:\s]*([\d\s]{12,18})", raw, flags=re.IGNORECASE)
+    if m_ogrn:
+        ogrn = _normalize_digits(m_ogrn.group(1))
+        if ogrn:
+            return MoyArbitrSearchRequest(
+                query_type="moy_arbitr_ogrn",
+                query_value=ogrn,
+                run_mode="download" if any(w in lowered for w in ("скачай", "загрузи")) else "preview",
+            )
+
+    for pat in (
+        r"участник[ауе]?\s+дел[ау]?\s+(?:'([^']+)'|\"([^\"]+)\"|«([^»]+)»|([А-ЯЁA-Z0-9][^.\n!?;]{2,160}))",
+        r"по\s+участник[ауе]?\s+(?:'([^']+)'|\"([^\"]+)\"|«([^»]+)»|([А-ЯЁA-Z0-9][^.\n!?;]{2,160}))",
+        r"по\s+данным\s+(?:'([^']+)'|\"([^\"]+)\"|«([^»]+)»|([А-ЯЁA-Z0-9][^.\n!?;]{2,160}))",
+    ):
+        m = re.search(pat, raw, flags=re.IGNORECASE)
+        if m:
+            val = next((g for g in m.groups() if g and str(g).strip()), "")
+            val = re.sub(r"\s+", " ", val).strip(" :.-\"'«»")
+            if len(val) >= 3:
+                return MoyArbitrSearchRequest(
+                    query_type="moy_arbitr_participant_name",
+                    query_value=val,
+                    run_mode="download" if any(w in lowered for w in ("скачай", "загрузи")) else "preview",
+                )
+
+    for marker in ("по организации", "организацию", "организации", "компанию", "по компании"):
+        idx = lowered.find(marker)
+        if idx >= 0:
+            candidate = raw[idx + len(marker):].strip(" :.-\"'«»")
+            candidate = re.sub(r"\s+", " ", candidate)
+            if len(candidate) >= 3:
+                return MoyArbitrSearchRequest(
+                    query_type="moy_arbitr_organization_name",
+                    query_value=candidate[:160],
+                    run_mode="download" if any(w in lowered for w in ("скачай", "загрузи")) else "preview",
+                )
+    return None
+
+
+def is_moy_arbitr_query_type(query_type: str | None) -> bool:
+    return bool(query_type and str(query_type).startswith(MOY_ARBITR_QUERY_PREFIX))
+
+
+def strip_moy_arbitr_query_prefix(query_type: str) -> str:
+    if is_moy_arbitr_query_type(query_type):
+        return query_type[len(MOY_ARBITR_QUERY_PREFIX):]
+    return query_type
+
+
+def format_moy_arbitr_search_queued_reply(req: MoyArbitrSearchRequest, *, job_id: int, created: bool) -> str:
+    mode = "загрузку материалов" if req.run_mode == "download" else "поиск"
+    if not created:
+        return (
+            f"Такой поиск в «Мой Арбитр» уже выполняется или стоит в очереди (задача №{job_id}) "
+            f"по запросу «{req.query_value}». Дубликат не создавался."
+        )
+    return (
+        f"Запустил фоновый {mode} в «Мой Арбитр» (задача №{job_id}) по запросу «{req.query_value}». "
+        "Воркер будет использовать сохранённую браузерную сессию. Если вход через Госуслуги истёк или ещё не сохранён, "
+        "задача попросит ручной вход и не будет хранить пароль."
+    )
 
 
 def _active_case_number(active_case: Case | None) -> str:

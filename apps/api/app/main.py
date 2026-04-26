@@ -106,6 +106,7 @@ from .moy_arbitr import (
     format_moy_arbitr_chat_reply,
     moy_arbitr_connection_status,
     looks_like_moy_arbitr_command,
+    parse_moy_arbitr_search_request,
 )
 from .models import (
     Case,
@@ -159,14 +160,18 @@ Base.metadata.create_all(bind=engine)
 def _ensure_court_sync_job_parser_year_columns() -> None:
     """Добавляет колонки в существующую БД без Alembic (PostgreSQL)."""
     insp = inspect(engine)
-    if "court_sync_jobs" not in insp.get_table_names():
-        return
-    cols = {c["name"] for c in insp.get_columns("court_sync_jobs")}
+    tables = set(insp.get_table_names())
     with engine.begin() as conn:
-        if "parser_year_min" not in cols:
-            conn.execute(text("ALTER TABLE court_sync_jobs ADD COLUMN parser_year_min INTEGER"))
-        if "parser_year_max" not in cols:
-            conn.execute(text("ALTER TABLE court_sync_jobs ADD COLUMN parser_year_max INTEGER"))
+        if "court_sync_jobs" in tables:
+            cols = {c["name"] for c in insp.get_columns("court_sync_jobs")}
+            if "parser_year_min" not in cols:
+                conn.execute(text("ALTER TABLE court_sync_jobs ADD COLUMN parser_year_min INTEGER"))
+            if "parser_year_max" not in cols:
+                conn.execute(text("ALTER TABLE court_sync_jobs ADD COLUMN parser_year_max INTEGER"))
+        if "court_case_sources" in tables:
+            cols = {c["name"] for c in insp.get_columns("court_case_sources")}
+            if "source_system" not in cols:
+                conn.execute(text("ALTER TABLE court_case_sources ADD COLUMN source_system VARCHAR(30) DEFAULT 'kad'"))
 
 
 _ensure_court_sync_job_parser_year_columns()
@@ -2782,6 +2787,7 @@ def internal_upsert_case_source(
     source = upsert_case_source(
         db,
         remote_case_id=payload.remote_case_id,
+        source_system=payload.source_system,
         case_number=payload.case_number,
         card_url=payload.card_url,
         title=payload.title,
@@ -5049,6 +5055,31 @@ async def assistant_ingest_text(
 
     if looks_like_moy_arbitr_command(text):
         active_case = conversation.active_case or get_or_create_unsorted_case(db)
+        request = parse_moy_arbitr_search_request(text)
+        if request:
+            job, job_new = create_sync_job(
+                db,
+                query_type=request.query_type,
+                query_value=request.query_value,
+                run_mode=request.run_mode,
+                requested_by=_,
+            )
+            action = "фоновую загрузку" if request.run_mode == "download" else "фоновый поиск"
+            suffix = (
+                " Воркер использует сохранённую браузерную сессию «Мой Арбитр»; если вход не выполнен или истёк, "
+                "задача попросит ручной вход и повтор."
+            )
+            if not job_new:
+                reply_text = (
+                    f"Такая задача «Мой Арбитр» уже в очереди или выполняется (№{job.id}) "
+                    f"по запросу «{request.query_value}». Дубликат не создавался."
+                )
+            else:
+                reply_text = (
+                    f"Запустил {action} в «Мой Арбитр» (задача №{job.id}) "
+                    f"по запросу «{request.query_value}».{suffix}"
+                )
+            return await finalize_reply(case=active_case, reply_text=reply_text, mode="moy-arbitr-sync-command")
         reply_text = format_moy_arbitr_chat_reply(text, active_case=conversation.active_case)
         return await finalize_reply(case=active_case, reply_text=reply_text, mode="moy-arbitr-command")
 

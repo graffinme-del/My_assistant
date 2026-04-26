@@ -223,6 +223,7 @@ def upsert_case_source(
     db: Session,
     *,
     remote_case_id: str,
+    source_system: str = "kad",
     case_number: str = "",
     card_url: str = "",
     title: str = "",
@@ -231,9 +232,17 @@ def upsert_case_source(
     watch_profile_id: int | None = None,
     linked_case_id: int | None = None,
 ) -> CourtCaseSource:
-    source = db.query(CourtCaseSource).filter(CourtCaseSource.remote_case_id == remote_case_id).first()
+    source = (
+        db.query(CourtCaseSource)
+        .filter(
+            CourtCaseSource.source_system == (source_system or "kad"),
+            CourtCaseSource.remote_case_id == remote_case_id,
+        )
+        .first()
+    )
     if not source:
-        source = CourtCaseSource(remote_case_id=remote_case_id)
+        source = CourtCaseSource(remote_case_id=remote_case_id, source_system=(source_system or "kad")[:30])
+    source.source_system = (source_system or "kad")[:30]
     source.watch_profile_id = watch_profile_id
     source.case_id = linked_case_id
     source.case_number = case_number[:255]

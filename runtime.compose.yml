@@ -87,6 +87,9 @@ services:
     environment:
       APP_ENV: ${APP_ENV:-development}
       WORKER_API_BASE: http://api:8000
+      MOY_ARBITR_STATE_PATH: ${MOY_ARBITR_STATE_PATH:-/app/moy_arbitr/state.json}
+    volumes:
+      - moy_arbitr_state:/app/moy_arbitr
 
   web:
     image: ghcr.io/graffinme-del/my_assistant/web:main
@@ -100,3 +103,4 @@ volumes:
   postgres_data:
   minio_data:
   api_storage:
+  moy_arbitr_state:
