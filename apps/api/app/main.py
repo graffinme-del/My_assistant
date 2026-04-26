@@ -179,7 +179,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-STORAGE_ROOT = Path("/app/storage")
+STORAGE_ROOT = Path(settings.storage_root)
 STORAGE_ROOT.mkdir(parents=True, exist_ok=True)
 
 

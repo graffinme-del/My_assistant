@@ -36,6 +36,7 @@ jobs:
           POSTGRES_DB: my_assistant
           POSTGRES_USER: my_assistant
           POSTGRES_PASSWORD: change_me
+          STORAGE_ROOT: ${{ github.workspace }}/.tmp/storage
         run: python -c "from apps.api.app.main import app; print(app.title)"
 
   docker-build:

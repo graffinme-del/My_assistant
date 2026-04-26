@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     llm_app_title: str = "My Assistant"
     owner_token: str = "owner-dev-token"
     member_token: str = "member-dev-token"
+    storage_root: str = "/app/storage"
     court_sync_enabled: bool = True
     court_sync_night_hour: int = 2
     court_sync_max_docs_per_run: int = 200
