@@ -51,7 +51,7 @@ jobs:
           cp -f env.example /tmp/my_assistant_ci.env
       - name: Validate prod compose (fixed ports + .env)
         run: |
-          docker compose --project-directory "$PWD" -f infra/compose.prod.yml --env-file /tmp/my_assistant_ci.env config >/dev/null
+          docker compose --project-directory "$PWD/infra" -f "$PWD/infra/compose.prod.yml" --env-file /tmp/my_assistant_ci.env config >/dev/null
       - name: Validate root compose (include prod)
         run: |
           docker compose --project-directory "$PWD" --env-file /tmp/my_assistant_ci.env config >/dev/null
@@ -60,4 +60,4 @@ jobs:
           docker compose --project-directory "$PWD" -f runtime.compose.yml --env-file /tmp/my_assistant_ci.env config >/dev/null
       - name: Build containers
         run: |
-          docker compose --project-directory "$PWD" -f infra/compose.prod.yml --env-file /tmp/my_assistant_ci.env build
+          docker compose --project-directory "$PWD/infra" -f "$PWD/infra/compose.prod.yml" --env-file /tmp/my_assistant_ci.env build
