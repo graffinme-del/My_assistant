@@ -8,6 +8,20 @@ on:
 jobs:
   api-check:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: my_assistant
+          POSTGRES_USER: my_assistant
+          POSTGRES_PASSWORD: change_me
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U my_assistant -d my_assistant"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -16,6 +30,12 @@ jobs:
       - name: Install API deps
         run: pip install -r apps/api/requirements.txt
       - name: Verify FastAPI app import
+        env:
+          POSTGRES_HOST: 127.0.0.1
+          POSTGRES_PORT: 5432
+          POSTGRES_DB: my_assistant
+          POSTGRES_USER: my_assistant
+          POSTGRES_PASSWORD: change_me
         run: python -c "from apps.api.app.main import app; print(app.title)"
 
   docker-build:
