@@ -47,16 +47,16 @@ jobs:
       - name: Validate prod compose (fixed ports + .env)
         run: |
           cp -f env.example .env
-          docker compose --project-directory . -f infra/compose.prod.yml --env-file "${GITHUB_WORKSPACE}/.env" config >/dev/null
+          docker compose --project-directory "$PWD" -f infra/compose.prod.yml --env-file "$PWD/.env" config >/dev/null
       - name: Validate root compose (include prod)
         run: |
           cp -f env.example .env
-          docker compose --project-directory . --env-file "${GITHUB_WORKSPACE}/.env" config >/dev/null
+          docker compose --project-directory "$PWD" --env-file "$PWD/.env" config >/dev/null
       - name: Validate runtime.compose (GHCR prod)
         run: |
           cp -f env.example .env
-          docker compose --project-directory . -f runtime.compose.yml --env-file "${GITHUB_WORKSPACE}/.env" config >/dev/null
+          docker compose --project-directory "$PWD" -f runtime.compose.yml --env-file "$PWD/.env" config >/dev/null
       - name: Build containers
         run: |
           cp -f env.example .env
-          docker compose --project-directory . -f infra/compose.prod.yml --env-file "${GITHUB_WORKSPACE}/.env" build
+          docker compose --project-directory "$PWD" -f infra/compose.prod.yml --env-file "$PWD/.env" build
