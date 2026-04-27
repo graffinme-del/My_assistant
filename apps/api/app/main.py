@@ -4732,6 +4732,26 @@ async def assistant_ingest_text(
         )
 
     cases = db.query(Case).all()
+    m_direct_job_report = re.search(
+        r"(?:отчет|отчёт)\s+(?:по\s+)?задач[еаи]\s*(?:#|№)?\s*(?:номер\s*)?(\d+)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if m_direct_job_report:
+        job_id = int(m_direct_job_report.group(1))
+        job = db.query(CourtSyncJob).filter(CourtSyncJob.id == job_id).first()
+        reply_text = (
+            f"Задача #{job_id} не найдена."
+            if not job
+            else f"Отчет по задаче #{job.id} ({job.status}, шаг: {job.step}):\n"
+            f"{job.report_text.strip() or '(отчет пуст)'}"
+        )
+        return await finalize_reply(
+            case=conversation.active_case or get_or_create_unsorted_case(db),
+            reply_text=reply_text,
+            mode="court-sync-job-report",
+        )
+
     tag_update = parse_case_tag_update(text)
     if not tag_update and looks_like_case_tag_update(text):
         try:
