@@ -340,6 +340,11 @@ _QUERY_TYPE_RU = {
     "ogrn": "ОГРН",
     "organization_name": "организация",
     "card_url": "ссылка на карточку",
+    "moy_arbitr_participant_name": "Мой Арбитр / участник",
+    "moy_arbitr_case_number": "Мой Арбитр / номер дела",
+    "moy_arbitr_inn": "Мой Арбитр / ИНН",
+    "moy_arbitr_ogrn": "Мой Арбитр / ОГРН",
+    "moy_arbitr_organization_name": "Мой Арбитр / организация",
 }
 
 
@@ -556,10 +561,12 @@ def format_recent_download_jobs_status(
     date_range: tuple[datetime, datetime] | None = None,
     period_label: str | None = None,
 ) -> str:
-    """Краткий статус последних загрузок из КАД — связный текст, без сырых URL и логов."""
+    """Краткий статус последних судебных фоновых задач — связный текст, без сырых URL и логов."""
     stale_closed = mark_stale_running_court_sync_jobs(db)
     stale_hrs = max(1, int(settings.court_sync_stale_running_hours))
-    q = db.query(CourtSyncJob).filter(CourtSyncJob.run_mode == "download")
+    q = db.query(CourtSyncJob).filter(
+        (CourtSyncJob.run_mode == "download") | (CourtSyncJob.query_type.like("moy_arbitr_%"))
+    )
     if date_range:
         start, end = date_range
         q = q.filter(
@@ -574,18 +581,18 @@ def format_recent_download_jobs_status(
                 "(по времени создания/запуска/завершения задачи). Попробуйте запрос без даты или другую дату."
             )
         return (
-            "Пока не было фоновых загрузок из картотеки. Когда попросите скачать материалы "
-            "(например, «скачай из КАД…»), здесь появится краткий итог."
+            "Пока не было фоновых загрузок/поисков из судебных сервисов. Когда попросите скачать материалы "
+            "или найти дело в КАД/«Мой Арбитр», здесь появится краткий итог."
         )
 
     intro = (
         (
-            f"Ниже — кратко по фоновым загрузкам из картотеки за {period_label or 'указанную дату'}. "
+            f"Ниже — кратко по фоновым задачам из судебных сервисов за {period_label or 'указанную дату'}. "
             "Это не то же самое, что список документов в открытой у вас папке в чате: там только то, что уже привязано к делу."
         )
         if date_range
         else (
-            "Ниже — кратко по последним фоновым загрузкам из картотеки арбитражных дел. "
+            "Ниже — кратко по последним фоновым задачам из картотеки/«Мой Арбитр». "
             "Это не то же самое, что список документов в открытой у вас папке в чате: там только то, что уже привязано к делу."
         )
     )
@@ -598,18 +605,19 @@ def format_recent_download_jobs_status(
     for j in jobs:
         stp = _STEP_RU.get(j.step, j.step)
         qline = _query_line_ru(j.query_type, j.query_value)
+        noun = "Поиск" if j.run_mode == "preview" else "Загрузка"
         if j.status == "running":
-            head = f"Загрузка №{j.id} ещё идёт: сейчас — {stp}. {qline}"
+            head = f"{noun} №{j.id} ещё идёт: сейчас — {stp}. {qline}"
         elif j.status == "pending":
-            head = f"Загрузка №{j.id} стоит в очереди. {qline}"
+            head = f"{noun} №{j.id} стоит в очереди. {qline}"
         elif j.status == "done":
-            head = f"Загрузка №{j.id} завершена. {qline}"
+            head = f"{noun} №{j.id} завершён. {qline}"
         elif j.status == "failed":
-            head = f"Загрузка №{j.id} остановилась с ошибкой. {qline}"
+            head = f"{noun} №{j.id} остановился с ошибкой. {qline}"
         elif j.status == "needs_manual_step":
-            head = f"Загрузка №{j.id} в основном обработана, но нужна ручная проверка. {qline}"
+            head = f"{noun} №{j.id} в основном обработан, но нужна ручная проверка. {qline}"
         elif j.status == "cancelled":
-            head = f"Загрузка №{j.id} отменена. {qline}"
+            head = f"{noun} №{j.id} отменён. {qline}"
         else:
             st_ru = _STATUS_RU.get(j.status, j.status)
             head = f"Загрузка №{j.id}: статус «{st_ru}», этап — {stp}. {qline}"

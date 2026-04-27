@@ -48,10 +48,10 @@ def _search_url(query_type: str, query_value: str) -> str:
     qv = quote_plus(query_value or "")
     qt = _query_type_without_prefix(query_type)
     if qt == "case_number":
-        return f"{MOY_ARBITR_BASE_URL}/#/cases/search?caseNumber={qv}"
+        return f"{MOY_ARBITR_BASE_URL}/#/cases/my?caseNumber={qv}"
     if qt in ("inn", "ogrn"):
-        return f"{MOY_ARBITR_BASE_URL}/#/cases/search?participant={qv}"
-    return f"{MOY_ARBITR_BASE_URL}/#/cases/search?participant={qv}"
+        return f"{MOY_ARBITR_BASE_URL}/#/cases/my?participant={qv}"
+    return f"{MOY_ARBITR_BASE_URL}/#/cases/my?participant={qv}"
 
 
 def _new_context(browser):
@@ -167,6 +167,16 @@ def _drive_search_form(page, query_type: str, query_value: str, nav_ms: int) -> 
     else:
         patterns = (r"участник", r"наименование", r"фио", r"организац")
     filled = _fill_first_matching_input(page, query_value, patterns)
+    if not filled:
+        for label in ("Мои дела", "Отслеживаемые дела", "Картотека дел"):
+            try:
+                page.get_by_text(label, exact=False).first.click(timeout=2500)
+                page.wait_for_timeout(1200)
+                filled = _fill_first_matching_input(page, query_value, patterns)
+                if filled:
+                    break
+            except Exception:
+                continue
     if filled:
         _click_search(page)
     page.wait_for_timeout(3500)
