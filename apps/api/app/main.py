@@ -5055,7 +5055,10 @@ async def assistant_ingest_text(
 
     if looks_like_moy_arbitr_command(text):
         active_case = conversation.active_case or get_or_create_unsorted_case(db)
-        request = parse_moy_arbitr_search_request(text)
+        request = parse_moy_arbitr_search_request(
+            text,
+            active_case_number=conversation.active_case.case_number if conversation.active_case else None,
+        )
         if request:
             job, job_new = create_sync_job(
                 db,

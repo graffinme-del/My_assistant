@@ -96,7 +96,34 @@ def _normalize_digits(value: str) -> str:
     return re.sub(r"\D+", "", value or "")
 
 
-def parse_moy_arbitr_search_request(text: str) -> MoyArbitrSearchRequest | None:
+def _moy_arbitr_run_mode(lowered: str) -> str:
+    download_markers = (
+        "скачай",
+        "загрузи",
+        "материалы",
+        "документы",
+        "новые документ",
+        "наличие новых",
+        "есть ли новые",
+        "проверь",
+    )
+    return "download" if any(w in lowered for w in download_markers) else "preview"
+
+
+def _normalize_active_case_number(value: str | None) -> str:
+    if not value:
+        return ""
+    cn = normalize_arbitr_case_number(value)
+    if re.match(r"^A\d{1,4}-\d{1,7}/\d{2,4}", cn, flags=re.IGNORECASE):
+        return cn
+    return ""
+
+
+def parse_moy_arbitr_search_request(
+    text: str,
+    *,
+    active_case_number: str | None = None,
+) -> MoyArbitrSearchRequest | None:
     raw = text or ""
     lowered = raw.casefold()
     if not looks_like_moy_arbitr_search_command(raw):
@@ -107,7 +134,15 @@ def parse_moy_arbitr_search_request(text: str) -> MoyArbitrSearchRequest | None:
         return MoyArbitrSearchRequest(
             query_type="moy_arbitr_case_number",
             query_value=case_number,
-            run_mode="download" if any(w in lowered for w in ("скачай", "загрузи", "материалы", "документы")) else "preview",
+            run_mode=_moy_arbitr_run_mode(lowered),
+        )
+
+    active_cn = _normalize_active_case_number(active_case_number)
+    if active_cn and any(w in lowered for w in ("проверь", "скачай", "загрузи", "материалы", "документы", "новые")):
+        return MoyArbitrSearchRequest(
+            query_type="moy_arbitr_case_number",
+            query_value=active_cn,
+            run_mode=_moy_arbitr_run_mode(lowered),
         )
 
     m_inn = re.search(r"\bинн\b[:\s]*([\d\s]{10,15})", raw, flags=re.IGNORECASE)
@@ -117,7 +152,7 @@ def parse_moy_arbitr_search_request(text: str) -> MoyArbitrSearchRequest | None:
             return MoyArbitrSearchRequest(
                 query_type="moy_arbitr_inn",
                 query_value=inn,
-                run_mode="download" if any(w in lowered for w in ("скачай", "загрузи")) else "preview",
+                run_mode=_moy_arbitr_run_mode(lowered),
             )
 
     m_ogrn = re.search(r"\bогрн\b[:\s]*([\d\s]{12,18})", raw, flags=re.IGNORECASE)
@@ -127,7 +162,7 @@ def parse_moy_arbitr_search_request(text: str) -> MoyArbitrSearchRequest | None:
             return MoyArbitrSearchRequest(
                 query_type="moy_arbitr_ogrn",
                 query_value=ogrn,
-                run_mode="download" if any(w in lowered for w in ("скачай", "загрузи")) else "preview",
+                run_mode=_moy_arbitr_run_mode(lowered),
             )
 
     for pat in (
@@ -143,7 +178,7 @@ def parse_moy_arbitr_search_request(text: str) -> MoyArbitrSearchRequest | None:
                 return MoyArbitrSearchRequest(
                     query_type="moy_arbitr_participant_name",
                     query_value=val,
-                    run_mode="download" if any(w in lowered for w in ("скачай", "загрузи")) else "preview",
+                    run_mode=_moy_arbitr_run_mode(lowered),
                 )
 
     for marker in ("по организации", "организацию", "организации", "компанию", "по компании"):
@@ -155,7 +190,7 @@ def parse_moy_arbitr_search_request(text: str) -> MoyArbitrSearchRequest | None:
                 return MoyArbitrSearchRequest(
                     query_type="moy_arbitr_organization_name",
                     query_value=candidate[:160],
-                    run_mode="download" if any(w in lowered for w in ("скачай", "загрузи")) else "preview",
+                    run_mode=_moy_arbitr_run_mode(lowered),
                 )
     return None
 
@@ -264,7 +299,9 @@ def format_moy_arbitr_status_reply() -> str:
 
 def format_moy_arbitr_chat_reply(text: str, *, active_case: Case | None = None) -> str:
     lowered = (text or "").casefold()
-    if any(w in lowered for w in ("статус", "проверь", "доступ", "подключ", "настрой")):
+    if any(w in lowered for w in ("статус", "доступ", "подключ", "настрой")) or (
+        "проверь" in lowered and not any(w in lowered for w in ("документ", "материал", "дело", "нов"))
+    ):
         return format_moy_arbitr_status_reply()
 
     case_number = extract_moy_arbitr_case_number(text) or _active_case_number(active_case)
