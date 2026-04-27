@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     llm_app_title: str = "My Assistant"
     owner_token: str = "owner-dev-token"
     member_token: str = "member-dev-token"
+    storage_root: str = "/app/storage"
     court_sync_enabled: bool = True
     court_sync_night_hour: int = 2
     court_sync_max_docs_per_run: int = 200
@@ -46,6 +47,12 @@ class Settings(BaseSettings):
     parser_api_key: str = ""
     parser_api_base_url: str = "https://parser-api.com/parser/arbitr_api"
     parser_api_timeout_sec: int = 120
+
+    # «Мой Арбитр» (my.arbitr.ru): внешний личный кабинет через Госуслуги/УКЭП.
+    # Ассистент помогает с маршрутом подачи и подготовкой пакета, но не хранит учётные данные и не отправляет документы сам.
+    moy_arbitr_enabled: bool = True
+    moy_arbitr_base_url: str = "https://my.arbitr.ru"
+    moy_arbitr_timeout_sec: int = 10
 
     # Естественный язык: один вызов LLM с function-calling (поиск, удаление папки, КАД, перенос в папку…).
     # См. chat_tools.py. Отключить эвристику+стоимость API: CHAT_TOOLS_ROUTER=0

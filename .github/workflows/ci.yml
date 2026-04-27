@@ -8,6 +8,20 @@ on:
 jobs:
   api-check:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: my_assistant
+          POSTGRES_USER: my_assistant
+          POSTGRES_PASSWORD: change_me
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U my_assistant -d my_assistant"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -16,6 +30,13 @@ jobs:
       - name: Install API deps
         run: pip install -r apps/api/requirements.txt
       - name: Verify FastAPI app import
+        env:
+          POSTGRES_HOST: 127.0.0.1
+          POSTGRES_PORT: 5432
+          POSTGRES_DB: my_assistant
+          POSTGRES_USER: my_assistant
+          POSTGRES_PASSWORD: change_me
+          STORAGE_ROOT: ${{ github.workspace }}/.tmp/storage
         run: python -c "from apps.api.app.main import app; print(app.title)"
 
   docker-build:
@@ -23,19 +44,20 @@ jobs:
     needs: api-check
     steps:
       - uses: actions/checkout@v4
+      - name: Prepare compose env files
+        run: |
+          cp -f env.example .env
+          cp -f env.example ../.env
+          cp -f env.example /tmp/my_assistant_ci.env
       - name: Validate prod compose (fixed ports + .env)
         run: |
-          cp -f env.example .env
-          docker compose --project-directory . -f infra/compose.prod.yml --env-file .env config >/dev/null
+          docker compose --project-directory "$PWD/infra" -f "$PWD/infra/compose.prod.yml" --env-file /tmp/my_assistant_ci.env config >/dev/null
       - name: Validate root compose (include prod)
         run: |
-          cp -f env.example .env
-          docker compose --project-directory . --env-file .env config >/dev/null
+          docker compose --project-directory "$PWD" --env-file /tmp/my_assistant_ci.env config >/dev/null
       - name: Validate runtime.compose (GHCR prod)
         run: |
-          cp -f env.example .env
-          docker compose --project-directory . -f runtime.compose.yml --env-file .env config >/dev/null
+          docker compose --project-directory "$PWD" -f runtime.compose.yml --env-file /tmp/my_assistant_ci.env config >/dev/null
       - name: Build containers
         run: |
-          cp -f env.example .env
-          docker compose --project-directory . -f infra/compose.prod.yml --env-file .env build
+          docker compose --project-directory "$PWD/infra" -f "$PWD/infra/compose.prod.yml" --env-file /tmp/my_assistant_ci.env build

@@ -239,6 +239,7 @@ class CourtSyncCompleteIn(BaseModel):
 
 class CourtSyncCaseSourceIn(BaseModel):
     remote_case_id: str
+    source_system: str = "kad"
     case_number: str = ""
     card_url: str = ""
     title: str = ""

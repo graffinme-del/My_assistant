@@ -19,6 +19,12 @@ from parser_api_client import (
     parser_pdf_download,
     parser_search,
 )
+from moy_arbitr_client import (
+    MoyArbitrAuthRequired,
+    download_moy_arbitr_document,
+    open_case_and_download_documents,
+    search_moy_arbitr_cases,
+)
 
 API_BASE = os.getenv("WORKER_API_BASE", "http://api:8000").rstrip("/")
 OWNER_TOKEN = os.getenv("OWNER_TOKEN", "owner-dev-token")
@@ -170,6 +176,7 @@ def complete_job(job_id: int, status: str, report_text: str, result_json: dict |
 def register_case_source(job_id: int, case_data: dict) -> int | None:
     payload = {
         "remote_case_id": case_data.get("remote_case_id") or case_data.get("card_url") or "",
+        "source_system": case_data.get("source_system", "kad"),
         "case_number": case_data.get("case_number", ""),
         "card_url": case_data.get("card_url", ""),
         "title": case_data.get("title", ""),
@@ -672,6 +679,140 @@ def search_cases_for_job(query_type: str, query_value: str, job_id: int | None =
     if parsed is not None:
         return parsed
     return search_cases_via_browser(query_type, query_value, job_id=job_id)
+
+
+def process_moy_arbitr_job(job: dict) -> None:
+    job_id = int(job["id"])
+    query_type = str(job["query_type"])
+    query_value = str(job["query_value"])
+    run_mode = str(job["run_mode"])
+    if court_sync_job_stopped_remotely(job_id):
+        return
+    report_progress(job_id, "searching", f'Ищу в «Мой Арбитр»: {query_type}="{query_value}"')
+    try:
+        results = search_moy_arbitr_cases(query_type, query_value, job_id=job_id, progress=report_progress)
+    except MoyArbitrAuthRequired as exc:
+        complete_job(job_id, "needs_manual_step", str(exc), {"backend": "moy_arbitr", "auth_required": True})
+        return
+    except PlaywrightTimeoutError:
+        complete_job(job_id, "needs_manual_step", "«Мой Арбитр» не ответил вовремя. Повторите задачу позже.")
+        return
+    except Exception as exc:
+        complete_job(job_id, "failed", f"Ошибка поиска в «Мой Арбитр»: {exc}", {"backend": "moy_arbitr"})
+        return
+
+    if not results:
+        msg = f'По запросу {query_type}="{query_value}" дела не найдены в «Мой Арбитр».'
+        status = "needs_manual_step" if run_mode == "download" else "done"
+        complete_job(job_id, status, msg, {"backend": "moy_arbitr", "cases_found": 0})
+        return
+
+    preview_lines = [f'«Мой Арбитр»: найдено дел: {len(results)} по запросу {query_type}="{query_value}".']
+    for item in results[:10]:
+        preview_lines.append(f'- {item.get("case_number") or "без номера"} | {item.get("title") or item.get("card_url")}')
+
+    if run_mode == "preview":
+        for item in results[:20]:
+            register_case_source(job_id, item)
+        complete_job(job_id, "done", "\n".join(preview_lines), {"backend": "moy_arbitr", "cases_found": len(results)})
+        return
+
+    target_cases = results[:10]
+    preferred_case_id = None
+    if query_type == "moy_arbitr_case_number":
+        preferred_case_id = ensure_case_id(query_value)
+        qn = normalize_case_for_match(query_value)
+        exact = [item for item in results if normalize_case_for_match(item.get("case_number", "")) == qn]
+        target_cases = exact or results[:1]
+
+    downloaded = 0
+    discovered = 0
+    failures = 0
+    duplicates_skipped = 0
+    lines = preview_lines[:]
+
+    for case_data in target_cases:
+        if court_sync_job_stopped_remotely(job_id):
+            return
+        case_source_id = register_case_source(job_id, case_data)
+        effective_preferred_id = preferred_case_id
+        case_num = (case_data.get("case_number") or "").strip()
+        if case_num and not effective_preferred_id:
+            effective_preferred_id = ensure_case_id(case_num)
+        try:
+            context, browser, docs = open_case_and_download_documents(case_data, job_id=job_id, progress=report_progress)
+        except MoyArbitrAuthRequired as exc:
+            complete_job(job_id, "needs_manual_step", str(exc), {"backend": "moy_arbitr", "auth_required": True})
+            return
+        except Exception as exc:
+            failures += 1
+            lines.append(f'- Не удалось открыть дело {case_num or case_data.get("card_url")}: {exc}')
+            continue
+        try:
+            discovered += len(docs)
+            if not docs:
+                lines.append(f'- У дела {case_num or case_data.get("card_url")} документы не найдены автоматически.')
+                continue
+            for doc in docs[:COURT_SYNC_MAX_DOCS_PER_RUN]:
+                try:
+                    report_progress(job_id, "downloading", f'Мой Арбитр: скачиваю {doc.get("title") or doc.get("file_url")}')
+                    path = download_moy_arbitr_document(context, doc["file_url"])
+                    ingest_result = ingest_downloaded_file_to_case(path, effective_preferred_id)
+                    routing = (ingest_result.get("routing_mode") or "").strip()
+                    local_document = ingest_result.get("document") or {}
+                    doc["case_source_id"] = case_source_id
+                    doc["local_document_id"] = local_document.get("id")
+                    doc["filename"] = local_document.get("filename") or path.name
+                    if routing == "duplicate-skip":
+                        duplicates_skipped += 1
+                        doc["status"] = "duplicate_skip"
+                    else:
+                        downloaded += 1
+                        doc["status"] = "downloaded"
+                    register_document_source(job_id, doc)
+                except Exception as exc:
+                    failures += 1
+                    register_document_source(
+                        job_id,
+                        {
+                            "remote_document_id": doc.get("remote_document_id") or doc.get("file_url") or "",
+                            "case_source_id": case_source_id,
+                            "title": doc.get("title", ""),
+                            "filename": "",
+                            "file_url": doc.get("file_url", ""),
+                            "status": "failed",
+                        },
+                    )
+                    lines.append(f'- Не удалось скачать {doc.get("title") or doc.get("file_url")}: {exc}')
+                time.sleep(max(1, COURT_SYNC_DELAY_SEC))
+        finally:
+            browser.close()
+
+    lines.append(
+        f"Итог «Мой Арбитр»: найдено дел {len(results)}, найдено документов {discovered}, "
+        f"новых файлов: {downloaded}, пропущено дубликатов: {duplicates_skipped}, ошибок: {failures}."
+    )
+    if downloaded == 0 and duplicates_skipped == 0:
+        lines.append(
+            "Автоскачивание не добавило файлов. Возможно, нужны ручной вход, подтверждение доступа, "
+            "или страница «Мой Арбитр» изменила разметку."
+        )
+        final_status = "needs_manual_step"
+    else:
+        final_status = "done" if failures == 0 else "needs_manual_step"
+    complete_job(
+        job_id,
+        final_status,
+        "\n".join(lines),
+        {
+            "backend": "moy_arbitr",
+            "cases_found": len(results),
+            "documents_found": discovered,
+            "downloaded": downloaded,
+            "duplicates_skipped": duplicates_skipped,
+            "failures": failures,
+        },
+    )
 
 
 def is_kad_junk_url(url: str) -> bool:
@@ -1452,7 +1593,10 @@ def main() -> None:
             if not job:
                 time.sleep(10)
                 continue
-            process_job(job)
+            if str(job.get("query_type") or "").startswith("moy_arbitr_"):
+                process_moy_arbitr_job(job)
+            else:
+                process_job(job)
         except Exception as exc:
             print(f"Worker loop error: {exc}")
             time.sleep(15)

@@ -15,6 +15,7 @@ from .ai_service import llm_chat_with_tool_choice
 from .config import settings
 from .court_kad_search import looks_like_court_download_count_question, looks_like_kad_downloaded_documents_list
 from .court_sync_service import format_kad_downloaded_documents_list, format_recent_download_jobs_status
+from .moy_arbitr import looks_like_moy_arbitr_command
 from .ru_date_range import describe_calendar_period_ru, parse_calendar_period_ru
 from .models import Case, Conversation, ConversationMessage, Document
 
@@ -343,6 +344,8 @@ async def run_chat_tools_router(
     if len(user_message) > 8000:
         return None
     if looks_like_kad_downloaded_documents_list(user_message) or looks_like_court_download_count_question(user_message):
+        return None
+    if looks_like_moy_arbitr_command(user_message):
         return None
 
     system = _router_system_prompt(db, conversation)
