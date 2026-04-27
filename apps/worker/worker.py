@@ -703,6 +703,14 @@ def process_moy_arbitr_job(job: dict) -> None:
 
     if not results:
         msg = f'По запросу {query_type}="{query_value}" дела не найдены в «Мой Арбитр».'
+        try:
+            from moy_arbitr_client import last_search_diagnostics
+
+            diag = last_search_diagnostics()
+        except Exception:
+            diag = ""
+        if diag:
+            msg += "\n" + diag
         status = "needs_manual_step" if run_mode == "download" else "done"
         complete_job(job_id, status, msg, {"backend": "moy_arbitr", "cases_found": 0})
         return

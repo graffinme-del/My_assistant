@@ -34,6 +34,13 @@ class MoyArbitrNoResults(RuntimeError):
     pass
 
 
+LAST_SEARCH_DIAGNOSTIC = ""
+
+
+def last_search_diagnostics() -> str:
+    return LAST_SEARCH_DIAGNOSTIC
+
+
 def state_file_exists() -> bool:
     p = Path(MOY_ARBITR_STATE_PATH)
     return p.exists() and p.stat().st_size > 20
@@ -155,6 +162,7 @@ def _click_search(page) -> None:
 
 
 def _drive_search_form(page, query_type: str, query_value: str, nav_ms: int) -> None:
+    global LAST_SEARCH_DIAGNOSTIC
     page.goto(_search_url(query_type, query_value), wait_until="domcontentloaded", timeout=nav_ms)
     page.wait_for_timeout(1800)
     ensure_authorized(page)
@@ -177,6 +185,7 @@ def _drive_search_form(page, query_type: str, query_value: str, nav_ms: int) -> 
                     break
             except Exception:
                 continue
+    LAST_SEARCH_DIAGNOSTIC = f"url={page.url}; input_found={filled}"
     if filled:
         _click_search(page)
     page.wait_for_timeout(3500)
@@ -262,6 +271,8 @@ def _extract_case_results(page) -> list[dict]:
 
 
 def search_moy_arbitr_cases(query_type: str, query_value: str, job_id: int | None = None, progress=None) -> list[dict]:
+    global LAST_SEARCH_DIAGNOSTIC
+    LAST_SEARCH_DIAGNOSTIC = ""
     nav_ms = max(60_000, MOY_ARBITR_TIMEOUT_SEC * 1000)
     with sync_playwright() as pw:
         browser = pw.chromium.launch(
@@ -277,6 +288,16 @@ def search_moy_arbitr_cases(query_type: str, query_value: str, job_id: int | Non
             results = _extract_case_results(page)
             if not results and _page_looks_unauthorized(page):
                 raise MoyArbitrAuthRequired(_manual_login_message("сессия «Мой Арбитр» истекла"))
+            if not results:
+                try:
+                    text = page.locator("body").inner_text(timeout=2500)
+                    snippet = re.sub(r"\s+", " ", text).strip()[:500]
+                except Exception:
+                    snippet = ""
+                LAST_SEARCH_DIAGNOSTIC = (
+                    (LAST_SEARCH_DIAGNOSTIC + "; " if LAST_SEARCH_DIAGNOSTIC else "")
+                    + f"results=0; page_text={snippet}"
+                )
             return results
         finally:
             browser.close()
