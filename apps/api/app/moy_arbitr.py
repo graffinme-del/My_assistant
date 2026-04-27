@@ -113,7 +113,11 @@ def _moy_arbitr_run_mode(lowered: str) -> str:
 def _normalize_active_case_number(value: str | None) -> str:
     if not value:
         return ""
-    cn = normalize_arbitr_case_number(value)
+    raw = str(value)
+    m = re.search(r"([АA]\d{1,4}-\d{1,7}/\d{2,4}|\d{1,2}-\d{1,7}/\d{2,4})", raw, flags=re.IGNORECASE)
+    cn = normalize_arbitr_case_number(m.group(1) if m else raw)
+    if re.match(r"^\d{1,2}-\d{1,7}/\d{2,4}", cn, flags=re.IGNORECASE):
+        cn = "A" + cn
     if re.match(r"^A\d{1,4}-\d{1,7}/\d{2,4}", cn, flags=re.IGNORECASE):
         return cn
     return ""
