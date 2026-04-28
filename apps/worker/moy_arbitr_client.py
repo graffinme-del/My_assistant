@@ -19,6 +19,7 @@ MOY_ARBITR_TIMEOUT_SEC = int(os.getenv("MOY_ARBITR_TIMEOUT_SEC", "120"))
 MOY_ARBITR_MAX_CASES = max(1, int(os.getenv("MOY_ARBITR_MAX_CASES", "25")))
 MOY_ARBITR_MAX_DOCS_PER_CASE = max(1, int(os.getenv("MOY_ARBITR_MAX_DOCS_PER_CASE", "80")))
 MOY_ARBITR_MANUAL_LOGIN_URL = os.getenv("MOY_ARBITR_MANUAL_LOGIN_URL", f"{MOY_ARBITR_BASE_URL}/")
+MOY_ARBITR_DEBUG_DIR = os.getenv("MOY_ARBITR_DEBUG_DIR", "/app/moy_arbitr/debug")
 
 MOY_ARBITR_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -39,6 +40,32 @@ LAST_SEARCH_DIAGNOSTIC = ""
 
 def last_search_diagnostics() -> str:
     return LAST_SEARCH_DIAGNOSTIC
+
+
+def _safe_debug_part(value: str) -> str:
+    s = re.sub(r"[^\w.\-]+", "_", value or "", flags=re.IGNORECASE).strip("_")
+    return s[:80] or "query"
+
+
+def _save_debug_artifacts(page, *, job_id: int | None, query_type: str, query_value: str) -> str:
+    debug_dir = Path(MOY_ARBITR_DEBUG_DIR)
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    prefix = f"job-{job_id or 'manual'}-{_safe_debug_part(query_type)}-{_safe_debug_part(query_value)}-{stamp}"
+    html_path = debug_dir / f"{prefix}.html"
+    png_path = debug_dir / f"{prefix}.png"
+    saved: list[str] = []
+    try:
+        html_path.write_text(page.content(), encoding="utf-8")
+        saved.append(str(html_path))
+    except Exception as exc:
+        saved.append(f"html_error={str(exc)[:160]}")
+    try:
+        page.screenshot(path=str(png_path), full_page=True, timeout=15000)
+        saved.append(str(png_path))
+    except Exception as exc:
+        saved.append(f"screenshot_error={str(exc)[:160]}")
+    return "debug_artifacts=" + ", ".join(saved)
 
 
 def state_file_exists() -> bool:
@@ -294,9 +321,15 @@ def search_moy_arbitr_cases(query_type: str, query_value: str, job_id: int | Non
                     snippet = re.sub(r"\s+", " ", text).strip()[:500]
                 except Exception:
                     snippet = ""
+                artifacts = _save_debug_artifacts(
+                    page,
+                    job_id=job_id,
+                    query_type=query_type,
+                    query_value=query_value,
+                )
                 LAST_SEARCH_DIAGNOSTIC = (
                     (LAST_SEARCH_DIAGNOSTIC + "; " if LAST_SEARCH_DIAGNOSTIC else "")
-                    + f"results=0; page_text={snippet}"
+                    + f"results=0; page_text={snippet}; {artifacts}"
                 )
             return results
         finally:

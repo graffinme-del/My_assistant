@@ -55,3 +55,17 @@ docker compose -f runtime.compose.yml exec worker python /app/save_moy_arbitr_st
 - `отчёт по задаче #123`
 
 Если сессия истекла, задача завершится статусом `needs_manual_step` с инструкцией повторить вход.
+
+## 4. Диагностика, если поиск ничего не нашёл
+
+Если задача вернула `results=0`, воркер сохраняет то, что реально увидел Playwright:
+
+- HTML: `/app/moy_arbitr/debug/moy-arbitr-job-...html`
+- скриншот: `/app/moy_arbitr/debug/moy-arbitr-job-...png`
+
+Скачать с сервера:
+
+```bash
+cd /opt/my_assistant
+docker compose -f runtime.compose.yml cp worker:/app/moy_arbitr/debug ./moy_arbitr_debug
+```
