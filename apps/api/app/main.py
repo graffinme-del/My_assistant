@@ -106,6 +106,7 @@ from .moy_arbitr import (
     format_moy_arbitr_chat_reply,
     moy_arbitr_connection_status,
     looks_like_moy_arbitr_command,
+    looks_like_moy_arbitr_all_cases_request,
     parse_moy_arbitr_search_request,
 )
 from .models import (
@@ -5072,6 +5073,48 @@ async def assistant_ingest_text(
             reply_text=reply_fc,
             mode="folder-document-count",
         )
+
+    if looks_like_moy_arbitr_all_cases_request(text):
+        active_case = conversation.active_case or get_or_create_unsorted_case(db)
+        seen_case_numbers: set[str] = set()
+        jobs: list[tuple[int, str, bool]] = []
+        skipped = 0
+        for case in db.query(Case).order_by(Case.id.asc()).all():
+            cn = normalize_arbitr_case_number(case.case_number or "")
+            if re.match(r"^\d{1,2}-\d{1,7}/\d{2,4}", cn, flags=re.IGNORECASE):
+                cn = "A" + cn
+            if not looks_like_stored_arbitr_case_number(cn):
+                skipped += 1
+                continue
+            if cn in seen_case_numbers:
+                skipped += 1
+                continue
+            seen_case_numbers.add(cn)
+            job, job_new = create_sync_job(
+                db,
+                query_type="moy_arbitr_case_number",
+                query_value=cn,
+                run_mode="download",
+                requested_by=_,
+            )
+            jobs.append((job.id, cn, job_new))
+        if not jobs:
+            reply_text = (
+                "Не нашёл папок с настоящими арбитражными номерами дел (формат вроде А40-12345/2025). "
+                "Папки без номера, UNSORTED и TAG-* не запускаю, чтобы не искать лишнее."
+            )
+        else:
+            created = sum(1 for _, _, is_new in jobs if is_new)
+            reused = len(jobs) - created
+            shown = ", ".join(f"№{jid}: {cn}" for jid, cn, _ in jobs[:12])
+            more = f" и ещё {len(jobs) - 12}" if len(jobs) > 12 else ""
+            reply_text = (
+                f"Запустил проверку «Мой Арбитр» по всем папкам с арбитражными номерами: задач всего {len(jobs)}, "
+                f"новых {created}, уже были в очереди/работе {reused}. Пропущено папок без подходящего номера или дублей: {skipped}.\n"
+                f"{shown}{more}.\n"
+                "Статус: «статус загрузки». Подробно по одной: «отчет по задаче #N»."
+            )
+        return await finalize_reply(case=active_case, reply_text=reply_text, mode="moy-arbitr-all-cases")
 
     if looks_like_moy_arbitr_command(text):
         active_case = conversation.active_case or get_or_create_unsorted_case(db)

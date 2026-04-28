@@ -78,6 +78,34 @@ def looks_like_moy_arbitr_search_command(text: str) -> bool:
     )
 
 
+def looks_like_moy_arbitr_all_cases_request(text: str) -> bool:
+    lowered = (text or "").casefold()
+    if not any(m in lowered for m in ("мой арбитр", "моем арбитре", "моём арбитре", "my.arbitr")):
+        return False
+    all_markers = (
+        "по всем дел",
+        "по всем папк",
+        "все дела",
+        "всем делам",
+        "всех дел",
+        "все папки",
+        "всем папкам",
+        "всех папк",
+    )
+    action_markers = (
+        "проверь",
+        "поищи",
+        "найди",
+        "скачай",
+        "загрузи",
+        "новые документ",
+        "наличие новых",
+        "документы",
+        "материалы",
+    )
+    return any(m in lowered for m in all_markers) and any(m in lowered for m in action_markers)
+
+
 def extract_moy_arbitr_case_number(text: str) -> str:
     raw = text or ""
     m = re.search(
@@ -131,6 +159,8 @@ def parse_moy_arbitr_search_request(
     raw = text or ""
     lowered = raw.casefold()
     if not looks_like_moy_arbitr_search_command(raw):
+        return None
+    if looks_like_moy_arbitr_all_cases_request(raw):
         return None
 
     case_number = extract_moy_arbitr_case_number(raw)
