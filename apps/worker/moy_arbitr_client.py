@@ -36,10 +36,19 @@ class MoyArbitrNoResults(RuntimeError):
 
 
 LAST_SEARCH_DIAGNOSTIC = ""
+LAST_BROWSER_EVENTS: list[str] = []
 
 
 def last_search_diagnostics() -> str:
     return LAST_SEARCH_DIAGNOSTIC
+
+
+def _remember_browser_event(kind: str, message: str) -> None:
+    if len(LAST_BROWSER_EVENTS) >= 80:
+        return
+    clean = re.sub(r"\s+", " ", message or "").strip()
+    if clean:
+        LAST_BROWSER_EVENTS.append(f"{kind}: {clean[:500]}")
 
 
 def _safe_debug_part(value: str) -> str:
@@ -54,6 +63,7 @@ def _save_debug_artifacts(page, *, job_id: int | None, query_type: str, query_va
     prefix = f"job-{job_id or 'manual'}-{_safe_debug_part(query_type)}-{_safe_debug_part(query_value)}-{stamp}"
     html_path = debug_dir / f"{prefix}.html"
     png_path = debug_dir / f"{prefix}.png"
+    log_path = debug_dir / f"{prefix}.log"
     saved: list[str] = []
     try:
         html_path.write_text(page.content(), encoding="utf-8")
@@ -65,7 +75,27 @@ def _save_debug_artifacts(page, *, job_id: int | None, query_type: str, query_va
         saved.append(str(png_path))
     except Exception as exc:
         saved.append(f"screenshot_error={str(exc)[:160]}")
+    try:
+        log_path.write_text("\n".join(LAST_BROWSER_EVENTS[-80:]), encoding="utf-8")
+        saved.append(str(log_path))
+    except Exception as exc:
+        saved.append(f"log_error={str(exc)[:160]}")
     return "debug_artifacts=" + ", ".join(saved)
+
+
+def _attach_browser_diagnostics(page) -> None:
+    page.on("console", lambda msg: _remember_browser_event(f"console.{msg.type}", msg.text))
+    page.on("pageerror", lambda exc: _remember_browser_event("pageerror", str(exc)))
+    page.on("requestfailed", lambda req: _remember_browser_event("requestfailed", f"{req.url} {req.failure}"))
+
+    def _response(resp) -> None:
+        try:
+            if resp.status >= 400:
+                _remember_browser_event("http", f"{resp.status} {resp.url}")
+        except Exception:
+            return
+
+    page.on("response", _response)
 
 
 def state_file_exists() -> bool:
@@ -191,7 +221,12 @@ def _click_search(page) -> None:
 def _drive_search_form(page, query_type: str, query_value: str, nav_ms: int) -> None:
     global LAST_SEARCH_DIAGNOSTIC
     page.goto(_search_url(query_type, query_value), wait_until="domcontentloaded", timeout=nav_ms)
-    page.wait_for_timeout(1800)
+    page.wait_for_timeout(4500)
+    try:
+        page.wait_for_load_state("networkidle", timeout=min(nav_ms, 25000))
+    except PlaywrightTimeoutError:
+        pass
+    page.wait_for_timeout(2500)
     ensure_authorized(page)
     _dismiss_common_overlays(page)
     qt = _query_type_without_prefix(query_type)
@@ -298,8 +333,9 @@ def _extract_case_results(page) -> list[dict]:
 
 
 def search_moy_arbitr_cases(query_type: str, query_value: str, job_id: int | None = None, progress=None) -> list[dict]:
-    global LAST_SEARCH_DIAGNOSTIC
+    global LAST_BROWSER_EVENTS, LAST_SEARCH_DIAGNOSTIC
     LAST_SEARCH_DIAGNOSTIC = ""
+    LAST_BROWSER_EVENTS = []
     nav_ms = max(60_000, MOY_ARBITR_TIMEOUT_SEC * 1000)
     with sync_playwright() as pw:
         browser = pw.chromium.launch(
@@ -309,6 +345,7 @@ def search_moy_arbitr_cases(query_type: str, query_value: str, job_id: int | Non
         try:
             context = _new_context(browser)
             page = context.new_page()
+            _attach_browser_diagnostics(page)
             if progress and job_id is not None:
                 progress(job_id, "searching", f"Мой Арбитр: поиск {query_type}={query_value}")
             _drive_search_form(page, query_type, query_value, nav_ms)

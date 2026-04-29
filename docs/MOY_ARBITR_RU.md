@@ -62,6 +62,7 @@ docker compose -f runtime.compose.yml exec worker python /app/save_moy_arbitr_st
 
 - HTML: `/app/moy_arbitr/debug/moy-arbitr-job-...html`
 - скриншот: `/app/moy_arbitr/debug/moy-arbitr-job-...png`
+- console/network log: `/app/moy_arbitr/debug/moy-arbitr-job-...log`
 
 Скачать с сервера:
 
