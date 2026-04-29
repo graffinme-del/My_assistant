@@ -7,6 +7,12 @@ from playwright.sync_api import sync_playwright
 BASE_URL = (os.getenv("MOY_ARBITR_BASE_URL") or "https://my.arbitr.ru").rstrip("/")
 STATE_PATH = os.getenv("MOY_ARBITR_STATE_PATH", "/app/moy_arbitr/state.json")
 HEADLESS = os.getenv("MOY_ARBITR_LOGIN_HEADLESS", "false").lower() in ("1", "true", "yes")
+CHROMIUM_ARGS = [
+    "--disable-blink-features=AutomationControlled",
+    "--enable-unsafe-swiftshader",
+    "--use-gl=swiftshader",
+    "--ignore-gpu-blocklist",
+]
 
 
 def main() -> None:
@@ -17,7 +23,7 @@ def main() -> None:
     with sync_playwright() as pw:
         browser = pw.chromium.launch(
             headless=HEADLESS,
-            args=["--disable-blink-features=AutomationControlled"],
+            args=CHROMIUM_ARGS,
         )
         context = browser.new_context(
             accept_downloads=True,
