@@ -25,6 +25,14 @@ MOY_ARBITR_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
 )
+MOY_ARBITR_CHROMIUM_ARGS = [
+    "--disable-blink-features=AutomationControlled",
+    # Chromium 140+ no longer falls back to software WebGL unless this is explicit.
+    # my.arbitr.ru currently renders a blank SPA shell without WebGL in our headless container.
+    "--enable-unsafe-swiftshader",
+    "--use-gl=swiftshader",
+    "--ignore-gpu-blocklist",
+]
 
 
 class MoyArbitrAuthRequired(RuntimeError):
@@ -340,7 +348,7 @@ def search_moy_arbitr_cases(query_type: str, query_value: str, job_id: int | Non
     with sync_playwright() as pw:
         browser = pw.chromium.launch(
             headless=MOY_ARBITR_HEADLESS,
-            args=["--disable-blink-features=AutomationControlled"],
+            args=MOY_ARBITR_CHROMIUM_ARGS,
         )
         try:
             context = _new_context(browser)
@@ -476,7 +484,7 @@ def open_case_and_download_documents(case_data: dict, job_id: int | None = None,
     with sync_playwright() as pw:
         browser = pw.chromium.launch(
             headless=MOY_ARBITR_HEADLESS,
-            args=["--disable-blink-features=AutomationControlled"],
+            args=MOY_ARBITR_CHROMIUM_ARGS,
         )
         try:
             context = _new_context(browser)
