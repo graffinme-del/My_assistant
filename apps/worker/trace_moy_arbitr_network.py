@@ -8,9 +8,6 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
-from playwright.sync_api import sync_playwright
-
-
 SENSITIVE_QUERY_KEYS = {
     "access_token",
     "auth",
@@ -25,8 +22,15 @@ SENSITIVE_QUERY_KEYS = {
     "state",
     "token",
 }
+SENSITIVE_FORM_KEYS = SENSITIVE_QUERY_KEYS | {
+    "command",
+    "login",
+    "mobile",
+    "otp",
+    "samlresponse",
+}
 SENSITIVE_JSON_KEYS = re.compile(
-    r'("(?:access_token|authorization|code|id_token|jwt|password|refresh_token|session|sid|token)"\s*:\s*)"[^"]*"',
+    r'("(?:access_token|authorization|code|command|id_token|jwt|login|mobile|otp|password|refresh_token|session|sid|token)"\s*:\s*)"[^"]*"',
     flags=re.IGNORECASE,
 )
 STATIC_EXTENSIONS = (
@@ -63,7 +67,18 @@ def redact_url(raw_url: str) -> str:
 def redact_text(value: Optional[str], *, max_chars: int) -> str:
     if not value:
         return ""
-    text = SENSITIVE_JSON_KEYS.sub(r'\1"[REDACTED]"', value)
+    text = value
+    try:
+        pairs = parse_qsl(text, keep_blank_values=True)
+        if pairs and urlencode(pairs, doseq=True):
+            redacted_pairs = [
+                (key, "[REDACTED]" if key.lower() in SENSITIVE_FORM_KEYS else val)
+                for key, val in pairs
+            ]
+            text = urlencode(redacted_pairs, doseq=True)
+    except Exception:
+        pass
+    text = SENSITIVE_JSON_KEYS.sub(r'\1"[REDACTED]"', text)
     text = re.sub(r"Bearer\s+[A-Za-z0-9._~+/=-]+", "Bearer [REDACTED]", text, flags=re.IGNORECASE)
     return text[:max_chars]
 
@@ -101,6 +116,8 @@ def console_text(msg) -> str:
 
 
 def main() -> None:
+    from playwright.sync_api import sync_playwright
+
     parser = argparse.ArgumentParser(
         description=(
             "Открыть «Мой Арбитр» в видимом Chromium, дать пользователю вручную выполнить поиск "
