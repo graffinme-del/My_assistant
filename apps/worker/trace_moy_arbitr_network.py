@@ -1,8 +1,11 @@
+from __future__ import annotations
+
 import argparse
 import json
 import re
 import time
 from pathlib import Path
+from typing import Optional
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from playwright.sync_api import sync_playwright
@@ -57,7 +60,7 @@ def redact_url(raw_url: str) -> str:
         return raw_url
 
 
-def redact_text(value: str | None, *, max_chars: int) -> str:
+def redact_text(value: Optional[str], *, max_chars: int) -> str:
     if not value:
         return ""
     text = SENSITIVE_JSON_KEYS.sub(r'\1"[REDACTED]"', value)
@@ -82,7 +85,7 @@ def is_interesting(url: str, resource_type: str, *, include_static: bool) -> boo
     return True
 
 
-def append(events: list[dict], item: dict) -> None:
+def append(events, item: dict) -> None:
     item["t"] = round(time.time(), 3)
     events.append(item)
 
@@ -115,7 +118,7 @@ def main() -> None:
     base_url = args.base_url.rstrip("/")
     state_path = Path(args.state)
     out_path = Path(args.out)
-    events: list[dict] = []
+    events = []
 
     print("Открою браузер. Дальше вручную:")
     print("1) войдите в «Мой Арбитр», если вход не сохранён;")
