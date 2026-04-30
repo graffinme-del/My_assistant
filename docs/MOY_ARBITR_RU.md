@@ -70,3 +70,47 @@ docker compose -f runtime.compose.yml exec worker python /app/save_moy_arbitr_st
 cd /opt/my_assistant
 docker compose -f runtime.compose.yml cp worker:/app/moy_arbitr/debug ./moy_arbitr_debug
 ```
+
+## 5. Снятие Network-трассы для прямого API-клиента
+
+Если headless-браузер на сервере видит пустую страницу, нужно снять реальные запросы сайта на компьютере,
+где вы можете войти в «Мой Арбитр» вручную. Скрипт работает на macOS/Linux/Windows, не сохраняет cookies
+и вырезает чувствительные заголовки (`cookie`, `authorization`, `set-cookie`).
+
+macOS/Linux:
+
+```bash
+mkdir moy_arbitr_trace
+cd moy_arbitr_trace
+curl -o trace_moy_arbitr_network.py https://raw.githubusercontent.com/graffinme-del/My_assistant/main/apps/worker/trace_moy_arbitr_network.py
+
+python3 -m venv .venv
+source .venv/bin/activate
+pip install playwright
+python -m playwright install chromium
+
+python trace_moy_arbitr_network.py --out moy_arbitr_trace.json
+```
+
+Windows PowerShell:
+
+```powershell
+mkdir moy_arbitr_trace
+cd moy_arbitr_trace
+curl.exe -o trace_moy_arbitr_network.py https://raw.githubusercontent.com/graffinme-del/My_assistant/main/apps/worker/trace_moy_arbitr_network.py
+
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install playwright
+python -m playwright install chromium
+
+python trace_moy_arbitr_network.py --out moy_arbitr_trace.json
+```
+
+После запуска:
+
+1. В открывшемся браузере войдите в «Мой Арбитр».
+2. Вручную откройте «Мои дела» / выполните поиск по номеру дела.
+3. Дождитесь результатов.
+4. Вернитесь в терминал и нажмите Enter.
+5. Передайте файл `moy_arbitr_trace.json` разработчику/агенту для добавления прямого API-клиента.
