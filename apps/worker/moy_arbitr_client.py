@@ -122,10 +122,22 @@ def _normalize_subscription_case_label(s: str) -> str:
     return t.replace("A", "А")
 
 
+def _case_numbers_normalized_in_blob(blob: str) -> set[str]:
+    """Все номероподобные фрагменты из текста/HTML/JSON строки строки подписки."""
+    compact = re.sub(r"\s+", "", blob or "")
+    out: set[str] = set()
+    for m in re.finditer(r"[АA]\d{1,4}-\d{1,7}/\d{2,4}", compact, flags=re.IGNORECASE):
+        norm = _normalize_subscription_case_label(m.group(0))
+        if norm:
+            out.add(norm)
+    return out
+
+
 def _moy_arbitr_xhr_headers() -> dict[str, str]:
     return {
         "Accept": "application/json, text/javascript, */*; q=0.01",
         "Content-Type": "application/json",
+        "Origin": MOY_ARBITR_BASE_URL,
         "X-Requested-With": "XMLHttpRequest",
         "X-Date-Format": "iso",
         "Referer": f"{MOY_ARBITR_BASE_URL}/",
@@ -162,16 +174,35 @@ def _subscriptions_api_find_case(context, query_value: str) -> list[dict]:
     for row in basket:
         if not isinstance(row, dict):
             continue
-        filt = _normalize_subscription_case_label(str(row.get("Filter") or ""))
         extras = row.get("AdditionalFields") if isinstance(row.get("AdditionalFields"), dict) else {}
         cid = str(extras.get("CaseId") or "").strip()
-        if not cid or filt != want:
+        if not cid:
             continue
+        try:
+            row_blob = json.dumps(row, ensure_ascii=False)
+        except Exception:
+            row_blob = str(row)
+        nums = _case_numbers_normalized_in_blob(row_blob)
+        if want not in nums:
+            filt_only = _normalize_subscription_case_label(str(row.get("Filter") or ""))
+            if filt_only != want:
+                continue
         kad_url = f"https://kad.arbitr.ru/Card/{cid}"
         if kad_url in seen:
             continue
         seen.add(kad_url)
-        raw_num = str(row.get("Filter") or query_value).replace(" ", "")
+        raw_num = (
+            str(row.get("Filter") or "").replace(" ", "")
+            or next(
+                (
+                    m.group(0).replace(" ", "")
+                    for m in re.finditer(r"[АA]\d{1,4}-\d{1,7}/\d{2,4}", row_blob, flags=re.IGNORECASE)
+                    if _normalize_subscription_case_label(m.group(0)) == want
+                ),
+                "",
+            )
+            or query_value.replace(" ", "")
+        )
         out.append(
             {
                 "remote_case_id": f"moy-arbitr:{cid}"[:255],
@@ -258,6 +289,41 @@ def _dismiss_common_overlays(page) -> None:
             continue
 
 
+def _fill_contenteditable_search(page, value: str) -> bool:
+    for sel in ("[contenteditable='true']", "[contenteditable=true]"):
+        try:
+            loc = page.locator(sel).first
+            if loc.is_visible(timeout=800):
+                loc.click(timeout=1000)
+                loc.fill("")  # may not support fill on all libs
+                try:
+                    loc.fill(value, timeout=3000)
+                except Exception:
+                    page.keyboard.press("Control+a")
+                    page.keyboard.type(value, delay=20)
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _wait_for_case_number_visible(page, query_value: str, timeout_ms: int) -> bool:
+    """SPA иногда ставит фильтр по query-параметру без поля ввода — ждём номер в DOM."""
+    want = _normalize_subscription_case_label(query_value)
+    if not want:
+        return False
+    deadline = time.time() + max(1500, timeout_ms) / 1000.0
+    while time.time() < deadline:
+        try:
+            blob = page.locator("body").inner_text(timeout=2500)
+        except Exception:
+            blob = ""
+        if want in _case_numbers_normalized_in_blob(blob):
+            return True
+        page.wait_for_timeout(450)
+    return False
+
+
 def _fill_fallback_visible_inputs(page, value: str) -> bool:
     """SPA часто без label/placeholder — перебираем видимые поля."""
     try:
@@ -293,6 +359,7 @@ def _fill_first_matching_input(page, value: str, patterns: tuple[str, ...]) -> b
         )
     candidates.extend(
         [
+            page.get_by_role("searchbox").first,
             page.get_by_role("textbox").first,
             page.locator("input[type='search']").first,
             page.locator("input[type='text']").first,
@@ -308,6 +375,8 @@ def _fill_first_matching_input(page, value: str, patterns: tuple[str, ...]) -> b
                 return True
         except Exception:
             continue
+    if _fill_contenteditable_search(page, value):
+        return True
     return _fill_fallback_visible_inputs(page, value)
 
 
@@ -372,7 +441,10 @@ def _drive_search_form(page, query_type: str, query_value: str, nav_ms: int) -> 
                     break
             except Exception:
                 continue
-    LAST_SEARCH_DIAGNOSTIC = f"url={page.url}; input_found={filled}"
+    spa_filter_visible = False
+    if qt == "case_number" and (query_value or "").strip() and not filled:
+        spa_filter_visible = _wait_for_case_number_visible(page, query_value, timeout_ms=min(nav_ms, 35_000))
+    LAST_SEARCH_DIAGNOSTIC = f"url={page.url}; input_found={filled}; spa_case_visible={spa_filter_visible}"
     if filled:
         _click_search(page)
     page.wait_for_timeout(3500)
@@ -469,17 +541,21 @@ def search_moy_arbitr_cases(query_type: str, query_value: str, job_id: int | Non
         )
         try:
             context = _new_context(browser)
-            page = context.new_page()
-            _attach_browser_diagnostics(page)
             if progress and job_id is not None:
                 progress(job_id, "searching", f"Мой Арбитр: поиск {query_type}={query_value}")
+
+            qt_short = _query_type_without_prefix(query_type)
+            if qt_short == "case_number" and (query_value or "").strip():
+                subs_first = _subscriptions_api_find_case(context, query_value)
+                if subs_first:
+                    LAST_SEARCH_DIAGNOSTIC = f"subscriptions_api_early=len={len(subs_first)}"
+                    return subs_first
+
+            page = context.new_page()
+            _attach_browser_diagnostics(page)
             _drive_search_form(page, query_type, query_value, nav_ms)
             results = _extract_case_results(page)
-            if (
-                not results
-                and _query_type_without_prefix(query_type) == "case_number"
-                and (query_value or "").strip()
-            ):
+            if not results and qt_short == "case_number" and (query_value or "").strip():
                 subs = _subscriptions_api_find_case(context, query_value)
                 if subs:
                     results = subs

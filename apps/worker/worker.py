@@ -711,6 +711,12 @@ def process_moy_arbitr_job(job: dict) -> None:
             diag = ""
         if diag:
             msg += "\n" + diag
+        if query_type == "moy_arbitr_case_number":
+            msg += (
+                "\n\nВажно: поиск по номеру на стороне воркера опирается на сайт «Мой Арбитр» (интерфейс и API подписок). "
+                "Дело в списке слева в нашем приложении не гарантирует, что оно числится в вашей сессии на my.arbitr.ru. "
+                "Убедитесь, что дело добавлено в «Отслеживаемые» на сайте и что актуальная сессия сохранена в state.json."
+            )
         status = "needs_manual_step" if run_mode == "download" else "done"
         complete_job(job_id, status, msg, {"backend": "moy_arbitr", "cases_found": 0})
         return
