@@ -23,3 +23,6 @@ Thumbs.db
 # Docker
 *.log
 data/
+
+# Local network traces from trace_moy_arbitr_network.py (may contain SSO/session payloads)
+/moy_arbitr_trace*.json

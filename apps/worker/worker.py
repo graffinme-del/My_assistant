@@ -1073,6 +1073,46 @@ def merge_popup_pdf_urls(page, card_url: str, nav_ms: int, seen: set[str], docs:
             page.wait_for_timeout(600)
 
 
+_KAD_CARD_LINK_RE = re.compile(
+    r"https://kad\.arbitr\.ru/[Cc]ard/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}",
+    flags=re.IGNORECASE,
+)
+
+
+def collect_kad_documents_from_linked_cards(
+    page, landing_hints: str, nav_ms: int, *, max_cards: int = 2
+) -> list[dict]:
+    """
+    На странице «Мой Арбитр» иногда уже есть deeplink на КАД; собираем акты через те же вкладки карточки.
+    """
+    try:
+        html = page.content() or ""
+    except Exception:
+        html = ""
+    blob = "\n".join([(landing_hints or "").strip(), (page.url or "").strip(), html])
+    uniq: dict[str, str] = {}
+    for m in _KAD_CARD_LINK_RE.finditer(blob):
+        u = re.sub("/card/", "/Card/", m.group(0), flags=re.IGNORECASE)
+        g = u.rstrip("/").rsplit("/", 1)[-1].lower()
+        uniq.setdefault(g, u)
+    if not uniq:
+        return []
+    merged: list[dict] = []
+    seen_fu: set[str] = set()
+    for _, card_u in sorted(uniq.items())[:max(1, max_cards)]:
+        try:
+            chunk = open_kad_card_and_collect_docs(page, card_u, nav_ms)
+        except Exception:
+            continue
+        for d in chunk:
+            fu = (d.get("file_url") or "").strip()
+            if not fu or fu in seen_fu:
+                continue
+            seen_fu.add(fu)
+            merged.append(d)
+    return merged
+
+
 def open_kad_card_and_collect_docs(page, card_url: str, nav_ms: int) -> list[dict]:
     """По очереди открываем вкладки карточки и собираем ссылки (раньше кликали только по первой удачной)."""
     merged: list[dict] = []
@@ -1152,6 +1192,27 @@ def download_document_via_context(context, file_url: str, _depth: int = 0) -> Pa
     head = body[:120].lower().lstrip()
     if head.startswith(b"<!doctype") or head.startswith(b"<html"):
         if _depth < 3:
+            from kad_pdf_client import (
+                download_kad_document_pdf_via_api,
+                is_kad_document_pdf_viewer_url,
+            )
+
+            # Кад: /Document/Pdf/… часто возвращает HTML с token/hash, затем PDF через POST.
+            if is_kad_document_pdf_viewer_url(file_url):
+                api_timeout_ms = max(30_000, COURT_SYNC_TIMEOUT_SEC * 1000)
+                try:
+                    pdf_body, fname_hint = download_kad_document_pdf_via_api(
+                        context.request,
+                        file_url,
+                        referer=file_url,
+                        timeout_ms=api_timeout_ms,
+                    )
+                    safe_pdf = re.sub(r"[^\w.\-а-яА-Я]", "_", fname_hint or "document.pdf")
+                    target = Path(tempfile.mkdtemp()) / safe_pdf
+                    target.write_bytes(pdf_body)
+                    return target
+                except RuntimeError:
+                    pass
             nested = _extract_pdf_url_from_viewer_html(body.decode("utf-8", errors="ignore"))
             if nested and nested != file_url:
                 return download_document_via_context(context, nested, _depth + 1)

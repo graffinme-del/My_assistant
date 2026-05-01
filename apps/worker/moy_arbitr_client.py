@@ -450,6 +450,11 @@ def collect_moy_arbitr_documents(page, case_url: str) -> list[dict]:
 
 
 def download_moy_arbitr_document(context, file_url: str) -> Path:
+    if "kad.arbitr.ru" in (file_url or "").lower():
+        import worker as worker_mod
+
+        return worker_mod.download_document_via_context(context, file_url)
+
     response = context.request.get(file_url, timeout=max(30_000, MOY_ARBITR_TIMEOUT_SEC * 1000))
     if not response.ok:
         raise RuntimeError(f"Мой Арбитр: не удалось скачать файл: HTTP {response.status}")
@@ -495,6 +500,24 @@ def open_case_and_download_documents(case_data: dict, job_id: int | None = None,
             page.wait_for_timeout(2500)
             ensure_authorized(page)
             docs = collect_moy_arbitr_documents(page, card_url)
+            seen_fu = {(d.get("file_url") or "").strip() for d in docs if d.get("file_url")}
+            try:
+                import worker as worker_mod
+
+                extra = worker_mod.collect_kad_documents_from_linked_cards(
+                    page,
+                    "\n".join([(card_url or "").strip(), (page.url or "").strip()]),
+                    nav_ms,
+                )
+                for row in extra:
+                    u = (row.get("file_url") or "").strip()
+                    if u and u not in seen_fu:
+                        seen_fu.add(u)
+                        docs.append(row)
+                        if len(docs) >= MOY_ARBITR_MAX_DOCS_PER_CASE:
+                            break
+            except Exception:
+                pass
             return context, browser, docs
         except Exception:
             browser.close()
