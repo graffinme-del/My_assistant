@@ -690,39 +690,43 @@ def download_moy_arbitr_document(context, file_url: str) -> Path:
 def open_case_and_download_documents(case_data: dict, job_id: int | None = None, progress=None):
     nav_ms = max(60_000, MOY_ARBITR_TIMEOUT_SEC * 1000)
     card_url = case_data.get("card_url") or MOY_ARBITR_BASE_URL
-    with sync_playwright() as pw:
-        browser = pw.chromium.launch(
-            headless=MOY_ARBITR_HEADLESS,
-            args=MOY_ARBITR_CHROMIUM_ARGS,
-        )
+    pw = sync_playwright().start()
+    browser = pw.chromium.launch(
+        headless=MOY_ARBITR_HEADLESS,
+        args=MOY_ARBITR_CHROMIUM_ARGS,
+    )
+    try:
+        context = _new_context(browser)
+        page = context.new_page()
+        if progress and job_id is not None:
+            progress(job_id, "opening_case", f"Мой Арбитр: открываю {card_url}")
+        page.goto(card_url, wait_until="domcontentloaded", timeout=nav_ms)
+        page.wait_for_timeout(2500)
+        ensure_authorized(page)
+        docs = collect_moy_arbitr_documents(page, card_url)
+        seen_fu = {(d.get("file_url") or "").strip() for d in docs if d.get("file_url")}
         try:
-            context = _new_context(browser)
-            page = context.new_page()
-            if progress and job_id is not None:
-                progress(job_id, "opening_case", f"Мой Арбитр: открываю {card_url}")
-            page.goto(card_url, wait_until="domcontentloaded", timeout=nav_ms)
-            page.wait_for_timeout(2500)
-            ensure_authorized(page)
-            docs = collect_moy_arbitr_documents(page, card_url)
-            seen_fu = {(d.get("file_url") or "").strip() for d in docs if d.get("file_url")}
-            try:
-                import worker as worker_mod
+            import worker as worker_mod
 
-                extra = worker_mod.collect_kad_documents_from_linked_cards(
-                    page,
-                    "\n".join([(card_url or "").strip(), (page.url or "").strip()]),
-                    nav_ms,
-                )
-                for row in extra:
-                    u = (row.get("file_url") or "").strip()
-                    if u and u not in seen_fu:
-                        seen_fu.add(u)
-                        docs.append(row)
-                        if len(docs) >= MOY_ARBITR_MAX_DOCS_PER_CASE:
-                            break
-            except Exception:
-                pass
-            return context, browser, docs
+            extra = worker_mod.collect_kad_documents_from_linked_cards(
+                page,
+                "\n".join([(card_url or "").strip(), (page.url or "").strip()]),
+                nav_ms,
+            )
+            for row in extra:
+                u = (row.get("file_url") or "").strip()
+                if u and u not in seen_fu:
+                    seen_fu.add(u)
+                    docs.append(row)
+                    if len(docs) >= MOY_ARBITR_MAX_DOCS_PER_CASE:
+                        break
         except Exception:
-            browser.close()
-            raise
+            pass
+        return context, browser, pw, docs
+    except Exception:
+        browser.close()
+        try:
+            pw.stop()
+        except Exception:
+            pass
+        raise

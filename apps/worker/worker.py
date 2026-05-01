@@ -754,7 +754,9 @@ def process_moy_arbitr_job(job: dict) -> None:
         if case_num and not effective_preferred_id:
             effective_preferred_id = ensure_case_id(case_num)
         try:
-            context, browser, docs = open_case_and_download_documents(case_data, job_id=job_id, progress=report_progress)
+            context, browser, playwright_driver, docs = open_case_and_download_documents(
+                case_data, job_id=job_id, progress=report_progress
+            )
         except MoyArbitrAuthRequired as exc:
             complete_job(job_id, "needs_manual_step", str(exc), {"backend": "moy_arbitr", "auth_required": True})
             return
@@ -801,6 +803,10 @@ def process_moy_arbitr_job(job: dict) -> None:
                 time.sleep(max(1, COURT_SYNC_DELAY_SEC))
         finally:
             browser.close()
+            try:
+                playwright_driver.stop()
+            except Exception:
+                pass
 
     lines.append(
         f"Итог «Мой Арбитр»: найдено дел {len(results)}, найдено документов {discovered}, "
@@ -1123,28 +1129,32 @@ def open_kad_card_and_collect_docs(page, card_url: str, nav_ms: int) -> list[dic
     """По очереди открываем вкладки карточки и собираем ссылки (раньше кликали только по первой удачной)."""
     merged: list[dict] = []
     seen: set[str] = set()
+    per_card_timeout_ms = min(nav_ms, 45_000)
+    deadline = time.time() + (per_card_timeout_ms / 1000.0)
     for label in KAD_TAB_LABELS:
+        if time.time() >= deadline:
+            break
         try:
-            page.goto(card_url, wait_until="domcontentloaded", timeout=nav_ms)
-            page.wait_for_timeout(2000)
-            page.get_by_text(label, exact=False).first.click(timeout=5000)
-            page.wait_for_timeout(4000)
+            page.goto(card_url, wait_until="domcontentloaded", timeout=per_card_timeout_ms)
+            page.wait_for_timeout(1200)
+            page.get_by_text(label, exact=False).first.click(timeout=3500)
+            page.wait_for_timeout(2200)
             chunk = collect_document_links_from_playwright_page(page, card_url)
             for d in chunk:
                 u = d["file_url"]
                 if u not in seen:
                     seen.add(u)
                     merged.append(d)
-            merge_popup_pdf_urls(page, card_url, nav_ms, seen, merged)
+            merge_popup_pdf_urls(page, card_url, min(nav_ms, 20_000), seen, merged)
         except Exception:
             continue
     if not merged:
         try:
-            page.goto(card_url, wait_until="domcontentloaded", timeout=nav_ms)
-            page.wait_for_timeout(5000)
+            page.goto(card_url, wait_until="domcontentloaded", timeout=per_card_timeout_ms)
+            page.wait_for_timeout(2500)
             merged = collect_document_links_from_playwright_page(page, card_url)
             seen = {d["file_url"] for d in merged}
-            merge_popup_pdf_urls(page, card_url, nav_ms, seen, merged)
+            merge_popup_pdf_urls(page, card_url, min(nav_ms, 20_000), seen, merged)
         except Exception:
             merged = []
     return merged
