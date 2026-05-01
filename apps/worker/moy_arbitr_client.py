@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import tempfile
@@ -115,6 +116,78 @@ def _query_type_without_prefix(query_type: str) -> str:
     return (query_type or "").removeprefix("moy_arbitr_")
 
 
+def _normalize_subscription_case_label(s: str) -> str:
+    """Сравниваем номер дела с полем Filter в подписках (латиница А / кириллица А)."""
+    t = re.sub(r"\s+", "", (s or "")).strip().upper()
+    return t.replace("A", "А")
+
+
+def _moy_arbitr_xhr_headers() -> dict[str, str]:
+    return {
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Content-Type": "application/json",
+        "X-Requested-With": "XMLHttpRequest",
+        "X-Date-Format": "iso",
+        "Referer": f"{MOY_ARBITR_BASE_URL}/",
+    }
+
+
+def _subscriptions_api_find_case(context, query_value: str) -> list[dict]:
+    """
+    Если SPA не отдало поля поиска, пробуем тот же XHR, что и сайт:
+    POST /Guard/Subscriptions — там есть номер из подписки и CaseId (КАД).
+    Работает только для уже отслеживаемых дел.
+    """
+    want = _normalize_subscription_case_label(query_value)
+    if not want:
+        return []
+    url = f"{MOY_ARBITR_BASE_URL}/Guard/Subscriptions"
+    try:
+        resp = context.request.post(
+            url,
+            headers=_moy_arbitr_xhr_headers(),
+            data=json.dumps({"newFirst": True}),
+            timeout=max(45_000, MOY_ARBITR_TIMEOUT_SEC * 1000),
+        )
+        if not resp.ok:
+            return []
+        data = resp.json()
+    except Exception:
+        return []
+    if not data.get("Success"):
+        return []
+    basket = (((data.get("Result") or {}) if isinstance(data.get("Result"), dict) else {}) or {}).get("Items") or []
+    out: list[dict] = []
+    seen: set[str] = set()
+    for row in basket:
+        if not isinstance(row, dict):
+            continue
+        filt = _normalize_subscription_case_label(str(row.get("Filter") or ""))
+        extras = row.get("AdditionalFields") if isinstance(row.get("AdditionalFields"), dict) else {}
+        cid = str(extras.get("CaseId") or "").strip()
+        if not cid or filt != want:
+            continue
+        kad_url = f"https://kad.arbitr.ru/Card/{cid}"
+        if kad_url in seen:
+            continue
+        seen.add(kad_url)
+        raw_num = str(row.get("Filter") or query_value).replace(" ", "")
+        out.append(
+            {
+                "remote_case_id": f"moy-arbitr:{cid}"[:255],
+                "source_system": "moy_arbitr",
+                "card_url": kad_url,
+                "case_number": raw_num[:64],
+                "title": raw_num[:255],
+                "court_name": "",
+                "participants": [],
+            }
+        )
+        if len(out) >= MOY_ARBITR_MAX_CASES:
+            break
+    return out
+
+
 def _search_url(query_type: str, query_value: str) -> str:
     """Best-effort deep link; my.arbitr.ru may still route to its SPA search UI."""
     qv = quote_plus(query_value or "")
@@ -185,6 +258,28 @@ def _dismiss_common_overlays(page) -> None:
             continue
 
 
+def _fill_fallback_visible_inputs(page, value: str) -> bool:
+    """SPA часто без label/placeholder — перебираем видимые поля."""
+    try:
+        loc = page.locator("input:visible")
+        n = min(loc.count(), 50)
+        for idx in range(n):
+            inp = loc.nth(idx)
+            try:
+                t = (inp.get_attribute("type") or "").lower()
+                if t in ("checkbox", "radio", "hidden", "submit", "button", "file", "image"):
+                    continue
+                if inp.is_visible(timeout=400):
+                    inp.fill("", timeout=500)
+                    inp.fill(value, timeout=4500)
+                    return True
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return False
+
+
 def _fill_first_matching_input(page, value: str, patterns: tuple[str, ...]) -> bool:
     candidates = []
     for p in patterns:
@@ -196,15 +291,24 @@ def _fill_first_matching_input(page, value: str, patterns: tuple[str, ...]) -> b
                 page.locator("input").filter(has_text=rx).first,
             ]
         )
-    candidates.extend([page.locator("input[type='search']").first, page.locator("input").first])
+    candidates.extend(
+        [
+            page.get_by_role("textbox").first,
+            page.locator("input[type='search']").first,
+            page.locator("input[type='text']").first,
+            page.locator("input:not([type='hidden'])").first,
+            page.locator("input").first,
+        ]
+    )
     for loc in candidates:
         try:
             if loc.is_visible(timeout=1500):
+                loc.fill("", timeout=500)
                 loc.fill(value, timeout=4000)
                 return True
         except Exception:
             continue
-    return False
+    return _fill_fallback_visible_inputs(page, value)
 
 
 def _click_search(page) -> None:
@@ -237,9 +341,22 @@ def _drive_search_form(page, query_type: str, query_value: str, nav_ms: int) -> 
     page.wait_for_timeout(2500)
     ensure_authorized(page)
     _dismiss_common_overlays(page)
+    for _sel_try in ("input:visible", "input[type=text]:visible", "[role=combobox]", "textarea:visible"):
+        try:
+            page.wait_for_selector(_sel_try, state="visible", timeout=14000)
+            break
+        except PlaywrightTimeoutError:
+            continue
     qt = _query_type_without_prefix(query_type)
     if qt == "case_number":
-        patterns = (r"номер.*дел", r"дело", r"case")
+        patterns = (
+            r"номер.*дел",
+            r"дело",
+            r"case",
+            r"поиск",
+            r"найти.*дел",
+            r"фильтр",
+        )
     elif qt in ("inn", "ogrn"):
         patterns = (qt, r"участник", r"инн|огрн", r"наименование")
     else:
@@ -358,6 +475,17 @@ def search_moy_arbitr_cases(query_type: str, query_value: str, job_id: int | Non
                 progress(job_id, "searching", f"Мой Арбитр: поиск {query_type}={query_value}")
             _drive_search_form(page, query_type, query_value, nav_ms)
             results = _extract_case_results(page)
+            if (
+                not results
+                and _query_type_without_prefix(query_type) == "case_number"
+                and (query_value or "").strip()
+            ):
+                subs = _subscriptions_api_find_case(context, query_value)
+                if subs:
+                    results = subs
+                    LAST_SEARCH_DIAGNOSTIC = (
+                        f"{LAST_SEARCH_DIAGNOSTIC}; subscriptions_api=len={len(subs)}"
+                    )
             if not results and _page_looks_unauthorized(page):
                 raise MoyArbitrAuthRequired(_manual_login_message("сессия «Мой Арбитр» истекла"))
             if not results:
