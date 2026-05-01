@@ -703,25 +703,38 @@ def open_case_and_download_documents(case_data: dict, job_id: int | None = None,
         page.goto(card_url, wait_until="domcontentloaded", timeout=nav_ms)
         page.wait_for_timeout(2500)
         ensure_authorized(page)
-        docs = collect_moy_arbitr_documents(page, card_url)
-        seen_fu = {(d.get("file_url") or "").strip() for d in docs if d.get("file_url")}
-        try:
-            import worker as worker_mod
 
-            extra = worker_mod.collect_kad_documents_from_linked_cards(
-                page,
-                "\n".join([(card_url or "").strip(), (page.url or "").strip()]),
-                nav_ms,
-            )
-            for row in extra:
-                u = (row.get("file_url") or "").strip()
-                if u and u not in seen_fu:
-                    seen_fu.add(u)
-                    docs.append(row)
-                    if len(docs) >= MOY_ARBITR_MAX_DOCS_PER_CASE:
-                        break
-        except Exception:
-            pass
+        docs: list[dict] = []
+        seen_fu: set[str] = set()
+        import worker as worker_mod
+
+        is_kad_card = bool(
+            re.search(r"kad\\.arbitr\\.ru/.*[Cc]ard/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", card_url or "", re.I)
+        )
+        if is_kad_card:
+            try:
+                docs = worker_mod.open_kad_card_and_collect_docs(page, card_url.strip(), nav_ms)
+            except Exception:
+                docs = []
+            seen_fu = {(d.get("file_url") or "").strip() for d in docs if d.get("file_url")}
+        else:
+            docs = collect_moy_arbitr_documents(page, card_url)
+            seen_fu = {(d.get("file_url") or "").strip() for d in docs if d.get("file_url")}
+            try:
+                extra = worker_mod.collect_kad_documents_from_linked_cards(
+                    page,
+                    "\n".join([(card_url or "").strip(), (page.url or "").strip()]),
+                    nav_ms,
+                )
+                for row in extra:
+                    u = (row.get("file_url") or "").strip()
+                    if u and u not in seen_fu:
+                        seen_fu.add(u)
+                        docs.append(row)
+                        if len(docs) >= MOY_ARBITR_MAX_DOCS_PER_CASE:
+                            break
+            except Exception:
+                pass
         return context, browser, pw, docs
     except Exception:
         browser.close()

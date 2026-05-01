@@ -889,11 +889,12 @@ def _href_looks_like_kad_document(href: str) -> bool:
     if re.search(r"/card/[a-f0-9\-]{30,}/?$", h) and "pdf" not in h and "document" not in h:
         return False
     # Не использовать общее «kad/» — на домене полно статики; только признаки выдачи/файла дела.
-    return any(
+    if any(
         k in h
         for k in (
             "pdf",
             "pdfdocument",
+            "/pdfdocument/",
             "getpdf",
             "document",
             "download",
@@ -917,7 +918,17 @@ def _href_looks_like_kad_document(href: str) -> bool:
             ".rtf",
             "aspx",
         )
-    )
+    ):
+        return True
+    # SPA иногда использует человекочитаемые сегменты без слова «document» в ключе фильтра.
+    if "kad.arbitr.ru" in h:
+        tail = (h.split("kad.arbitr.ru", 1)[-1]).split("#")[0].split("?")[0]
+        tail_l = tail.lower()
+        staticish = ("scripts", "bundles", "fonts", "content/themes", ".css", ".js")
+        if not any(s in tail_l for s in staticish):
+            docish = ("pdfdocument", "/pdf/", "/kad/", "/file/", "document", ".pdf")
+            return any(s in tail_l for s in docish)
+    return False
 
 
 def _anchor_text_hints_document(text: str) -> bool:
@@ -1006,6 +1017,23 @@ def extract_kad_document_urls_from_html(html: str, card_url: str) -> list[dict]:
             continue
         seen.add(u)
         out.append({"remote_document_id": u[:500], "title": "", "filename": "", "file_url": u})
+
+    loose = (
+        r"https://kad\.arbitr\.ru/+Kad/+PdfDocument[^\s\"'<>]{0,380}",
+        r"https://kad\.arbitr\.ru/+Document/+Pdf[^\s\"'<>]{0,380}",
+        r"https://kad\.arbitr\.ru/+Kad/+Document[^\s\"'<>]{0,380}",
+    )
+    for pat in loose:
+        for m in re.finditer(pat, html, flags=re.IGNORECASE):
+            u = re.sub(r"\s+", "", (m.group(0) or "").strip()).strip()
+            if is_kad_junk_url(u):
+                continue
+            if not _href_looks_like_kad_document(u):
+                continue
+            if u in seen:
+                continue
+            seen.add(u)
+            out.append({"remote_document_id": u[:500], "title": "", "filename": "", "file_url": u})
     return out
 
 
@@ -1029,7 +1057,19 @@ def collect_document_links_from_playwright_page(page, card_url: str) -> list[dic
     return docs
 
 
-KAD_TAB_LABELS = ("Документы", "Судебные акты", "Электронное дело", "Материалы", "Ход дела")
+KAD_TAB_LABELS = (
+    "Документы",
+    "Судебные акты",
+    "Электронное дело",
+    "Материалы",
+    "Ход дела",
+    "Решения",
+    "Поданные",
+    "Приложения",
+    "Обжалование",
+    "Картотека",
+    "Обзор по делам",
+)
 
 
 def merge_popup_pdf_urls(page, card_url: str, nav_ms: int, seen: set[str], docs: list[dict], max_clicks: int = 22) -> None:
@@ -1038,7 +1078,7 @@ def merge_popup_pdf_urls(page, card_url: str, nav_ms: int, seen: set[str], docs:
     for frame in page.frames:
         try:
             anchors = frame.locator("a")
-            n = min(anchors.count(), 120)
+            n = min(anchors.count(), 450)
         except Exception:
             continue
         for i in range(n):
@@ -1125,20 +1165,42 @@ def collect_kad_documents_from_linked_cards(
     return merged
 
 
+def _kad_click_tab(page, label: str, nav_ms: int) -> None:
+    try:
+        rx = re.compile(re.escape(label), re.IGNORECASE)
+        tab = page.get_by_role("tab", name=rx).first
+        tab.click(timeout=min(5000, nav_ms))
+        return
+    except Exception:
+        pass
+    try:
+        page.get_by_role("button", name=re.compile(re.escape(label), re.IGNORECASE)).first.click(timeout=4000)
+        return
+    except Exception:
+        pass
+    page.get_by_text(label, exact=False).first.click(timeout=min(5000, nav_ms))
+
+
 def open_kad_card_and_collect_docs(page, card_url: str, nav_ms: int) -> list[dict]:
     """По очереди открываем вкладки карточки и собираем ссылки (раньше кликали только по первой удачной)."""
     merged: list[dict] = []
     seen: set[str] = set()
-    per_card_timeout_ms = min(nav_ms, 45_000)
-    deadline = time.time() + (per_card_timeout_ms / 1000.0)
+    goto_timeout_ms = min(max(45_000, nav_ms), 120_000)
+    max_tabs_s = max(240.0, min(float(nav_ms) / 1000.0 * max(len(KAD_TAB_LABELS), 1), 420.0))
+    deadline_all = time.time() + max_tabs_s
     for label in KAD_TAB_LABELS:
-        if time.time() >= deadline:
+        if time.time() >= deadline_all:
             break
         try:
-            page.goto(card_url, wait_until="domcontentloaded", timeout=per_card_timeout_ms)
-            page.wait_for_timeout(1200)
-            page.get_by_text(label, exact=False).first.click(timeout=3500)
-            page.wait_for_timeout(2200)
+            page.goto(card_url, wait_until="domcontentloaded", timeout=goto_timeout_ms)
+            page.wait_for_timeout(1500)
+            try:
+                page.wait_for_load_state("networkidle", timeout=min(12_000, goto_timeout_ms))
+            except Exception:
+                pass
+            page.wait_for_timeout(800)
+            _kad_click_tab(page, label, goto_timeout_ms)
+            page.wait_for_timeout(3800)
             chunk = collect_document_links_from_playwright_page(page, card_url)
             for d in chunk:
                 u = d["file_url"]
@@ -1150,8 +1212,8 @@ def open_kad_card_and_collect_docs(page, card_url: str, nav_ms: int) -> list[dic
             continue
     if not merged:
         try:
-            page.goto(card_url, wait_until="domcontentloaded", timeout=per_card_timeout_ms)
-            page.wait_for_timeout(2500)
+            page.goto(card_url, wait_until="domcontentloaded", timeout=goto_timeout_ms)
+            page.wait_for_timeout(3500)
             merged = collect_document_links_from_playwright_page(page, card_url)
             seen = {d["file_url"] for d in merged}
             merge_popup_pdf_urls(page, card_url, min(nav_ms, 20_000), seen, merged)
