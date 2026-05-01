@@ -1,9 +1,10 @@
 name: CI
 
+# Push в main уже запускает отдельный workflow «Deploy». Повторный CI на тот же push
+# выглядел как «два раза что-то делает» и дублировал docker-build с прод-сборкой.
 on:
-  push:
-    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   api-check:
