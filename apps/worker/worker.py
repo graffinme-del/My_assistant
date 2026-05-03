@@ -1028,7 +1028,7 @@ def _append_anchor_docs_from_root(root, card_url: str, seen: set[str], docs: lis
         pass
     try:
         anchors = root.locator("a")
-        n = min(anchors.count(), 800)
+        n = min(anchors.count(), 1400)
     except Exception:
         return
     for idx in range(n):
@@ -1092,6 +1092,10 @@ def extract_kad_document_urls_from_html(html: str, card_url: str) -> list[dict]:
         r"https://kad\.arbitr\.ru/+Kad/+PdfDocument[^\s\"'<>]{0,380}",
         r"https://kad\.arbitr\.ru/+Document/+Pdf[^\s\"'<>]{0,380}",
         r"https://kad\.arbitr\.ru/+Kad/+Document[^\s\"'<>]{0,380}",
+        r"https://kad\.arbitr\.ru/+Kad/+Document/+Content[^\s\"'<>]{0,380}",
+        r"https://kad\.arbitr\.ru/+Document/+Content[^\s\"'<>]{0,380}",
+        r"https://kad\.arbitr\.ru/+File/+[^\s\"'<>]{0,380}",
+        r"https://kad\.arbitr\.ru/+Kad/+File[^\s\"'<>]{0,380}",
     )
     for pat in loose:
         for m in re.finditer(pat, html, flags=re.IGNORECASE):
@@ -1131,16 +1135,32 @@ def extract_kad_document_urls_from_html(html: str, card_url: str) -> list[dict]:
 _KAD_COLLECT_ABS_LINKS_JS = """() => {
   const out = [];
   const s = new Set();
-  document.querySelectorAll("a[href]").forEach((a) => {
-    const h = (a.getAttribute("href") || "").trim();
-    if (!h) return;
+  const base = document.baseURI || location.href || "https://kad.arbitr.ru/";
+  function maybeAdd(raw) {
+    const h = (raw || "").trim();
+    if (!h || h.startsWith("#")) return;
     let abs;
-    try { abs = new URL(h, document.baseURI || location.href).href; } catch (e) { return; }
+    try { abs = new URL(h, base).href; } catch (e) { return; }
     if (!abs.includes("kad.arbitr.ru")) return;
     if (s.has(abs)) return;
     s.add(abs);
     out.push(abs);
-  });
+  }
+  function visit(root) {
+    if (!root || !root.querySelectorAll) return;
+    root.querySelectorAll("a[href], area[href]").forEach((a) => maybeAdd(a.getAttribute("href")));
+    const attrs = ["data-url", "data-href", "data-link", "data-file-url", "data-src", "ng-href"];
+    root.querySelectorAll("*").forEach((el) => {
+      attrs.forEach((at) => {
+        const v = el.getAttribute && el.getAttribute(at);
+        if (v) maybeAdd(v);
+      });
+    });
+    root.querySelectorAll("*").forEach((el) => {
+      if (el.shadowRoot) visit(el.shadowRoot);
+    });
+  }
+  visit(document);
   return out;
 }"""
 
@@ -1358,8 +1378,9 @@ def open_kad_card_and_collect_docs(
             ct = (resp.headers.get("content-type") or "").lower()
             if ct and not any(x in ct for x in ("json", "text/plain", "text/html", "javascript", "x-www-form")):
                 return
+            max_body = 2_000_000 if "json" in ct else 600_000
             body = resp.body()
-            if not body or len(body) > 600_000:
+            if not body or len(body) > max_body:
                 return
             blob = body.decode("utf-8", errors="ignore")
             for item in extract_kad_document_urls_from_html(blob, card_url):
@@ -1410,7 +1431,7 @@ def open_kad_card_and_collect_docs(
                     pass
                 page.wait_for_timeout(800)
                 _kad_click_tab(page, label, goto_timeout_ms)
-                page.wait_for_timeout(3800)
+                page.wait_for_timeout(4800)
                 chunk = collect_document_links_from_playwright_page(page, card_url)
                 for d in chunk:
                     u = d["file_url"]

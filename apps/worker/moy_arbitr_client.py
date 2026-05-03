@@ -652,23 +652,47 @@ def _collect_documents_via_my_arbitr_hub(
     cn = (case_number or "").strip()
     if len(cn) < 5:
         return []
-    hub = f"{MOY_ARBITR_BASE_URL}/#/cases/my?caseNumber={quote_plus(cn)}"
-    try:
-        if progress and job_id is not None:
-            progress(job_id, "opening_case", f"Мой Арбитр: вкладки дела (хаб номера «{cn}»)…")
-        page.goto(hub, wait_until="domcontentloaded", timeout=nav_ms)
-        page.wait_for_timeout(4000)
+    variants = [cn]
+    if cn[:1].upper() == "A" and not cn.startswith("А"):
+        variants.append("А" + cn[1:])
+    if cn[:1] == "А" and len(cn) > 1:
+        variants.append("A" + cn[1:])
+    seen_variant: set[str] = set()
+    merged: list[dict] = []
+    seen_url: set[str] = set()
+    for v in variants:
+        if v in seen_variant:
+            continue
+        seen_variant.add(v)
+        hub = f"{MOY_ARBITR_BASE_URL}/#/cases/my?caseNumber={quote_plus(v)}"
         try:
-            page.wait_for_load_state("networkidle", timeout=min(nav_ms, 28000))
-        except PlaywrightTimeoutError:
-            pass
-        page.wait_for_timeout(2000)
-        _dismiss_common_overlays(page)
-        ensure_authorized(page)
-        _lazy_scroll_page(page)
-        return collect_moy_arbitr_documents(page, hub)
-    except Exception:
-        return []
+            if progress and job_id is not None:
+                progress(
+                    job_id,
+                    "opening_case",
+                    f"Мой Арбитр: вкладки дела (хаб номера «{v}»)…",
+                )
+            page.goto(hub, wait_until="domcontentloaded", timeout=nav_ms)
+            page.wait_for_timeout(4000)
+            try:
+                page.wait_for_load_state("networkidle", timeout=min(nav_ms, 28000))
+            except PlaywrightTimeoutError:
+                pass
+            page.wait_for_timeout(2000)
+            _dismiss_common_overlays(page)
+            ensure_authorized(page)
+            _lazy_scroll_page(page)
+            chunk = collect_moy_arbitr_documents(page, hub)
+            for d in chunk:
+                u = (d.get("file_url") or "").strip()
+                if u and u not in seen_url:
+                    seen_url.add(u)
+                    merged.append(d)
+                    if len(merged) >= MOY_ARBITR_MAX_DOCS_PER_CASE:
+                        return merged
+        except Exception:
+            continue
+    return merged
 
 
 def collect_moy_arbitr_documents(page, case_url: str) -> list[dict]:
