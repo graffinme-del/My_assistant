@@ -708,8 +708,9 @@ def open_case_and_download_documents(case_data: dict, job_id: int | None = None,
         seen_fu: set[str] = set()
         import worker as worker_mod
 
+        # В raw-строке нужно r"kad\.arbitr" — иначе r"kad\\." ищет обратный слэш, а не точку в домене.
         is_kad_card = bool(
-            re.search(r"kad\\.arbitr\\.ru/.*[Cc]ard/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", card_url or "", re.I)
+            re.search(r"kad\.arbitr\.ru/.*[Cc]ard/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", card_url or "", re.I)
         )
         if is_kad_card:
             try:
