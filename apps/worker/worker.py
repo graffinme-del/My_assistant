@@ -1034,6 +1034,70 @@ def extract_kad_document_urls_from_html(html: str, card_url: str) -> list[dict]:
                 continue
             seen.add(u)
             out.append({"remote_document_id": u[:500], "title": "", "filename": "", "file_url": u})
+
+    # Ответы API/скрипты: относительные пути в JSON
+    for m in re.finditer(
+        r'"(?:[Uu]rl|[Ff]ile[Uu]rl|Document[Uu]rl|[Pp]df[Uu]rl|[Ll]ink)"\s*:\s*"([^"]+)"',
+        html[:2_000_000],
+        flags=re.IGNORECASE,
+    ):
+        raw = (m.group(1) or "").strip().replace("\\/", "/")
+        if not raw.startswith("/") and not raw.lower().startswith("http"):
+            continue
+        u = urljoin("https://kad.arbitr.ru", raw) if raw.startswith("/") else raw
+        if "kad.arbitr.ru" not in u.lower():
+            continue
+        if is_kad_junk_url(u):
+            continue
+        if not _href_looks_like_kad_document(u):
+            continue
+        if u in seen:
+            continue
+        seen.add(u)
+        out.append({"remote_document_id": u[:500], "title": "", "filename": "", "file_url": u})
+    return out
+
+
+_KAD_COLLECT_ABS_LINKS_JS = """() => {
+  const out = [];
+  const s = new Set();
+  document.querySelectorAll("a[href]").forEach((a) => {
+    const h = (a.getAttribute("href") || "").trim();
+    if (!h) return;
+    let abs;
+    try { abs = new URL(h, document.baseURI || location.href).href; } catch (e) { return; }
+    if (!abs.includes("kad.arbitr.ru")) return;
+    if (s.has(abs)) return;
+    s.add(abs);
+    out.push(abs);
+  });
+  return out;
+}"""
+
+
+def _collect_kad_links_via_frame_evaluate(page, card_url: str) -> list[dict]:
+    """КАД часто подставляет ссылки после JS — собираем все абсолютные href из каждого фрейма."""
+    out: list[dict] = []
+    seen: set[str] = set()
+    for frame in page.frames:
+        try:
+            hrefs = frame.evaluate(_KAD_COLLECT_ABS_LINKS_JS)
+        except Exception:
+            continue
+        if not isinstance(hrefs, list):
+            continue
+        for raw in hrefs:
+            if not isinstance(raw, str):
+                continue
+            full = urljoin(card_url, raw)
+            if is_kad_junk_url(full):
+                continue
+            if not _href_looks_like_kad_document(full):
+                continue
+            if full in seen:
+                continue
+            seen.add(full)
+            out.append({"remote_document_id": full[:500], "title": "", "filename": "", "file_url": full})
     return out
 
 
@@ -1054,6 +1118,10 @@ def collect_document_links_from_playwright_page(page, card_url: str) -> list[dic
                 docs.append(item)
     except Exception:
         pass
+    for item in _collect_kad_links_via_frame_evaluate(page, card_url):
+        if item["file_url"] not in seen:
+            seen.add(item["file_url"])
+            docs.append(item)
     return docs
 
 
@@ -1185,40 +1253,94 @@ def open_kad_card_and_collect_docs(page, card_url: str, nav_ms: int) -> list[dic
     """По очереди открываем вкладки карточки и собираем ссылки (раньше кликали только по первой удачной)."""
     merged: list[dict] = []
     seen: set[str] = set()
-    goto_timeout_ms = min(max(45_000, nav_ms), 120_000)
-    max_tabs_s = max(240.0, min(float(nav_ms) / 1000.0 * max(len(KAD_TAB_LABELS), 1), 420.0))
-    deadline_all = time.time() + max_tabs_s
-    for label in KAD_TAB_LABELS:
-        if time.time() >= deadline_all:
-            break
+    net_seen: set[str] = set()
+
+    def _on_response(resp) -> None:
         try:
-            page.goto(card_url, wait_until="domcontentloaded", timeout=goto_timeout_ms)
-            page.wait_for_timeout(1500)
+            rt = resp.request.resource_type
+            if rt in ("image", "stylesheet", "font", "media", "websocket"):
+                return
+            if "kad.arbitr.ru" not in resp.url.lower():
+                return
+            if resp.status >= 400:
+                return
+            body = resp.body()
+            if not body or len(body) > 2_200_000:
+                return
+            blob = body.decode("utf-8", errors="ignore")
+            for item in extract_kad_document_urls_from_html(blob, card_url):
+                fu = (item.get("file_url") or "").strip()
+                if fu:
+                    net_seen.add(fu)
+        except Exception:
+            return
+
+    def _flush_network() -> None:
+        for u in net_seen:
+            if u in seen:
+                continue
+            if is_kad_junk_url(u) or not _href_looks_like_kad_document(u):
+                continue
+            seen.add(u)
+            merged.append(
+                {
+                    "remote_document_id": u[:500],
+                    "title": "",
+                    "filename": "",
+                    "file_url": u,
+                }
+            )
+
+    page.on("response", _on_response)
+    try:
+        goto_timeout_ms = min(max(45_000, nav_ms), 120_000)
+        max_tabs_s = max(240.0, min(float(nav_ms) / 1000.0 * max(len(KAD_TAB_LABELS), 1), 420.0))
+        deadline_all = time.time() + max_tabs_s
+        for label in KAD_TAB_LABELS:
+            if time.time() >= deadline_all:
+                break
             try:
-                page.wait_for_load_state("networkidle", timeout=min(12_000, goto_timeout_ms))
+                page.goto(card_url, wait_until="domcontentloaded", timeout=goto_timeout_ms)
+                page.wait_for_timeout(1500)
+                try:
+                    page.wait_for_load_state("networkidle", timeout=min(12_000, goto_timeout_ms))
+                except Exception:
+                    pass
+                page.wait_for_timeout(800)
+                _kad_click_tab(page, label, goto_timeout_ms)
+                page.wait_for_timeout(3800)
+                chunk = collect_document_links_from_playwright_page(page, card_url)
+                for d in chunk:
+                    u = d["file_url"]
+                    if u not in seen:
+                        seen.add(u)
+                        merged.append(d)
+                merge_popup_pdf_urls(page, card_url, min(nav_ms, 20_000), seen, merged)
+                _flush_network()
+            except Exception:
+                continue
+        if not merged:
+            try:
+                page.goto(card_url, wait_until="domcontentloaded", timeout=goto_timeout_ms)
+                page.wait_for_timeout(3500)
+                chunk = collect_document_links_from_playwright_page(page, card_url)
+                for d in chunk:
+                    u = d["file_url"]
+                    if u not in seen:
+                        seen.add(u)
+                        merged.append(d)
+                merge_popup_pdf_urls(page, card_url, min(nav_ms, 20_000), seen, merged)
+                _flush_network()
             except Exception:
                 pass
-            page.wait_for_timeout(800)
-            _kad_click_tab(page, label, goto_timeout_ms)
-            page.wait_for_timeout(3800)
-            chunk = collect_document_links_from_playwright_page(page, card_url)
-            for d in chunk:
-                u = d["file_url"]
-                if u not in seen:
-                    seen.add(u)
-                    merged.append(d)
-            merge_popup_pdf_urls(page, card_url, min(nav_ms, 20_000), seen, merged)
-        except Exception:
-            continue
-    if not merged:
-        try:
-            page.goto(card_url, wait_until="domcontentloaded", timeout=goto_timeout_ms)
-            page.wait_for_timeout(3500)
-            merged = collect_document_links_from_playwright_page(page, card_url)
-            seen = {d["file_url"] for d in merged}
-            merge_popup_pdf_urls(page, card_url, min(nav_ms, 20_000), seen, merged)
-        except Exception:
-            merged = []
+    finally:
+        _unsub = getattr(page, "remove_listener", None) or getattr(page, "off", None)
+        if callable(_unsub):
+            try:
+                _unsub("response", _on_response)
+            except Exception:
+                pass
+    _flush_network()
     return merged
 
 
