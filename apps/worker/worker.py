@@ -49,6 +49,13 @@ if _PARSER_FB_RAW:
 else:
     PARSER_PDF_FALLBACK_BROWSER = True
 
+# Пустой DOM на КАД — подставляем список файлов из Parser-API (те же данные, что и у судебного синка).
+_MOY_ARB_PF_RAW = os.getenv("MOY_ARBITR_PARSER_FALLBACK", "").strip().lower()
+if _MOY_ARB_PF_RAW:
+    MOY_ARBITR_PARSER_FALLBACK = _MOY_ARB_PF_RAW not in ("0", "false", "no")
+else:
+    MOY_ARBITR_PARSER_FALLBACK = bool(os.getenv("PARSER_API_KEY", "").strip())
+
 PARSER_PDF_DOWNLOAD_RETRIES = max(1, int(os.getenv("PARSER_PDF_DOWNLOAD_RETRIES", "3")))
 
 
@@ -681,6 +688,56 @@ def search_cases_for_job(query_type: str, query_value: str, job_id: int | None =
     return search_cases_via_browser(query_type, query_value, job_id=job_id)
 
 
+def _case_id_from_kad_card_url(card_url: str | None) -> str | None:
+    if not card_url:
+        return None
+    m = re.search(
+        r"/[Cc]ard/([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})", card_url, flags=re.IGNORECASE
+    )
+    return m.group(1) if m else None
+
+
+def moy_arbitr_docs_from_parser_fallback(case_data: dict, case_number: str) -> list[dict]:
+    """Ссылки на материалы через Parser-API, когда Playwright не находит <a> на КАД."""
+    if not MOY_ARBITR_PARSER_FALLBACK or not os.getenv("PARSER_API_KEY", "").strip():
+        return []
+    pdata: dict = {}
+    cn = (case_number or "").strip()
+    if cn:
+        try:
+            pdata = parser_details_by_number(cn)
+        except Exception:
+            pdata = {}
+    entries = extract_kad_pdf_url_entries_with_dates(pdata or {})
+    if not entries:
+        cid = _case_id_from_kad_card_url((case_data or {}).get("card_url"))
+        if cid:
+            try:
+                pdata = parser_details_by_id(cid)
+                entries = extract_kad_pdf_url_entries_with_dates(pdata or {})
+            except Exception:
+                entries = []
+    out: list[dict] = []
+    seen_u: set[str] = set()
+    for u, _d in entries:
+        u = (u or "").strip()
+        if not u or u in seen_u or not u.startswith("http"):
+            continue
+        seen_u.add(u)
+        title = u.rsplit("/", 1)[-1].split("?")[0][:160] or "документ"
+        out.append(
+            {
+                "remote_document_id": f"parser-fallback:{u}"[:500],
+                "title": title,
+                "filename": "",
+                "file_url": u,
+            }
+        )
+        if len(out) >= COURT_SYNC_MAX_DOCS_PER_RUN:
+            break
+    return out
+
+
 def process_moy_arbitr_job(job: dict) -> None:
     job_id = int(job["id"])
     query_type = str(job["query_type"])
@@ -767,7 +824,20 @@ def process_moy_arbitr_job(job: dict) -> None:
         try:
             discovered += len(docs)
             if not docs:
+                fb_docs = moy_arbitr_docs_from_parser_fallback(case_data, case_num)
+                if fb_docs:
+                    docs = fb_docs
+                    discovered += len(fb_docs)
+                    lines.append(
+                        f"- Браузер не нашёл ссылки на КАД; подставлены URL из Parser-API: {len(fb_docs)} шт."
+                    )
+            if not docs:
                 lines.append(f'- У дела {case_num or case_data.get("card_url")} документы не найдены автоматически.')
+                if not os.getenv("PARSER_API_KEY", "").strip():
+                    lines.append(
+                        "- Подсказка: задайте воркеру PARSER_API_KEY — включится запасной сбор ссылок через Parser-API "
+                        "если разметка сайта пустая."
+                    )
                 continue
             for doc in docs[:COURT_SYNC_MAX_DOCS_PER_RUN]:
                 try:
