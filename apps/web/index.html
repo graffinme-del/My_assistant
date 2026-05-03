@@ -425,7 +425,7 @@
             <div class="composerRow">
               <input id="docFilesInput" class="hiddenInput" type="file" multiple accept=".zip,.pdf,.txt,.md,.csv,.log,.xlsx,.doc,.docx,.rtf,.jpg,.jpeg,.png,.webp,.mp3,.mp4" />
               <button id="attachBtn" class="tinyIconBtn" type="button" title="Прикрепить файлы">+</button>
-              <textarea id="chatText" class="chatTextInput" rows="1" placeholder="Напиши сообщение..."></textarea>
+              <textarea id="chatText" class="chatTextInput" rows="1" placeholder="Напиши сообщение… Enter — отправить, Shift+Enter — новая строка"></textarea>
               <button id="micBtn" class="tinyIconBtn" type="button" title="Голос">🎤</button>
               <button id="sendChatBtn" class="tinyIconBtn sendBtn" type="button" title="Отправить">↑</button>
             </div>
@@ -1817,6 +1817,16 @@
         const filesInput = el("docFilesInput");
         const clearChatBtn = el("clearChatBtn");
         if (send) send.onclick = sendChat;
+        const chatText = el("chatText");
+        if (chatText) {
+          chatText.addEventListener("keydown", (e) => {
+            if (e.key !== "Enter") return;
+            if (e.isComposing || e.keyCode === 229) return;
+            if (e.shiftKey) return;
+            e.preventDefault();
+            sendChat();
+          });
+        }
         if (attachBtn) attachBtn.onclick = () => filesInput.click();
         if (filesInput) {
           filesInput.onchange = async () => {
