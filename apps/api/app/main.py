@@ -4556,12 +4556,13 @@ def handle_court_sync_chat_command(
         return (
             f"Запустил фоновую загрузку материалов из картотеки ({job_ids_label})"
             f'{period} по запросу «{request.query_value}». '
-            "Обычно это занимает от нескольких минут. Спросите позже «как там скачивание» или «статус загрузки» — кратко опишу, что сделано."
+            "Итог по задаче придёт в этот чат автоматически после завершения воркера "
+            "(дополнительно можно спросить «статус загрузки» или «отчёт по задаче»)."
             f"{folder_hint}"
         )
     return (
         f"Запустил фоновый поиск в КАД ({job_ids_label}) по запросу «{request.query_value}». "
-        "Когда появятся результаты, можно спросить статус или попросить «отчёт по задаче» с номером."
+        "Итог также появится в этом чате после завершения задачи."
         f"{folder_hint}"
     )
 
@@ -4621,17 +4622,15 @@ def set_assistant_active_case(
 @app.get("/assistant/conversation-messages", response_model=list[ConversationMessageOut])
 def list_conversation_messages(
     limit: int = Query(default=300, ge=1, le=500),
+    after_id: int | None = Query(default=None, ge=1),
     db: Session = Depends(get_db),
     _: str = Depends(require_user),
 ) -> list[ConversationMessage]:
     conversation = get_or_create_conversation(db, conversation_user_key(_))
-    return (
-        db.query(ConversationMessage)
-        .filter(ConversationMessage.conversation_id == conversation.id)
-        .order_by(ConversationMessage.created_at.asc())
-        .limit(limit)
-        .all()
-    )
+    q = db.query(ConversationMessage).filter(ConversationMessage.conversation_id == conversation.id)
+    if after_id is not None:
+        q = q.filter(ConversationMessage.id > after_id)
+    return q.order_by(ConversationMessage.created_at.asc()).limit(limit).all()
 
 
 @app.delete("/assistant/conversation-messages/{message_id}")
@@ -5134,6 +5133,7 @@ async def assistant_ingest_text(
             suffix = (
                 " Воркер использует сохранённую браузерную сессию «Мой Арбитр»; если вход не выполнен или истёк, "
                 "задача попросит ручной вход и повтор."
+                " Итог по задаче появится в этом чате автоматически после завершения работы воркера."
             )
             if not job_new:
                 reply_text = (

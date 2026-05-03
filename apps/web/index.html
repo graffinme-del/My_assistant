@@ -1697,6 +1697,8 @@
         log.scrollTop = log.scrollHeight;
       }
 
+      let lastChatMessageSyncId = 0;
+
       function patchLastUserMessageId(messageId) {
         if (messageId == null) return;
         const log = el("chatLog");
@@ -1711,12 +1713,38 @@
           const rows = await api("/assistant/conversation-messages?limit=300");
           const log = el("chatLog");
           log.innerHTML = "";
+          let maxId = 0;
           for (const row of rows) {
             const histActs = extractDocumentActionsFromOpenReply(row.content, null);
             appendChat(row.role, row.content, row.id, histActs);
+            if (row.id != null && row.id > maxId) maxId = row.id;
           }
+          lastChatMessageSyncId = maxId;
         } catch (_e) {
           /* совместимость со старым API */
+        }
+      }
+
+      async function pollNewChatMessages() {
+        try {
+          if (!lastChatMessageSyncId) return;
+          const rows = await api(
+            `/assistant/conversation-messages?limit=80&after_id=${lastChatMessageSyncId}`
+          );
+          if (!rows || !rows.length) return;
+          const log = el("chatLog");
+          const wasNearBottom =
+            log.scrollHeight - log.scrollTop - log.clientHeight < 140;
+          let maxId = lastChatMessageSyncId;
+          for (const row of rows) {
+            const histActs = extractDocumentActionsFromOpenReply(row.content, null);
+            appendChat(row.role, row.content, row.id, histActs);
+            if (row.id != null && row.id > maxId) maxId = row.id;
+          }
+          lastChatMessageSyncId = maxId;
+          if (wasNearBottom) log.scrollTop = log.scrollHeight;
+        } catch (_e) {
+          /* тихий опрос фона */
         }
       }
 
@@ -1754,6 +1782,13 @@
             extractDocumentActionsFromOpenReply(msg, result.mode)
           );
           appendChat("assistant", msg, result.assistant_message_id, docActs);
+          if (result.user_message_id != null)
+            lastChatMessageSyncId = Math.max(lastChatMessageSyncId, result.user_message_id);
+          if (result.assistant_message_id != null)
+            lastChatMessageSyncId = Math.max(
+              lastChatMessageSyncId,
+              result.assistant_message_id
+            );
         } catch (e) {
           appendChat("assistant", "Ошибка: " + (e && e.message ? e.message : String(e)));
         }
@@ -1875,7 +1910,11 @@
         }
 
         checkHealth().catch(() => {});
-        loadChatHistory().catch(() => {});
+        loadChatHistory()
+          .catch(() => {})
+          .finally(() => {
+            setInterval(pollNewChatMessages, 8000);
+          });
         loadCases()
           .then(() => restoreSidebarSelection())
           .catch(() => {

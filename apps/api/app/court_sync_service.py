@@ -7,6 +7,8 @@ from datetime import datetime, timedelta
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from .assistant_context import add_conversation_message, get_or_create_conversation
+from .case_number import normalize_arbitr_case_number
 from .config import settings
 from .models import (
     Case,
@@ -134,6 +136,38 @@ def update_job_progress(db: Session, job_id: int, *, step: str, message: str) ->
     return job
 
 
+def append_finished_job_report_to_chat(db: Session, job: CourtSyncJob) -> None:
+    """
+    Пишем в переписку итог фоновой задачи — чтобы пользователю не нужно было вручную «отчёт по задаче».
+    Только запросы из чата (owner/member); ночные и служебные — без спама в чат.
+    """
+    rb = (job.requested_by or "").strip()
+    if rb not in ("owner", "member"):
+        return
+    if (job.trigger_type or "").strip() != "manual":
+        return
+    user_key = f"default:{rb}"
+    conversation = get_or_create_conversation(db, user_key)
+
+    case_obj = None
+    if conversation.active_case_id:
+        case_obj = db.query(Case).filter(Case.id == conversation.active_case_id).first()
+
+    qt = (job.query_type or "").strip()
+    qv = (job.query_value or "").strip()
+    if case_obj is None and qv and qt in ("case_number", "moy_arbitr_case_number"):
+        nn = normalize_arbitr_case_number(qv)
+        case_obj = db.query(Case).filter(Case.case_number == nn).first()
+
+    st_label = _STATUS_RU.get(job.status, job.status)
+    tail = (job.report_text or "").strip() or "(текст отчёта пуст)"
+    content = f"Отчёт по задаче №{job.id} — {st_label}.\nЗапрос: {qt} = «{qv}».\n\n{tail}"
+    content = content[:12000]
+
+    add_conversation_message(db, conversation=conversation, role="assistant", content=content, case=case_obj)
+    db.commit()
+
+
 def complete_sync_job(db: Session, job_id: int, *, status: str, result: dict, report_text: str = "") -> CourtSyncJob | None:
     job = db.query(CourtSyncJob).filter(CourtSyncJob.id == job_id).first()
     if not job:
@@ -163,6 +197,10 @@ def complete_sync_job(db: Session, job_id: int, *, status: str, result: dict, re
             db.add(profile)
     db.commit()
     db.refresh(job)
+    try:
+        append_finished_job_report_to_chat(db, job)
+    except Exception:
+        pass
     return job
 
 
