@@ -118,6 +118,7 @@ from .models import (
     ConversationMessage,
     CourtCaseSource,
     CourtSyncJob,
+    CourtSyncRun,
     Document,
     PendingMovePlan,
     Reminder,
@@ -4740,12 +4741,41 @@ async def assistant_ingest_text(
     if m_direct_job_report:
         job_id = int(m_direct_job_report.group(1))
         job = db.query(CourtSyncJob).filter(CourtSyncJob.id == job_id).first()
-        reply_text = (
-            f"Задача #{job_id} не найдена."
-            if not job
-            else f"Отчет по задаче #{job.id} ({job.status}, шаг: {job.step}):\n"
-            f"{job.report_text.strip() or '(отчет пуст)'}"
+        wants_full_report = bool(
+            re.search(
+                r"(?:полный|весь|целиком)\s+(?:отч(?:е|ё)т|лог)|журнал\s+целиком|вывед(?:и|ите)\s+весь",
+                text,
+                flags=re.IGNORECASE,
+            )
         )
+        if not job:
+            reply_text = f"Задача #{job_id} не найдена."
+        elif job.finished_at is None and job.status in ("running", "pending") and not wants_full_report:
+            last_run = (
+                db.query(CourtSyncRun)
+                .filter(CourtSyncRun.job_id == job.id)
+                .order_by(CourtSyncRun.id.desc())
+                .first()
+            )
+            ts = (
+                last_run.created_at.strftime("%H:%M:%S UTC") if last_run and last_run.created_at else "—"
+            )
+            tail = (
+                ((last_run.message or "").strip()[:720] + ("…" if last_run and len((last_run.message or "")) > 720 else ""))
+                if last_run
+                else "—"
+            )
+            reply_text = (
+                f"Задача #{job.id} ещё в процессе ({job.status}, шаг: {job.step}).\n\n"
+                f"Последняя строка от воркера ({ts}):\n{tail}\n\n"
+                "Короткий статус — целиком журнал не повторяю при каждом «отчёт по задаче». "
+                f"Нужен полный текст — напишите, например: «полный отчёт задача {job.id}»."
+            )
+        else:
+            reply_text = (
+                f"Отчёт по задаче #{job.id} ({job.status}, шаг: {job.step}):\n"
+                f"{job.report_text.strip() or '(отчёт пуст)'}"
+            )
         return await finalize_reply(
             case=conversation.active_case or get_or_create_unsorted_case(db),
             reply_text=reply_text,
