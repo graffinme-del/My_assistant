@@ -4404,6 +4404,17 @@ def handle_court_sync_chat_command(
             return f"Задача #{job_id} не найдена."
         text = job.report_text.strip() or "(отчет пуст)"
         return f"Отчет по задаче #{job.id} ({job.status}, шаг: {job.step}):\n{text}"
+    if re.search(r"(?:отчет|отчёт)", lowered) and re.search(r"\bзадач[еаи]\b", lowered):
+        if not re.search(r"\bзадач[еаи]\s*(?:#|№|\bномер\b)?\s*\d+", lowered):
+            status_block = format_recent_download_jobs_status(
+                db, date_range=_kad_date_range, period_label=_kad_period_label
+            )
+            hint = (
+                "Чтобы открыть отчёт по одной задаче, укажите номер — например: «отчёт по задаче 58»."
+            )
+            if status_block.strip():
+                return f"{status_block}\n\n{hint}"
+            return hint
     if looks_like_court_download_status_question(text):
         return format_recent_download_jobs_status(
             db, date_range=_kad_date_range, period_label=_kad_period_label

@@ -592,6 +592,22 @@ def _href_looks_like_document(href: str, text: str = "") -> bool:
         return False
     if re.search(r"\.(png|jpg|jpeg|gif|svg|css|js|woff2?)(\?|$|#)", h):
         return False
+    if re.search(r"\.(?:pdf|docx?|rtf|zip)(?:\?|$|#)", h, flags=re.IGNORECASE):
+        return True
+    if any(
+        frag in h
+        for frag in (
+            "/document/pdf",
+            "/document/view",
+            "/pdf/",
+            "kad.arbitr.ru/document",
+            "/file/download",
+            "/files/download",
+            "contentdisposition=attachment",
+            "disposition=attachment",
+        )
+    ):
+        return True
     return any(
         marker in h or marker in t
         for marker in (
@@ -612,19 +628,75 @@ def _href_looks_like_document(href: str, text: str = "") -> bool:
     )
 
 
+def _lazy_scroll_page(page, steps: int = 8) -> None:
+    for _ in range(steps):
+        try:
+            page.keyboard.press("End")
+            page.wait_for_timeout(380)
+        except Exception:
+            break
+
+
+def _collect_documents_via_my_arbitr_hub(
+    page,
+    case_number: str,
+    nav_ms: int,
+    *,
+    progress=None,
+    job_id: int | None = None,
+) -> list[dict]:
+    """
+    Подписки часто возвращают только ссылку на КАД, но список вложений в интерфейсе «Мой Арбитр» живёт на my.arbitr.ru.
+    После обхода КАД дополнительно открываем хаб по номеру дела и собираем <a>.
+    """
+    cn = (case_number or "").strip()
+    if len(cn) < 5:
+        return []
+    hub = f"{MOY_ARBITR_BASE_URL}/#/cases/my?caseNumber={quote_plus(cn)}"
+    try:
+        if progress and job_id is not None:
+            progress(job_id, "opening_case", f"Мой Арбитр: вкладки дела (хаб номера «{cn}»)…")
+        page.goto(hub, wait_until="domcontentloaded", timeout=nav_ms)
+        page.wait_for_timeout(4000)
+        try:
+            page.wait_for_load_state("networkidle", timeout=min(nav_ms, 28000))
+        except PlaywrightTimeoutError:
+            pass
+        page.wait_for_timeout(2000)
+        _dismiss_common_overlays(page)
+        ensure_authorized(page)
+        _lazy_scroll_page(page)
+        return collect_moy_arbitr_documents(page, hub)
+    except Exception:
+        return []
+
+
 def collect_moy_arbitr_documents(page, case_url: str) -> list[dict]:
     seen: set[str] = set()
     docs: list[dict] = []
-    for label in ("Документы", "Материалы", "Приложения", "Файлы", "Поданные документы", "История"):
+    for label in (
+        "Документы",
+        "Материалы",
+        "Приложения",
+        "Файлы",
+        "Поданные документы",
+        "Поданные документы по делам",
+        "Поданное",
+        "Судебные акты",
+        "Корреспонденция",
+        "История",
+    ):
         try:
             page.get_by_text(label, exact=False).first.click(timeout=2500)
             page.wait_for_timeout(1200)
+            _lazy_scroll_page(page, steps=4)
         except Exception:
             continue
+    _lazy_scroll_page(page)
     for frame in page.frames:
         try:
             anchors = frame.locator("a")
-            n = min(anchors.count(), 800)
+            n = min(anchors.count(), 1200)
         except Exception:
             continue
         for idx in range(n):
@@ -714,10 +786,27 @@ def open_case_and_download_documents(case_data: dict, job_id: int | None = None,
         )
         if is_kad_card:
             try:
-                docs = worker_mod.open_kad_card_and_collect_docs(page, card_url.strip(), nav_ms)
+                docs = worker_mod.open_kad_card_and_collect_docs(
+                    page,
+                    card_url.strip(),
+                    nav_ms,
+                    progress=progress,
+                    job_id=job_id,
+                )
             except Exception:
                 docs = []
             seen_fu = {(d.get("file_url") or "").strip() for d in docs if d.get("file_url")}
+            cn = (case_data.get("case_number") or "").strip()
+            if cn:
+                for row in _collect_documents_via_my_arbitr_hub(
+                    page, cn, nav_ms, progress=progress, job_id=job_id
+                ):
+                    u = (row.get("file_url") or "").strip()
+                    if u and u not in seen_fu:
+                        seen_fu.add(u)
+                        docs.append(row)
+                        if len(docs) >= MOY_ARBITR_MAX_DOCS_PER_CASE:
+                            break
         else:
             docs = collect_moy_arbitr_documents(page, card_url)
             seen_fu = {(d.get("file_url") or "").strip() for d in docs if d.get("file_url")}

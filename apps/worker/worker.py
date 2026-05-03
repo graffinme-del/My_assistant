@@ -1213,14 +1213,17 @@ KAD_TAB_LABELS = (
 def merge_popup_pdf_urls(page, card_url: str, nav_ms: int, seen: set[str], docs: list[dict], max_clicks: int = 22) -> None:
     """КАД часто открывает PDF в новой вкладке — перехватываем URL после клика по ссылке."""
     clicks = 0
+    popup_budget = 36
+    popup_tries = 0
+    pop_timeout_ms = min(2600, max(900, nav_ms // 45))
     for frame in page.frames:
         try:
             anchors = frame.locator("a")
-            n = min(anchors.count(), 450)
+            n = min(anchors.count(), 72)
         except Exception:
             continue
         for i in range(n):
-            if clicks >= max_clicks:
+            if clicks >= max_clicks or popup_tries >= popup_budget:
                 return
             link = anchors.nth(i)
             try:
@@ -1233,17 +1236,21 @@ def merge_popup_pdf_urls(page, card_url: str, nav_ms: int, seen: set[str], docs:
                 continue
             if is_kad_junk_url(href):
                 continue
-            if not (target == "_blank" or _anchor_text_hints_document(text) or _href_looks_like_kad_document(href)):
+            # Раньше: любое target=_blank давало до 8s ожидания × сотни ссылок ⇒ часы зависания.
+            doc_like = _href_looks_like_kad_document(href) or ".pdf" in href.lower()
+            hinted = _anchor_text_hints_document(text)
+            if not doc_like and not (hinted and target == "_blank"):
                 continue
             full_url = urljoin(card_url, href)
             if full_url in seen:
                 continue
+            popup_tries += 1
             try:
-                with page.expect_popup(timeout=8000) as pop_ev:
-                    link.click(timeout=4000)
+                with page.expect_popup(timeout=pop_timeout_ms) as pop_ev:
+                    link.click(timeout=min(2800, pop_timeout_ms + 600))
                 popup = pop_ev.value
-                popup.wait_for_load_state("domcontentloaded", timeout=nav_ms)
-                popup.wait_for_timeout(2000)
+                popup.wait_for_load_state("domcontentloaded", timeout=min(nav_ms, 45_000))
+                popup.wait_for_timeout(900)
                 final = (popup.url or "").strip()
                 popup.close()
             except Exception:
@@ -1260,7 +1267,7 @@ def merge_popup_pdf_urls(page, card_url: str, nav_ms: int, seen: set[str], docs:
                 }
             )
             clicks += 1
-            page.wait_for_timeout(600)
+            page.wait_for_timeout(400)
 
 
 _KAD_CARD_LINK_RE = re.compile(
@@ -1319,7 +1326,14 @@ def _kad_click_tab(page, label: str, nav_ms: int) -> None:
     page.get_by_text(label, exact=False).first.click(timeout=min(5000, nav_ms))
 
 
-def open_kad_card_and_collect_docs(page, card_url: str, nav_ms: int) -> list[dict]:
+def open_kad_card_and_collect_docs(
+    page,
+    card_url: str,
+    nav_ms: int,
+    *,
+    progress=None,
+    job_id: int | None = None,
+) -> list[dict]:
     """По очереди открываем вкладки карточки и собираем ссылки (раньше кликали только по первой удачной)."""
     merged: list[dict] = []
     seen: set[str] = set()
@@ -1328,14 +1342,24 @@ def open_kad_card_and_collect_docs(page, card_url: str, nav_ms: int) -> list[dic
     def _on_response(resp) -> None:
         try:
             rt = resp.request.resource_type
-            if rt in ("image", "stylesheet", "font", "media", "websocket"):
+            if rt not in ("xhr", "fetch"):
                 return
             if "kad.arbitr.ru" not in resp.url.lower():
                 return
             if resp.status >= 400:
                 return
+            cl_raw = resp.headers.get("content-length") or ""
+            try:
+                cl = int(cl_raw.strip()) if cl_raw.strip().isdigit() else None
+            except ValueError:
+                cl = None
+            if cl is not None and cl > 600_000:
+                return
+            ct = (resp.headers.get("content-type") or "").lower()
+            if ct and not any(x in ct for x in ("json", "text/plain", "text/html", "javascript", "x-www-form")):
+                return
             body = resp.body()
-            if not body or len(body) > 2_200_000:
+            if not body or len(body) > 600_000:
                 return
             blob = body.decode("utf-8", errors="ignore")
             for item in extract_kad_document_urls_from_html(blob, card_url):
@@ -1364,11 +1388,19 @@ def open_kad_card_and_collect_docs(page, card_url: str, nav_ms: int) -> list[dic
     page.on("response", _on_response)
     try:
         goto_timeout_ms = min(max(45_000, nav_ms), 120_000)
-        max_tabs_s = max(240.0, min(float(nav_ms) / 1000.0 * max(len(KAD_TAB_LABELS), 1), 420.0))
+        max_tabs_s = min(
+            300.0,
+            max(150.0, min(float(nav_ms) / 1000.0 * max(len(KAD_TAB_LABELS), 1), 420.0)),
+        )
         deadline_all = time.time() + max_tabs_s
         for label in KAD_TAB_LABELS:
             if time.time() >= deadline_all:
                 break
+            if progress and job_id is not None:
+                try:
+                    progress(job_id, "opening_case", f"КАД: обход вкладки «{label}»…")
+                except Exception:
+                    pass
             try:
                 page.goto(card_url, wait_until="domcontentloaded", timeout=goto_timeout_ms)
                 page.wait_for_timeout(1500)
