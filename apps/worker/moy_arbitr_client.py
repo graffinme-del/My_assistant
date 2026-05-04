@@ -695,6 +695,43 @@ def _collect_documents_via_my_arbitr_hub(
     return merged
 
 
+_MOY_SHADOW_LINK_COLLECT_JS = """() => {
+  const out = [];
+  const s = new Set();
+  const base = document.baseURI || location.href || "https://my.arbitr.ru/";
+  function maybeAdd(raw) {
+    const h = (raw || "").trim();
+    if (!h || h.startsWith("#")) return;
+    const hl = h.toLowerCase();
+    if (hl.startsWith("javascript:")) return;
+    let abs;
+    try { abs = new URL(h, base).href; } catch (e) { return; }
+    const low = abs.toLowerCase();
+    if (!low.includes("kad.arbitr.ru") && !low.includes("my.arbitr.ru")) return;
+    const key = abs.split("#")[0];
+    if (s.has(key)) return;
+    s.add(key);
+    out.push(key);
+  }
+  function visit(root) {
+    if (!root || !root.querySelectorAll) return;
+    root.querySelectorAll("a[href], area[href]").forEach((a) => maybeAdd(a.getAttribute("href")));
+    const attrs = ["data-url", "data-href", "data-link", "data-file-url", "data-src", "ng-href"];
+    root.querySelectorAll("*").forEach((el) => {
+      attrs.forEach((at) => {
+        const v = el.getAttribute && el.getAttribute(at);
+        if (v) maybeAdd(v);
+      });
+    });
+    root.querySelectorAll("*").forEach((el) => {
+      if (el.shadowRoot) visit(el.shadowRoot);
+    });
+  }
+  visit(document);
+  return out;
+}"""
+
+
 def collect_moy_arbitr_documents(page, case_url: str) -> list[dict]:
     seen: set[str] = set()
     docs: list[dict] = []
@@ -718,6 +755,29 @@ def collect_moy_arbitr_documents(page, case_url: str) -> list[dict]:
             continue
     _lazy_scroll_page(page)
     for frame in page.frames:
+        try:
+            for raw in frame.evaluate(_MOY_SHADOW_LINK_COLLECT_JS):
+                if not isinstance(raw, str):
+                    continue
+                href = raw.strip()
+                if not _href_looks_like_document(href):
+                    continue
+                full = urljoin(case_url or MOY_ARBITR_BASE_URL, href).split("#")[0]
+                if full in seen:
+                    continue
+                seen.add(full)
+                docs.append(
+                    {
+                        "remote_document_id": f"moy-arbitr:{full}"[:500],
+                        "title": href.rsplit("/", 1)[-1][:500] or full,
+                        "filename": "",
+                        "file_url": full,
+                    }
+                )
+                if len(docs) >= MOY_ARBITR_MAX_DOCS_PER_CASE:
+                    return docs
+        except Exception:
+            pass
         try:
             anchors = frame.locator("a")
             n = min(anchors.count(), 1200)

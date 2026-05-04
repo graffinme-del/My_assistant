@@ -4,6 +4,7 @@ import tempfile
 import time
 from datetime import date, datetime
 from pathlib import Path
+from typing import Any
 from urllib.parse import urljoin
 
 import httpx
@@ -697,26 +698,46 @@ def _case_id_from_kad_card_url(card_url: str | None) -> str | None:
     return m.group(1) if m else None
 
 
+def _parser_case_number_variants(cn: str) -> list[str]:
+    s = (cn or "").strip().replace(" ", "")
+    if not s:
+        return []
+    variants = [s]
+    if len(s) > 1 and s[:1].upper() == "A" and s[0] != "А":
+        variants.append("А" + s[1:])
+    if len(s) > 1 and s[0] == "А":
+        variants.append("A" + s[1:])
+    out: list[str] = []
+    seen: set[str] = set()
+    for v in variants:
+        if v not in seen:
+            seen.add(v)
+            out.append(v)
+    return out
+
+
 def moy_arbitr_docs_from_parser_fallback(case_data: dict, case_number: str) -> list[dict]:
     """Ссылки на материалы через Parser-API, когда Playwright не находит <a> на КАД."""
     if not MOY_ARBITR_PARSER_FALLBACK or not os.getenv("PARSER_API_KEY", "").strip():
         return []
     pdata: dict = {}
-    cn = (case_number or "").strip()
-    if cn:
+    entries: list[tuple[str, Any]] = []
+    cid = _case_id_from_kad_card_url((case_data or {}).get("card_url"))
+    if cid:
         try:
-            pdata = parser_details_by_number(cn)
+            pdata = parser_details_by_id(cid)
+            entries = extract_kad_pdf_url_entries_with_dates(pdata or {})
         except Exception:
-            pdata = {}
-    entries = extract_kad_pdf_url_entries_with_dates(pdata or {})
+            entries = []
     if not entries:
-        cid = _case_id_from_kad_card_url((case_data or {}).get("card_url"))
-        if cid:
+        for variant in _parser_case_number_variants(case_number):
             try:
-                pdata = parser_details_by_id(cid)
-                entries = extract_kad_pdf_url_entries_with_dates(pdata or {})
+                pdata = parser_details_by_number(re.sub(r"\s+", "", variant.replace("\\", "")))
             except Exception:
-                entries = []
+                continue
+            entries = extract_kad_pdf_url_entries_with_dates(pdata or {})
+            if entries:
+                break
     out: list[dict] = []
     seen_u: set[str] = set()
     for u, _d in entries:

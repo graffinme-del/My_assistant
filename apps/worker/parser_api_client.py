@@ -112,6 +112,58 @@ def _parse_event_date(raw: str | None) -> date | None:
     return None
 
 
+def _looks_like_kad_material_url(url: str) -> bool:
+    """Эвристика без импорта worker: любые ссылки kad.arbitr.ru на материалы/PDF."""
+    h = (url or "").strip()
+    low = h.lower()
+    if "kad.arbitr.ru" not in low or not low.startswith("http"):
+        return False
+    if re.search(r"\.(png|jpe?g|gif|svg|css|js|woff2?|map)(\?|$|#)", low):
+        return False
+    tail = low.split("kad.arbitr.ru", 1)[-1].split("#")[0].split("?")[0]
+    staticbits = ("scripts", "/bundles/", "/fonts/", "content/themes")
+    if any(s in tail for s in staticbits):
+        return False
+    if ".pdf" in low or tail.endswith(".pdf"):
+        return True
+    docish = (
+        "pdfdocument",
+        "/document/pdf",
+        "/document/view",
+        "/document/content",
+        "/kad/document",
+        "/kad/file",
+        "/file/",
+        "contentdisposition=attachment",
+        "disposition=attachment",
+        "disposition=",
+        "attachment",
+        "download",
+        "kad/pdfdocument",
+        "/kad/pdf",
+    )
+    return any(bit in tail for bit in docish)
+
+
+def _walk_parse_json_collect_kad_urls(
+    root: Any, *, sink: dict[str, None], limit_nodes: int = 80_000
+) -> None:
+    stack: list[Any] = [root]
+    n = 0
+    while stack and n < limit_nodes:
+        n += 1
+        obj = stack.pop()
+        if isinstance(obj, str):
+            s = obj.strip()
+            if s.startswith("http") and "kad.arbitr.ru" in s and _looks_like_kad_material_url(s):
+                sink.setdefault(s.split("#")[0], None)
+            continue
+        if isinstance(obj, dict):
+            stack.extend(obj.values())
+        elif isinstance(obj, list):
+            stack.extend(obj)
+
+
 def extract_kad_pdf_url_entries_with_dates(data: dict[str, Any]) -> list[tuple[str, date | None]]:
     """Пары (url, дата документа по событию; для File инстанции — по макс. дате событий)."""
     out: list[tuple[str, date | None]] = []
@@ -119,6 +171,8 @@ def extract_kad_pdf_url_entries_with_dates(data: dict[str, Any]) -> list[tuple[s
 
     def add(u: str | None, d: date | None) -> None:
         if not u or not isinstance(u, str) or not u.startswith("http"):
+            return
+        if not _looks_like_kad_material_url(u):
             return
         if u in seen:
             return
@@ -136,14 +190,56 @@ def extract_kad_pdf_url_entries_with_dates(data: dict[str, Any]) -> list[tuple[s
                 ev_file = ev.get("File")
                 if isinstance(ev_file, str):
                     add(ev_file, ev_d)
+                elif isinstance(ev_file, dict):
+                    raw_fu = (
+                        ev_file.get("URL")
+                        or ev_file.get("Url")
+                        or ev_file.get("Href")
+                        or ev_file.get("Link")
+                        or ""
+                    )
+                    add(str(raw_fu).strip() or None, ev_d)
+                for key in ("FileUrl", "PdfUrl", "DocumentUrl"):
+                    vu = ev.get(key)
+                    if isinstance(vu, str) and vu.strip():
+                        add(vu.strip(), ev_d)
 
             ref_inst: date | None = max(event_dates) if event_dates else None
 
             f = inst.get("File")
             if isinstance(f, dict):
-                add(f.get("URL"), ref_inst)
+                add(f.get("URL") or f.get("Url"), ref_inst)
             elif isinstance(f, str):
                 add(f, ref_inst)
+
+            for doc in (
+                list(inst.get("Documents") or [])
+                + list(inst.get("CaseDocuments") or [])
+                + list(inst.get("UploadedDocuments") or [])
+            ):
+                if not isinstance(doc, dict):
+                    continue
+                d_raw = (
+                    doc.get("Date")
+                    or doc.get("PublishDate")
+                    or doc.get("DisplayDate")
+                    or doc.get("EventDate")
+                )
+                dd = _parse_event_date(d_raw if isinstance(d_raw, str) else None)
+                df = doc.get("File")
+                if isinstance(df, dict):
+                    add(df.get("URL") or df.get("Url"), dd or ref_inst)
+                elif isinstance(df, str):
+                    add(df, dd or ref_inst)
+                du = doc.get("Url") or doc.get("URL") or doc.get("Link")
+                add(du if isinstance(du, str) else None, dd or ref_inst)
+
+    extra: dict[str, None] = {}
+    _walk_parse_json_collect_kad_urls(data, sink=extra)
+    for u in extra:
+        if u not in seen:
+            seen.add(u)
+            out.append((u, None))
     return out
 
 
