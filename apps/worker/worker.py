@@ -716,26 +716,36 @@ def _parser_case_number_variants(cn: str) -> list[str]:
     return out
 
 
-def moy_arbitr_docs_from_parser_fallback(case_data: dict, case_number: str) -> list[dict]:
-    """Ссылки на материалы через Parser-API, когда Playwright не находит <a> на КАД."""
+def moy_arbitr_docs_from_parser_fallback(case_data: dict, case_number: str) -> tuple[list[dict], str]:
+    """Ссылки на материалы через Parser-API (желательно до обхода КАД в браузере). Возвращает (docs, диагностика)."""
     if not MOY_ARBITR_PARSER_FALLBACK or not os.getenv("PARSER_API_KEY", "").strip():
-        return []
+        return [], "parser: выключено (нет MOY_ARBITR_PARSER_FALLBACK или PARSER_API_KEY)"
     pdata: dict = {}
     entries: list[tuple[str, Any]] = []
+    notes: list[str] = []
     cid = _case_id_from_kad_card_url((case_data or {}).get("card_url"))
     if cid:
         try:
             pdata = parser_details_by_id(cid)
             entries = extract_kad_pdf_url_entries_with_dates(pdata or {})
-        except Exception:
+            notes.append(
+                f"details_by_id={cid[:8]}… Success={pdata.get('Success')} "
+                f"cases={len(pdata.get('Cases') or [])} urls={len(entries)}"
+            )
+        except Exception as exc:
             entries = []
+            notes.append(f"details_by_id: {type(exc).__name__}:{str(exc)[:120]}")
     if not entries:
         for variant in _parser_case_number_variants(case_number):
             try:
                 pdata = parser_details_by_number(re.sub(r"\s+", "", variant.replace("\\", "")))
-            except Exception:
+            except Exception as exc:
+                notes.append(f"details_by_number {variant!r}: {type(exc).__name__}")
                 continue
             entries = extract_kad_pdf_url_entries_with_dates(pdata or {})
+            notes.append(
+                f"details_by_number={variant!r} Success={pdata.get('Success')} urls={len(entries)}"
+            )
             if entries:
                 break
     out: list[dict] = []
@@ -756,7 +766,7 @@ def moy_arbitr_docs_from_parser_fallback(case_data: dict, case_number: str) -> l
         )
         if len(out) >= COURT_SYNC_MAX_DOCS_PER_RUN:
             break
-    return out
+    return out, "; ".join(notes) if notes else "parser: без запросов"
 
 
 def process_moy_arbitr_job(job: dict) -> None:
@@ -831,9 +841,17 @@ def process_moy_arbitr_job(job: dict) -> None:
         case_num = (case_data.get("case_number") or "").strip()
         if case_num and not effective_preferred_id:
             effective_preferred_id = ensure_case_id(case_num)
+        parser_docs, parser_diag = moy_arbitr_docs_from_parser_fallback(case_data, case_num)
+        if parser_docs:
+            lines.append(
+                f"- Parser-API: {len(parser_docs)} ссылок до обхода КАД (разметка сайта не нужна для списка)."
+            )
         try:
             context, browser, playwright_driver, docs = open_case_and_download_documents(
-                case_data, job_id=job_id, progress=report_progress
+                case_data,
+                job_id=job_id,
+                progress=report_progress,
+                prebuilt_documents=parser_docs if parser_docs else None,
             )
         except MoyArbitrAuthRequired as exc:
             complete_job(job_id, "needs_manual_step", str(exc), {"backend": "moy_arbitr", "auth_required": True})
@@ -845,25 +863,34 @@ def process_moy_arbitr_job(job: dict) -> None:
         try:
             discovered += len(docs)
             if not docs:
-                fb_docs = moy_arbitr_docs_from_parser_fallback(case_data, case_num)
-                if fb_docs:
-                    docs = fb_docs
-                    discovered += len(fb_docs)
-                    lines.append(
-                        f"- Браузер не нашёл ссылки на КАД; подставлены URL из Parser-API: {len(fb_docs)} шт."
-                    )
-            if not docs:
                 lines.append(f'- У дела {case_num or case_data.get("card_url")} документы не найдены автоматически.')
+                lines.append(f"- Parser-API (подробнее): {parser_diag}")
                 if not os.getenv("PARSER_API_KEY", "").strip():
                     lines.append(
-                        "- Подсказка: задайте воркеру PARSER_API_KEY — включится запасной сбор ссылок через Parser-API "
-                        "если разметка сайта пустая."
+                        "- Подсказка: задайте воркеру PARSER_API_KEY в .env контейнера воркера — "
+                        "список материалов подставится через Parser-API без обхода вкладок КАД."
                     )
                 continue
             for doc in docs[:COURT_SYNC_MAX_DOCS_PER_RUN]:
                 try:
                     report_progress(job_id, "downloading", f'Мой Арбитр: скачиваю {doc.get("title") or doc.get("file_url")}')
-                    path = download_moy_arbitr_document(context, doc["file_url"])
+                    fu = (doc.get("file_url") or "").strip()
+                    path: Path
+                    if fu.lower().startswith("http") and "kad.arbitr.ru" in fu.lower() and os.getenv(
+                        "PARSER_API_KEY", ""
+                    ).strip():
+                        try:
+                            raw = parser_pdf_download_with_retries(fu)
+                            fn = fu.rsplit("/", 1)[-1].split("?")[0] or "kad.pdf"
+                            if not fn.lower().endswith(".pdf"):
+                                fn = f"{fn}.pdf" if raw[:4] == b"%PDF" else fn + ".bin"
+                            safe = re.sub(r"[^\w.\-а-яА-Я]", "_", fn)
+                            path = Path(tempfile.mkdtemp()) / safe
+                            path.write_bytes(raw)
+                        except Exception:
+                            path = download_moy_arbitr_document(context, fu)
+                    else:
+                        path = download_moy_arbitr_document(context, fu)
                     ingest_result = ingest_downloaded_file_to_case(path, effective_preferred_id)
                     routing = (ingest_result.get("routing_mode") or "").strip()
                     local_document = ingest_result.get("document") or {}
@@ -1081,8 +1108,17 @@ def _append_anchor_docs_from_root(root, card_url: str, seen: set[str], docs: lis
         )
 
 
+def _normalize_kad_blob_for_url_scan(blob: str) -> str:
+    """JSON/скрипты КАД часто с экранированием слэшей — без этого regex не цепляет URL."""
+    if not blob:
+        return blob
+    s = blob.replace("\\/", "/")
+    return re.sub(r"\\u002[fF]", "/", s)
+
+
 def extract_kad_document_urls_from_html(html: str, card_url: str) -> list[dict]:
     """Дополнительно вытаскиваем ссылки из разметки/скриптов (часть UI КАД не в обычных <a>)."""
+    html = _normalize_kad_blob_for_url_scan(html)
     seen: set[str] = set()
     out: list[dict] = []
     for m in re.finditer(r"(https://kad\.arbitr\.ru/[^\"\'\s<>]+)", html, flags=re.IGNORECASE):
@@ -1394,12 +1430,32 @@ def open_kad_card_and_collect_docs(
                 cl = int(cl_raw.strip()) if cl_raw.strip().isdigit() else None
             except ValueError:
                 cl = None
-            if cl is not None and cl > 600_000:
-                return
+            ul = resp.url.lower()
             ct = (resp.headers.get("content-type") or "").lower()
-            if ct and not any(x in ct for x in ("json", "text/plain", "text/html", "javascript", "x-www-form")):
+            kad_apiish = (
+                "/kad/" in ul
+                or "/card/" in ul
+                or "pdfdocument" in ul
+                or "application/json" in ct
+                or "+json" in ct
+            )
+            if cl is not None and cl > 8_000_000:
                 return
-            max_body = 2_000_000 if "json" in ct else 600_000
+            if cl is not None and cl > 1_800_000 and not kad_apiish:
+                return
+            if ct and not any(
+                x in ct
+                for x in (
+                    "json",
+                    "text/plain",
+                    "text/html",
+                    "javascript",
+                    "x-www-form",
+                )
+            ):
+                if not kad_apiish:
+                    return
+            max_body = 4_000_000 if "json" in ct or "/kad/" in ul else 1_600_000
             body = resp.body()
             if not body or len(body) > max_body:
                 return

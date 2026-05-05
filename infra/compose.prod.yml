@@ -80,6 +80,8 @@ services:
       start_period: 60s
 
   worker:
+    # Секреты из того же ../.env, что у api: PARSER_API_KEY, PARSER_API_BASE_URL и т.д. попадают в контейнер
+    # автоматически через env_file ниже — отдельного «только worker» .env в compose нет.
     build:
       context: ../apps/worker
       dockerfile: Dockerfile

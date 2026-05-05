@@ -70,6 +70,7 @@ services:
       start_period: 60s
 
   worker:
+    # PARSER_API_KEY / PARSER_* из .env рядом с этим файлом (как у api) — см. env_file ниже.
     image: ghcr.io/graffinme-del/my_assistant/worker:main
     restart: unless-stopped
     depends_on:

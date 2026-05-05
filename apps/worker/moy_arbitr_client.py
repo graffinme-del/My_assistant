@@ -843,7 +843,17 @@ def download_moy_arbitr_document(context, file_url: str) -> Path:
     return target
 
 
-def open_case_and_download_documents(case_data: dict, job_id: int | None = None, progress=None):
+def open_case_and_download_documents(
+    case_data: dict,
+    job_id: int | None = None,
+    progress=None,
+    *,
+    prebuilt_documents: list[dict] | None = None,
+):
+    """
+    Если prebuilt_documents задан (например, из Parser-API), обход вкладок КАД не делаем —
+    браузер всё равно открываем ради cookies/referer при скачивании с kad.arbitr.ru.
+    """
     nav_ms = max(60_000, MOY_ARBITR_TIMEOUT_SEC * 1000)
     card_url = case_data.get("card_url") or MOY_ARBITR_BASE_URL
     pw = sync_playwright().start()
@@ -859,6 +869,17 @@ def open_case_and_download_documents(case_data: dict, job_id: int | None = None,
         page.goto(card_url, wait_until="domcontentloaded", timeout=nav_ms)
         page.wait_for_timeout(2500)
         ensure_authorized(page)
+
+        if prebuilt_documents:
+            cap = max(1, MOY_ARBITR_MAX_DOCS_PER_CASE)
+            trimmed = [dict(x) for x in prebuilt_documents[:cap]]
+            if progress and job_id is not None:
+                progress(
+                    job_id,
+                    "opening_case",
+                    f"Мой Арбитр: {len(trimmed)} документов из Parser-API, обход КАД пропущен.",
+                )
+            return context, browser, pw, trimmed
 
         docs: list[dict] = []
         seen_fu: set[str] = set()
