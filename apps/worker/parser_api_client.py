@@ -41,7 +41,11 @@ def _request(endpoint: str, params: dict[str, Any]) -> dict[str, Any]:
     q = {"key": _api_key(), **{k: v for k, v in params.items() if v is not None}}
     with httpx.Client(timeout=_timeout_sec()) as client:
         r = client.get(url, params=q)
-        r.raise_for_status()
+        try:
+            r.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            # Не светим key из query-string в тексте исключения.
+            raise RuntimeError(f"Parser-API {endpoint}: HTTP {exc.response.status_code}") from None
         return r.json()
 
 

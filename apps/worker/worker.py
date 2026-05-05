@@ -716,6 +716,12 @@ def _parser_case_number_variants(cn: str) -> list[str]:
     return out
 
 
+def _safe_parser_diag_error(exc: Exception) -> str:
+    s = f"{type(exc).__name__}: {str(exc)}"
+    s = re.sub(r"([?&]key=)[^&\\s]+", r"\1***", s, flags=re.IGNORECASE)
+    return s[:180]
+
+
 def moy_arbitr_docs_from_parser_fallback(case_data: dict, case_number: str) -> tuple[list[dict], str]:
     """Ссылки на материалы через Parser-API (желательно до обхода КАД в браузере). Возвращает (docs, диагностика)."""
     if not MOY_ARBITR_PARSER_FALLBACK or not os.getenv("PARSER_API_KEY", "").strip():
@@ -734,13 +740,13 @@ def moy_arbitr_docs_from_parser_fallback(case_data: dict, case_number: str) -> t
             )
         except Exception as exc:
             entries = []
-            notes.append(f"details_by_id: {type(exc).__name__}:{str(exc)[:120]}")
+            notes.append(f"details_by_id: {_safe_parser_diag_error(exc)}")
     if not entries:
         for variant in _parser_case_number_variants(case_number):
             try:
                 pdata = parser_details_by_number(re.sub(r"\s+", "", variant.replace("\\", "")))
             except Exception as exc:
-                notes.append(f"details_by_number {variant!r}: {type(exc).__name__}")
+                notes.append(f"details_by_number {variant!r}: {_safe_parser_diag_error(exc)}")
                 continue
             entries = extract_kad_pdf_url_entries_with_dates(pdata or {})
             notes.append(
@@ -865,7 +871,7 @@ def process_moy_arbitr_job(job: dict) -> None:
             if not docs:
                 lines.append(f'- У дела {case_num or case_data.get("card_url")} документы не найдены автоматически.')
                 lines.append(f"- Parser-API (подробнее): {parser_diag}")
-                if not os.getenv("PARSER_API_KEY", "").strip():
+                if MOY_ARBITR_PARSER_FALLBACK and not os.getenv("PARSER_API_KEY", "").strip():
                     lines.append(
                         "- Подсказка: задайте воркеру PARSER_API_KEY в .env контейнера воркера — "
                         "список материалов подставится через Parser-API без обхода вкладок КАД."
@@ -876,9 +882,12 @@ def process_moy_arbitr_job(job: dict) -> None:
                     report_progress(job_id, "downloading", f'Мой Арбитр: скачиваю {doc.get("title") or doc.get("file_url")}')
                     fu = (doc.get("file_url") or "").strip()
                     path: Path
-                    if fu.lower().startswith("http") and "kad.arbitr.ru" in fu.lower() and os.getenv(
-                        "PARSER_API_KEY", ""
-                    ).strip():
+                    if (
+                        MOY_ARBITR_PARSER_FALLBACK
+                        and fu.lower().startswith("http")
+                        and "kad.arbitr.ru" in fu.lower()
+                        and os.getenv("PARSER_API_KEY", "").strip()
+                    ):
                         try:
                             raw = parser_pdf_download_with_retries(fu)
                             fn = fu.rsplit("/", 1)[-1].split("?")[0] or "kad.pdf"
