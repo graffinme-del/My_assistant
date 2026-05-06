@@ -930,6 +930,19 @@ def open_case_and_download_documents(
                             break
             except Exception:
                 pass
+        if not docs:
+            try:
+                qv = (case_data.get("case_number") or case_data.get("card_url") or "").strip() or "case"
+                _remember_browser_event("docs", f"no documents discovered for card={card_url}")
+                artifacts = _save_debug_artifacts(
+                    page,
+                    job_id=job_id,
+                    query_type="moy_arbitr_docs",
+                    query_value=qv,
+                )
+                _remember_browser_event("debug", artifacts)
+            except Exception:
+                pass
         return context, browser, pw, docs
     except Exception:
         browser.close()
