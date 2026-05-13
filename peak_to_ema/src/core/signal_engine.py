@@ -65,6 +65,7 @@ def evaluate_symbol(
     volume_bounce_weak: bool = False,
     btc_pumping: bool = False,
     dedup: Optional[SignalDedup] = None,
+    mark_dedup: bool = True,
 ) -> SignalResult:
     if not candles_1h or not candles_15m:
         return SignalResult(
@@ -108,7 +109,7 @@ def evaluate_symbol(
         if dedup.is_duplicate(dedup_key):
             ready = False
             reason_code = "duplicate_signal"
-        else:
+        elif mark_dedup:
             dedup.mark(dedup_key)
 
     return SignalResult(

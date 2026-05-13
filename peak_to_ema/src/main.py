@@ -70,6 +70,7 @@ def _run_tick(gw: MarketGateway, dedup: SignalDedup, symbol: str, tg_token: str,
         candles_1h=candles_1h,
         candles_15m=candles_15m,
         dedup=dedup,
+        mark_dedup=False,
     )
     if result.ready:
         msg = _format_telegram_signal(
@@ -80,6 +81,8 @@ def _run_tick(gw: MarketGateway, dedup: SignalDedup, symbol: str, tg_token: str,
             reason_code=result.reason_code,
         )
         tg_ok = _send_telegram(tg_token, tg_chat_id, msg)
+        if tg_ok and result.dedup_key:
+            dedup.mark(result.dedup_key)
         print(
             f"[SIGNAL] {result.signal} {symbol} score={result.score} "
             f"entry={result.entry_trigger:.6g} stop={result.stop:.6g} key={result.dedup_key} "
