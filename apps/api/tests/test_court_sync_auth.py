@@ -3,7 +3,11 @@ import unittest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.court_sync_service import cancel_active_court_sync_jobs, get_court_sync_job_for_user
+from app.court_sync_service import (
+    cancel_active_court_sync_jobs,
+    format_recent_download_jobs_status,
+    get_court_sync_job_for_user,
+)
 from app.db import Base
 from app.models import CourtSyncJob
 
@@ -14,11 +18,18 @@ def _session():
     return sessionmaker(bind=engine)()
 
 
-def _job(db, *, requested_by: str, status: str = "pending", report_text: str = "") -> CourtSyncJob:
+def _job(
+    db,
+    *,
+    requested_by: str,
+    status: str = "pending",
+    report_text: str = "",
+    query_value: str | None = None,
+) -> CourtSyncJob:
     job = CourtSyncJob(
         requested_by=requested_by,
         query_type="moy_arbitr_case_number",
-        query_value=f"A40-{len(requested_by)}/2025",
+        query_value=query_value or f"A40-{len(requested_by)}/2025",
         run_mode="download",
         status=status,
         step="queued",
@@ -65,6 +76,29 @@ class CourtSyncAuthTest(unittest.TestCase):
         self.assertEqual(stats, {"cancelled": 2})
         self.assertEqual(owner_job.status, "cancelled")
         self.assertEqual(member_job.status, "cancelled")
+
+    def test_member_status_list_is_limited_to_member_jobs(self):
+        db = _session()
+        _job(
+            db,
+            requested_by="owner",
+            status="done",
+            report_text="owner secret report",
+            query_value="A40-OWNER/2025",
+        )
+        _job(
+            db,
+            requested_by="member",
+            status="done",
+            report_text="member visible report",
+            query_value="A40-MEMBER/2025",
+        )
+
+        text = format_recent_download_jobs_status(db, requested_by="member")
+
+        self.assertIn("A40-MEMBER/2025", text)
+        self.assertNotIn("A40-OWNER/2025", text)
+        self.assertNotIn("owner secret", text)
 
 
 if __name__ == "__main__":

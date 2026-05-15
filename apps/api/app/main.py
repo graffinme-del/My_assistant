@@ -4377,10 +4377,9 @@ def handle_court_sync_chat_command(
     lowered = text.lower()
     _kad_date_range = parse_calendar_period_ru(text)
     _kad_period_label = describe_calendar_period_ru(text) if _kad_date_range else None
+    _job_owner_filter = None if user_role == "owner" else user_role
     if looks_like_cancel_court_sync_jobs(text):
-        stats = cancel_active_court_sync_jobs(
-            db, requested_by=None if user_role == "owner" else user_role
-        )
+        stats = cancel_active_court_sync_jobs(db, requested_by=_job_owner_filter)
         n = int(stats.get("cancelled", 0))
         return (
             f"Снято задач: {n}. Очередь и активные загрузки помечены как отменённые; воркер прекращает скачивание между файлами. "
@@ -4392,7 +4391,10 @@ def handle_court_sync_chat_command(
         )
     if looks_like_court_download_count_question(text):
         return format_kad_download_count_answer(
-            db, date_range=_kad_date_range, period_label=_kad_period_label
+            db,
+            date_range=_kad_date_range,
+            period_label=_kad_period_label,
+            requested_by=_job_owner_filter,
         )
     # «№35», «#35», «номер 35» после «задаче»; только «#?» не ловит Unicode №.
     m_job = re.search(
@@ -4410,7 +4412,10 @@ def handle_court_sync_chat_command(
     if re.search(r"(?:отчет|отчёт)", lowered) and re.search(r"\bзадач[еаи]\b", lowered):
         if not re.search(r"\bзадач[еаи]\s*(?:#|№|\bномер\b)?\s*\d+", lowered):
             status_block = format_recent_download_jobs_status(
-                db, date_range=_kad_date_range, period_label=_kad_period_label
+                db,
+                date_range=_kad_date_range,
+                period_label=_kad_period_label,
+                requested_by=_job_owner_filter,
             )
             hint = (
                 "Чтобы открыть отчёт по одной задаче, укажите номер — например: «отчёт по задаче 58»."
@@ -4420,10 +4425,13 @@ def handle_court_sync_chat_command(
             return hint
     if looks_like_court_download_status_question(text):
         return format_recent_download_jobs_status(
-            db, date_range=_kad_date_range, period_label=_kad_period_label
+            db,
+            date_range=_kad_date_range,
+            period_label=_kad_period_label,
+            requested_by=_job_owner_filter,
         )
     if "статус синхронизации" in lowered:
-        return format_sync_status(db)
+        return format_sync_status(db, requested_by=_job_owner_filter)
     if "что нового скачано за ночь" in lowered:
         return format_nightly_report(db)
 

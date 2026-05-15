@@ -204,22 +204,21 @@ def complete_sync_job(db: Session, job_id: int, *, status: str, result: dict, re
     return job
 
 
-def mark_stale_running_court_sync_jobs(db: Session) -> int:
+def mark_stale_running_court_sync_jobs(db: Session, *, requested_by: str | None = None) -> int:
     """
     Закрывает «зомби»-задачи: долго в running без complete (упал воркер, зависание браузера и т.д.).
     Вызывается при выводе статуса в чат, чтобы список не показывал недели «скачивания».
     """
     hrs = max(1, int(settings.court_sync_stale_running_hours))
     cutoff = datetime.utcnow() - timedelta(hours=hrs)
-    stale = (
-        db.query(CourtSyncJob)
-        .filter(
-            CourtSyncJob.status == "running",
-            CourtSyncJob.started_at.isnot(None),
-            CourtSyncJob.started_at < cutoff,
-        )
-        .all()
+    q = db.query(CourtSyncJob).filter(
+        CourtSyncJob.status == "running",
+        CourtSyncJob.started_at.isnot(None),
+        CourtSyncJob.started_at < cutoff,
     )
+    if requested_by is not None:
+        q = q.filter(CourtSyncJob.requested_by == requested_by)
+    stale = q.all()
     n = 0
     for job in stale:
         complete_sync_job(
@@ -482,6 +481,7 @@ def format_kad_download_count_answer(
     *,
     date_range: tuple[datetime, datetime] | None = None,
     period_label: str | None = None,
+    requested_by: str | None = None,
 ) -> str:
     """Один ответ на «сколько скачали»: факт в базе + кратко по последней задаче."""
     if date_range:
@@ -497,6 +497,8 @@ def format_kad_download_count_answer(
     else:
         n_saved = db.query(CourtDocumentSource).filter(CourtDocumentSource.local_document_id.isnot(None)).count()
     q_latest = db.query(CourtSyncJob).filter(CourtSyncJob.run_mode == "download")
+    if requested_by is not None:
+        q_latest = q_latest.filter(CourtSyncJob.requested_by == requested_by)
     if date_range:
         start, end = date_range
         q_latest = q_latest.filter(
@@ -604,13 +606,16 @@ def format_recent_download_jobs_status(
     limit: int = 5,
     date_range: tuple[datetime, datetime] | None = None,
     period_label: str | None = None,
+    requested_by: str | None = None,
 ) -> str:
     """Краткий статус последних судебных фоновых задач — связный текст, без сырых URL и логов."""
-    stale_closed = mark_stale_running_court_sync_jobs(db)
+    stale_closed = mark_stale_running_court_sync_jobs(db, requested_by=requested_by)
     stale_hrs = max(1, int(settings.court_sync_stale_running_hours))
     q = db.query(CourtSyncJob).filter(
         (CourtSyncJob.run_mode == "download") | (CourtSyncJob.query_type.like("moy_arbitr_%"))
     )
+    if requested_by is not None:
+        q = q.filter(CourtSyncJob.requested_by == requested_by)
     if date_range:
         start, end = date_range
         q = q.filter(
@@ -696,9 +701,12 @@ def format_recent_download_jobs_status(
     return "\n".join(blocks).strip()
 
 
-def format_sync_status(db: Session, *, limit: int = 8) -> str:
-    mark_stale_running_court_sync_jobs(db)
-    jobs = db.query(CourtSyncJob).order_by(CourtSyncJob.created_at.desc()).limit(limit).all()
+def format_sync_status(db: Session, *, limit: int = 8, requested_by: str | None = None) -> str:
+    mark_stale_running_court_sync_jobs(db, requested_by=requested_by)
+    q = db.query(CourtSyncJob)
+    if requested_by is not None:
+        q = q.filter(CourtSyncJob.requested_by == requested_by)
+    jobs = q.order_by(CourtSyncJob.created_at.desc()).limit(limit).all()
     if not jobs:
         return "Задач судебной синхронизации пока не запускали."
     lines = [
