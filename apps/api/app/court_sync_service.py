@@ -236,15 +236,21 @@ def mark_stale_running_court_sync_jobs(db: Session) -> int:
     return n
 
 
-def cancel_active_court_sync_jobs(db: Session) -> dict[str, int]:
+def get_court_sync_job_for_user(db: Session, job_id: int, user_role: str) -> CourtSyncJob | None:
+    """Return a job visible to the current chat principal."""
+    q = db.query(CourtSyncJob).filter(CourtSyncJob.id == job_id)
+    if user_role != "owner":
+        q = q.filter(CourtSyncJob.requested_by == user_role)
+    return q.first()
+
+
+def cancel_active_court_sync_jobs(db: Session, *, requested_by: str | None = None) -> dict[str, int]:
     """Снимает все задачи в очереди (pending) и останавливает помеченные как running (воркер прекращает между шагами)."""
     n = 0
-    active = (
-        db.query(CourtSyncJob)
-        .filter(CourtSyncJob.status.in_(("pending", "running")))
-        .order_by(CourtSyncJob.id.asc())
-        .all()
-    )
+    q = db.query(CourtSyncJob).filter(CourtSyncJob.status.in_(("pending", "running")))
+    if requested_by is not None:
+        q = q.filter(CourtSyncJob.requested_by == requested_by)
+    active = q.order_by(CourtSyncJob.id.asc()).all()
     for job in active:
         complete_sync_job(
             db,

@@ -68,6 +68,7 @@ from .court_sync_service import (
     format_nightly_report,
     format_recent_download_jobs_status,
     format_sync_status,
+    get_court_sync_job_for_user,
     update_job_progress,
     upsert_case_source,
     upsert_document_source,
@@ -4377,7 +4378,9 @@ def handle_court_sync_chat_command(
     _kad_date_range = parse_calendar_period_ru(text)
     _kad_period_label = describe_calendar_period_ru(text) if _kad_date_range else None
     if looks_like_cancel_court_sync_jobs(text):
-        stats = cancel_active_court_sync_jobs(db)
+        stats = cancel_active_court_sync_jobs(
+            db, requested_by=None if user_role == "owner" else user_role
+        )
         n = int(stats.get("cancelled", 0))
         return (
             f"Снято задач: {n}. Очередь и активные загрузки помечены как отменённые; воркер прекращает скачивание между файлами. "
@@ -4399,7 +4402,7 @@ def handle_court_sync_chat_command(
     )
     if m_job:
         job_id = int(m_job.group(1))
-        job = db.query(CourtSyncJob).filter(CourtSyncJob.id == job_id).first()
+        job = get_court_sync_job_for_user(db, job_id, user_role)
         if not job:
             return f"Задача #{job_id} не найдена."
         text = job.report_text.strip() or "(отчет пуст)"
@@ -4751,7 +4754,7 @@ async def assistant_ingest_text(
     )
     if m_direct_job_report:
         job_id = int(m_direct_job_report.group(1))
-        job = db.query(CourtSyncJob).filter(CourtSyncJob.id == job_id).first()
+        job = get_court_sync_job_for_user(db, job_id, _)
         wants_full_report = bool(
             re.search(
                 r"(?:полный|весь|целиком)\s+(?:отч(?:е|ё)т|лог)|журнал\s+целиком|вывед(?:и|ите)\s+весь",
