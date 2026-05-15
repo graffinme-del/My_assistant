@@ -1,3 +1,5 @@
+import unittest
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -28,39 +30,42 @@ def _job(db, *, requested_by: str, status: str = "pending", report_text: str = "
     return job
 
 
-def test_member_cannot_load_owner_court_sync_job_report():
-    db = _session()
-    owner_job = _job(db, requested_by="owner", status="done", report_text="owner secret report")
-    member_job = _job(db, requested_by="member", status="done", report_text="member report")
+class CourtSyncAuthTest(unittest.TestCase):
+    def test_member_cannot_load_owner_court_sync_job_report(self):
+        db = _session()
+        owner_job = _job(db, requested_by="owner", status="done", report_text="owner secret report")
+        member_job = _job(db, requested_by="member", status="done", report_text="member report")
 
-    assert get_court_sync_job_for_user(db, owner_job.id, "member") is None
-    assert get_court_sync_job_for_user(db, member_job.id, "member").id == member_job.id
-    assert get_court_sync_job_for_user(db, member_job.id, "owner").id == member_job.id
+        self.assertIsNone(get_court_sync_job_for_user(db, owner_job.id, "member"))
+        self.assertEqual(get_court_sync_job_for_user(db, member_job.id, "member").id, member_job.id)
+        self.assertEqual(get_court_sync_job_for_user(db, member_job.id, "owner").id, member_job.id)
+
+    def test_member_cancel_is_limited_to_member_jobs(self):
+        db = _session()
+        owner_job = _job(db, requested_by="owner")
+        member_job = _job(db, requested_by="member")
+
+        stats = cancel_active_court_sync_jobs(db, requested_by="member")
+        db.refresh(owner_job)
+        db.refresh(member_job)
+
+        self.assertEqual(stats, {"cancelled": 1})
+        self.assertEqual(owner_job.status, "pending")
+        self.assertEqual(member_job.status, "cancelled")
+
+    def test_owner_cancel_remains_global(self):
+        db = _session()
+        owner_job = _job(db, requested_by="owner")
+        member_job = _job(db, requested_by="member")
+
+        stats = cancel_active_court_sync_jobs(db)
+        db.refresh(owner_job)
+        db.refresh(member_job)
+
+        self.assertEqual(stats, {"cancelled": 2})
+        self.assertEqual(owner_job.status, "cancelled")
+        self.assertEqual(member_job.status, "cancelled")
 
 
-def test_member_cancel_is_limited_to_member_jobs():
-    db = _session()
-    owner_job = _job(db, requested_by="owner")
-    member_job = _job(db, requested_by="member")
-
-    stats = cancel_active_court_sync_jobs(db, requested_by="member")
-    db.refresh(owner_job)
-    db.refresh(member_job)
-
-    assert stats == {"cancelled": 1}
-    assert owner_job.status == "pending"
-    assert member_job.status == "cancelled"
-
-
-def test_owner_cancel_remains_global():
-    db = _session()
-    owner_job = _job(db, requested_by="owner")
-    member_job = _job(db, requested_by="member")
-
-    stats = cancel_active_court_sync_jobs(db)
-    db.refresh(owner_job)
-    db.refresh(member_job)
-
-    assert stats == {"cancelled": 2}
-    assert owner_job.status == "cancelled"
-    assert member_job.status == "cancelled"
+if __name__ == "__main__":
+    unittest.main()
