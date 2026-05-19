@@ -4377,6 +4377,8 @@ def handle_court_sync_chat_command(
     _kad_date_range = parse_calendar_period_ru(text)
     _kad_period_label = describe_calendar_period_ru(text) if _kad_date_range else None
     if looks_like_cancel_court_sync_jobs(text):
+        if user_role != "owner":
+            return "Остановить все фоновые загрузки может только владелец. Обратитесь к владельцу рабочего пространства."
         stats = cancel_active_court_sync_jobs(db)
         n = int(stats.get("cancelled", 0))
         return (
