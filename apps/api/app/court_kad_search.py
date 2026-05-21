@@ -170,10 +170,29 @@ def _title_or_query_aligns_with_message(title: str | None, msg: str, query_value
     mt = (msg or "").casefold()
     qv = (query_value or "").strip().casefold()
     tt = (title or "").strip().casefold()
-    if len(qv) >= 3 and qv and (qv in tt or qv in mt):
+    if len(qv) >= 3 and qv and qv in tt:
         return True
+    generic_title_tokens = {
+        "банкротство",
+        "банкротстве",
+        "дело",
+        "делу",
+        "организация",
+        "организации",
+        "компания",
+        "компании",
+        "общество",
+        "ограниченной",
+        "ответственностью",
+        "ооо",
+        "ао",
+        "пао",
+        "зао",
+    }
     for tok in re.findall(r"[а-яёa-z]{3,}", tt):
-        if tok in mt:
+        if tok in generic_title_tokens:
+            continue
+        if re.search(rf"(?<![а-яёa-z]){re.escape(tok)}(?![а-яёa-z])", mt):
             return True
     return False
 
