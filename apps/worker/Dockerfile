@@ -24,6 +24,7 @@ COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 RUN playwright install chromium
 COPY parser_api_client.py /app/parser_api_client.py
+COPY kad_pdf_client.py /app/kad_pdf_client.py
 COPY moy_arbitr_client.py /app/moy_arbitr_client.py
 COPY save_moy_arbitr_state.py /app/save_moy_arbitr_state.py
 COPY trace_moy_arbitr_network.py /app/trace_moy_arbitr_network.py
