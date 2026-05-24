@@ -613,15 +613,16 @@ def looks_like_cancel_court_sync_jobs(text: str) -> bool:
         lowered,
     ):
         return False
+    command_text = re.split(r"[.;!?]|,\s*(?:но|а)\b|\s+но\s+", lowered, maxsplit=1)[0]
     command_context = r"(?:задач|очеред|кад|картотек|фонов|скачив|загруз)"
-    if re.search(rf"\bостанови\b.*\b(?:все\s+)?процесс\w*.*\b{command_context}", lowered):
+    if re.search(rf"\bостанови\b.*\b(?:все\s+)?процесс\w*.*\b{command_context}", command_text):
         return True
-    if re.search(rf"\bостанови\b.*\b{command_context}", lowered):
+    if re.search(rf"\bостанови\b.*\b{command_context}", command_text):
         return True
-    if re.search(rf"\b(?:отмени|сними|сбрось|очисти|удали|убери)\b.*\b{command_context}", lowered):
+    if re.search(rf"\b(?:отмени|сними|сбрось|очисти|удали|убери)\b.*\b{command_context}", command_text):
         return True
     return any(
-        p in lowered
+        p in command_text
         for p in (
             "сними задачи",
             "снять задачи",
