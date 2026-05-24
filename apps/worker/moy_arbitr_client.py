@@ -843,6 +843,27 @@ def download_moy_arbitr_document(context, file_url: str) -> Path:
     return target
 
 
+def _append_unique_documents(
+    docs: list[dict],
+    rows: list[dict] | None,
+    seen_file_urls: set[str],
+    cap: int,
+) -> int:
+    added = 0
+    for row in rows or []:
+        if len(docs) >= cap:
+            break
+        if not isinstance(row, dict):
+            continue
+        u = (row.get("file_url") or "").strip()
+        if not u or u in seen_file_urls:
+            continue
+        seen_file_urls.add(u)
+        docs.append(dict(row))
+        added += 1
+    return added
+
+
 def open_case_and_download_documents(
     case_data: dict,
     job_id: int | None = None,
@@ -851,8 +872,8 @@ def open_case_and_download_documents(
     prebuilt_documents: list[dict] | None = None,
 ):
     """
-    Если prebuilt_documents задан (например, из Parser-API), обход вкладок КАД не делаем —
-    браузер всё равно открываем ради cookies/referer при скачивании с kad.arbitr.ru.
+    Если prebuilt_documents задан (например, из Parser-API), используем его как начальный список
+    и всё равно добираем документы из КАД/хаба: Parser-API может вернуть неполный набор ссылок.
     """
     nav_ms = max(60_000, MOY_ARBITR_TIMEOUT_SEC * 1000)
     card_url = case_data.get("card_url") or MOY_ARBITR_BASE_URL
@@ -870,19 +891,18 @@ def open_case_and_download_documents(
         page.wait_for_timeout(2500)
         ensure_authorized(page)
 
+        cap = max(1, MOY_ARBITR_MAX_DOCS_PER_CASE)
+        docs: list[dict] = []
+        seen_fu: set[str] = set()
         if prebuilt_documents:
-            cap = max(1, MOY_ARBITR_MAX_DOCS_PER_CASE)
-            trimmed = [dict(x) for x in prebuilt_documents[:cap]]
+            added = _append_unique_documents(docs, prebuilt_documents, seen_fu, cap)
             if progress and job_id is not None:
                 progress(
                     job_id,
                     "opening_case",
-                    f"Мой Арбитр: {len(trimmed)} документов из Parser-API, обход КАД пропущен.",
+                    f"Мой Арбитр: {added} документов из Parser-API, проверяю КАД/хаб на недостающие ссылки.",
                 )
-            return context, browser, pw, trimmed
 
-        docs: list[dict] = []
-        seen_fu: set[str] = set()
         import worker as worker_mod
 
         # В raw-строке нужно r"kad\.arbitr" — иначе r"kad\\." ищет обратный слэш, а не точку в домене.
@@ -891,30 +911,26 @@ def open_case_and_download_documents(
         )
         if is_kad_card:
             try:
-                docs = worker_mod.open_kad_card_and_collect_docs(
+                kad_docs = worker_mod.open_kad_card_and_collect_docs(
                     page,
                     card_url.strip(),
                     nav_ms,
                     progress=progress,
                     job_id=job_id,
                 )
+                _append_unique_documents(docs, kad_docs, seen_fu, cap)
             except Exception:
-                docs = []
-            seen_fu = {(d.get("file_url") or "").strip() for d in docs if d.get("file_url")}
+                pass
             cn = (case_data.get("case_number") or "").strip()
             if cn:
                 for row in _collect_documents_via_my_arbitr_hub(
                     page, cn, nav_ms, progress=progress, job_id=job_id
                 ):
-                    u = (row.get("file_url") or "").strip()
-                    if u and u not in seen_fu:
-                        seen_fu.add(u)
-                        docs.append(row)
-                        if len(docs) >= MOY_ARBITR_MAX_DOCS_PER_CASE:
-                            break
+                    _append_unique_documents(docs, [row], seen_fu, cap)
+                    if len(docs) >= cap:
+                        break
         else:
-            docs = collect_moy_arbitr_documents(page, card_url)
-            seen_fu = {(d.get("file_url") or "").strip() for d in docs if d.get("file_url")}
+            _append_unique_documents(docs, collect_moy_arbitr_documents(page, card_url), seen_fu, cap)
             try:
                 extra = worker_mod.collect_kad_documents_from_linked_cards(
                     page,
@@ -922,12 +938,9 @@ def open_case_and_download_documents(
                     nav_ms,
                 )
                 for row in extra:
-                    u = (row.get("file_url") or "").strip()
-                    if u and u not in seen_fu:
-                        seen_fu.add(u)
-                        docs.append(row)
-                        if len(docs) >= MOY_ARBITR_MAX_DOCS_PER_CASE:
-                            break
+                    _append_unique_documents(docs, [row], seen_fu, cap)
+                    if len(docs) >= cap:
+                        break
             except Exception:
                 pass
         if not docs:
