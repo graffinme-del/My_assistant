@@ -38,6 +38,7 @@ def test_m15_entry_ready_on_close_below_ema20_without_local_low_break_in_soft_mo
     res = evaluate_m15_entry(candles)
     assert res.ready is True
     assert res.ema20_retest_fail is True
+    assert res.local_low_break is False
     assert res.entry_trigger > 0
 
 
