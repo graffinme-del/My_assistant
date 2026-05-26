@@ -263,6 +263,9 @@ def _page_looks_unauthorized(page) -> bool:
 
 
 def ensure_authorized(page) -> None:
+    url = (page.url or "").lower()
+    if "my.arbitr.ru" not in url:
+        return
     if not state_file_exists():
         raise MoyArbitrAuthRequired(_manual_login_message("не найден файл сохранённой браузерной сессии"))
     if _page_looks_unauthorized(page):
