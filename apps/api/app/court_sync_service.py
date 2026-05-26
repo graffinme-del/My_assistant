@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from datetime import datetime, timedelta
@@ -22,6 +23,13 @@ from .models import (
     CourtWatchProfile,
     Document,
 )
+
+
+def _stored_remote_document_id(remote_document_id: str) -> str:
+    raw = (remote_document_id or "").strip()
+    if len(raw) <= 255:
+        return raw
+    return "sha256:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def create_watch_profile(
@@ -76,6 +84,8 @@ def create_sync_job(
                 CourtSyncJob.query_type == query_type,
                 CourtSyncJob.query_value == query_value,
                 CourtSyncJob.run_mode == run_mode,
+                CourtSyncJob.parser_year_min == parser_year_min,
+                CourtSyncJob.parser_year_max == parser_year_max,
                 CourtSyncJob.status.in_(("pending", "running")),
             )
             .order_by(CourtSyncJob.id.desc())
@@ -306,12 +316,19 @@ def upsert_document_source(
     file_url: str = "",
     status: str = "discovered",
 ) -> CourtDocumentSource:
-    source = db.query(CourtDocumentSource).filter(CourtDocumentSource.remote_document_id == remote_document_id).first()
+    stored_remote_document_id = _stored_remote_document_id(remote_document_id)
+    source = (
+        db.query(CourtDocumentSource)
+        .filter(CourtDocumentSource.remote_document_id == stored_remote_document_id)
+        .first()
+    )
     if not source:
-        source = CourtDocumentSource(remote_document_id=remote_document_id)
+        source = CourtDocumentSource(remote_document_id=stored_remote_document_id)
     previous_local_id = source.local_document_id
-    source.case_source_id = case_source_id
-    source.local_document_id = local_document_id
+    if case_source_id is not None:
+        source.case_source_id = case_source_id
+    if local_document_id is not None:
+        source.local_document_id = local_document_id
     source.title = title[:500]
     source.filename = filename[:255]
     source.file_url = file_url[:1000]

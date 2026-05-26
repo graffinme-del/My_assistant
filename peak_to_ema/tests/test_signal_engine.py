@@ -62,6 +62,42 @@ def test_evaluate_symbol_does_not_mark_dedup_before_delivery() -> None:
         signal_engine.evaluate_m15_entry = old_m15
 
 
+def test_evaluate_symbol_requires_ready_m15_entry() -> None:
+    old_h1 = signal_engine.evaluate_h1_peak_context
+    old_m15 = signal_engine.evaluate_m15_entry
+    try:
+        signal_engine.evaluate_h1_peak_context = lambda _candles: SimpleNamespace(
+            ok=True,
+            impulse_up=True,
+            rejection_candle=True,
+            no_continuation=True,
+            reason="ok",
+        )
+        signal_engine.evaluate_m15_entry = lambda _candles: SimpleNamespace(
+            ready=False,
+            ema20_retest_fail=True,
+            local_low_break=True,
+            price_above_ema20_15m=False,
+            entry_trigger=0.0,
+            stop=0.0,
+            reason="local_low_not_broken",
+        )
+
+        result = signal_engine.evaluate_symbol(
+            "BTCUSDT",
+            candles_1h=[{"close": 1}],
+            candles_15m=[{"close": 1}],
+        )
+
+        assert result.ready is False
+        assert result.reason_code == "m15_local_low_not_broken"
+        assert result.entry_trigger == 0.0
+        assert result.stop == 0.0
+    finally:
+        signal_engine.evaluate_h1_peak_context = old_h1
+        signal_engine.evaluate_m15_entry = old_m15
+
+
 def test_run_tick_marks_dedup_only_after_successful_delivery() -> None:
     old_evaluate = runtime.evaluate_symbol
     old_send = runtime._send_telegram

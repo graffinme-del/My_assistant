@@ -90,7 +90,7 @@ def evaluate_symbol(
         price_above_ema20_15m=m15.price_above_ema20_15m,
     )
 
-    mandatory_ok = h1.rejection_candle and m15.ema20_retest_fail
+    mandatory_ok = h1.rejection_candle and m15.ready
     ready = mandatory_ok and h1.no_continuation and score >= 75
 
     reason_code = "ok" if ready else "mandatory_or_score_failed"

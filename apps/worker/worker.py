@@ -74,6 +74,12 @@ def parser_pdf_download_with_retries(doc_url: str) -> bytes:
     raise last
 
 
+def ensure_pdf_payload(raw: bytes, source: str) -> bytes:
+    if not raw.startswith(b"%PDF"):
+        raise RuntimeError(f"{source} вернул не PDF-документ")
+    return raw
+
+
 def _parser_pdf_date_bounds() -> tuple[date | None, date | None]:
     """Границы дат для pdf_download (только Parser-API). Пусто = без фильтра."""
     raw_from = os.getenv("PARSER_DOWNLOAD_DATE_FROM", "").strip()
@@ -889,10 +895,10 @@ def process_moy_arbitr_job(job: dict) -> None:
                         and os.getenv("PARSER_API_KEY", "").strip()
                     ):
                         try:
-                            raw = parser_pdf_download_with_retries(fu)
+                            raw = ensure_pdf_payload(parser_pdf_download_with_retries(fu), "Parser-API pdf_download")
                             fn = fu.rsplit("/", 1)[-1].split("?")[0] or "kad.pdf"
                             if not fn.lower().endswith(".pdf"):
-                                fn = f"{fn}.pdf" if raw[:4] == b"%PDF" else fn + ".bin"
+                                fn = f"{fn}.pdf"
                             safe = re.sub(r"[^\w.\-а-яА-Я]", "_", fn)
                             path = Path(tempfile.mkdtemp()) / safe
                             path.write_bytes(raw)
@@ -1768,7 +1774,7 @@ def download_documents_via_parser(
                 fn = f"{fn}.pdf"
             try:
                 report_progress(job_id, "downloading", f"Parser-API pdf_download: {doc_url[:120]}…")
-                raw = parser_pdf_download_with_retries(doc_url)
+                raw = ensure_pdf_payload(parser_pdf_download_with_retries(doc_url), "Parser-API pdf_download")
                 safe_name = re.sub(r"[^\w.\-а-яА-Я]", "_", fn)
                 target = Path(tempfile.mkdtemp()) / safe_name
                 target.write_bytes(raw)
@@ -1960,6 +1966,8 @@ def process_job(job: dict) -> None:
 
     nav_ms = max(60_000, COURT_SYNC_TIMEOUT_SEC * 1000)
     for case_data in target_cases:
+        if court_sync_job_stopped_remotely(job_id):
+            return
         case_source_id = register_case_source(job_id, case_data)
         card_url = case_data["card_url"]
         report_progress(job_id, "opening_case", f"Открываю карточку (одна сессия для страницы и скачивания): {card_url}")
@@ -1999,6 +2007,9 @@ def process_job(job: dict) -> None:
                 browser.close()
                 continue
             for doc in docs[:COURT_SYNC_MAX_DOCS_PER_RUN]:
+                if court_sync_job_stopped_remotely(job_id):
+                    browser.close()
+                    return
                 try:
                     report_progress(job_id, "downloading", f'Скачиваю: {doc.get("title") or doc.get("file_url")}')
                     path = download_document_via_context(context, doc["file_url"])
