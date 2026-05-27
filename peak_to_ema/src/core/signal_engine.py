@@ -108,8 +108,6 @@ def evaluate_symbol(
         if dedup.is_duplicate(dedup_key):
             ready = False
             reason_code = "duplicate_signal"
-        else:
-            dedup.mark(dedup_key)
 
     return SignalResult(
         symbol=symbol,
