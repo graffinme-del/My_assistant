@@ -146,6 +146,8 @@ def append_finished_job_report_to_chat(db: Session, job: CourtSyncJob) -> None:
         return
     if (job.trigger_type or "").strip() != "manual":
         return
+    if (job.status or "").strip() == "cancelled":
+        return
     user_key = f"default:{rb}"
     conversation = get_or_create_conversation(db, user_key)
 
