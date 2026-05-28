@@ -607,12 +607,22 @@ def looks_like_cancel_court_sync_jobs(text: str) -> bool:
     lowered = (text or "").lower()
     if re.search(r"(?:отчет|отчёт)\s+(?:по\s+)?(?:задач[еаи])", lowered):
         return False
-    if re.search(r"\bостанови\b.*\b(все\s+)?процесс", lowered):
+    if re.search(
+        r"\b(?:не|не\s+надо|не\s+нужно)\s+"
+        r"(?:останавливай|останови|отменяй|отмени|снимай|сними|сбрасывай|сбрось|очищай|очисти|удаляй|удали|убирай|убери)\b",
+        lowered,
+    ):
+        return False
+    command_text = re.split(r"[.;!?]|,\s*(?:но|а)\b|\s+но\s+", lowered, maxsplit=1)[0]
+    command_context = r"(?:задач|очеред|кад|картотек|фонов|скачив|загруз)"
+    if re.search(rf"\bостанови\b.*\b(?:все\s+)?процесс\w*.*\b{command_context}", command_text):
         return True
-    if re.search(r"\bостанови\b.*\bвсе\s+задач", lowered):
+    if re.search(rf"\bостанови\b.*\b{command_context}", command_text):
+        return True
+    if re.search(rf"\b(?:отмени|сними|сбрось|очисти|удали|убери)\b.*\b{command_context}", command_text):
         return True
     return any(
-        p in lowered
+        p in command_text
         for p in (
             "сними задачи",
             "снять задачи",
@@ -625,12 +635,8 @@ def looks_like_cancel_court_sync_jobs(text: str) -> bool:
             "останови скачивание",
             "останови загрузку",
             "останови фонов",
-            "останови всё",
-            "останови все",
             "останови фоновые",
             "останови фоновые задачи",
-            "остановить все задачи",
-            "остановить фоновые",
             "сбрось очередь",
             "очисти очередь кад",
             "удали старые задачи",
