@@ -25,7 +25,7 @@ def _soft_m15(final_close: float) -> list[dict]:
 def test_soft_m15_without_local_low_break_does_not_get_break_score() -> None:
     h1 = [_c(100.0, 100.2, 99.8, 100.0)] * 24 + [
         _c(100.0, 100.3, 99.8, 100.1),
-        _c(100.1, 100.4, 99.0, 99.5),
+        _c(100.1, 100.7, 99.0, 99.5),
     ]
     result = evaluate_symbol("BTCUSDT", candles_1h=h1, candles_15m=_soft_m15(99.72))
     assert result.score == 65
