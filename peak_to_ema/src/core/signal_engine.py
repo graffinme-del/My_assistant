@@ -102,14 +102,14 @@ def evaluate_symbol(
         reason_code = "score_below_threshold"
 
     dedup_key = ""
-    if m15.entry_trigger > 0 and m15.stop > 0:
+    if m15.local_low > 0 and m15.pullback_high > 0:
+        dedup_key = f"{symbol}|SHORT|{m15.local_low:.8g}|{m15.pullback_high:.8g}"
+    elif m15.entry_trigger > 0 and m15.stop > 0:
         dedup_key = f"{symbol}|SHORT|{m15.entry_trigger:.8g}|{m15.stop:.8g}"
     if ready and dedup and dedup_key:
         if dedup.is_duplicate(dedup_key):
             ready = False
             reason_code = "duplicate_signal"
-        else:
-            dedup.mark(dedup_key)
 
     return SignalResult(
         symbol=symbol,
