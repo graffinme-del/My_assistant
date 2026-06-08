@@ -850,7 +850,7 @@ def process_moy_arbitr_job(job: dict) -> None:
         parser_docs, parser_diag = moy_arbitr_docs_from_parser_fallback(case_data, case_num)
         if parser_docs:
             lines.append(
-                f"- Parser-API: {len(parser_docs)} ссылок до обхода КАД (разметка сайта не нужна для списка)."
+                f"- Parser-API: {len(parser_docs)} ссылок, они будут объединены с обходом КАД/Мой Арбитр."
             )
         try:
             context, browser, playwright_driver, docs = open_case_and_download_documents(
