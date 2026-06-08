@@ -208,7 +208,7 @@ def evaluate_m15_entry(
     return M15EntryResult(
         ready=True,
         ema20_retest_fail=True,
-        local_low_break=True,
+        local_low_break=local_low_break,
         local_low=local_low,
         pullback_high=pullback_high,
         entry_trigger=entry_trigger,
