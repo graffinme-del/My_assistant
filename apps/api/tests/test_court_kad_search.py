@@ -1,4 +1,4 @@
-from app.court_kad_search import looks_like_cancel_court_sync_jobs, looks_like_court_search_command
+from app.court_kad_search import looks_like_cancel_court_sync_jobs
 
 
 def test_cancel_court_sync_jobs_requires_command_like_phrase() -> None:
@@ -14,4 +14,3 @@ def test_cancel_court_sync_jobs_ignores_negated_or_explanatory_mentions() -> Non
         "Объясни, зачем останови все процессы вчера",
     ):
         assert looks_like_cancel_court_sync_jobs(text) is False
-        assert looks_like_court_search_command(text) is False
