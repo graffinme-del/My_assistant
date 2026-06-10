@@ -598,9 +598,10 @@ def format_recent_download_jobs_status(
     limit: int = 5,
     date_range: tuple[datetime, datetime] | None = None,
     period_label: str | None = None,
+    close_stale: bool = True,
 ) -> str:
     """Краткий статус последних судебных фоновых задач — связный текст, без сырых URL и логов."""
-    stale_closed = mark_stale_running_court_sync_jobs(db)
+    stale_closed = mark_stale_running_court_sync_jobs(db) if close_stale else 0
     stale_hrs = max(1, int(settings.court_sync_stale_running_hours))
     q = db.query(CourtSyncJob).filter(
         (CourtSyncJob.run_mode == "download") | (CourtSyncJob.query_type.like("moy_arbitr_%"))

@@ -4407,7 +4407,7 @@ def handle_court_sync_chat_command(
     if re.search(r"(?:отчет|отчёт)", lowered) and re.search(r"\bзадач[еаи]\b", lowered):
         if not re.search(r"\bзадач[еаи]\s*(?:#|№|\bномер\b)?\s*\d+", lowered):
             status_block = format_recent_download_jobs_status(
-                db, date_range=_kad_date_range, period_label=_kad_period_label
+                db, date_range=_kad_date_range, period_label=_kad_period_label, close_stale=False
             )
             hint = (
                 "Чтобы открыть отчёт по одной задаче, укажите номер — например: «отчёт по задаче 58»."

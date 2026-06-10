@@ -1733,10 +1733,16 @@ def download_documents_via_parser(
         urls, skipped_no_date = filter_pdf_urls_by_date_range(entries, d_lo, d_hi)
         if d_lo or d_hi:
             src = "задача (чат)" if job.get("parser_year_min") is not None else ".env"
+            selected_urls = set(urls)
+            included_no_date = sum(1 for u, d in entries if d is None and u in selected_urls)
+            no_date_note = (
+                f"без даты события включено как fallback {included_no_date}, отброшено {skipped_no_date}"
+                if included_no_date
+                else f"без даты события (отброшено) {skipped_no_date}"
+            )
             lines.append(
                 f"- Фильтр PDF по датам событий ({src}): с {d_lo or '—'} по {d_hi or '—'}; "
-                f"всего ссылок {len(entries)}, после фильтра {len(urls)}, "
-                f"без даты события (отброшено) {skipped_no_date}."
+                f"всего ссылок {len(entries)}, после фильтра {len(urls)}, {no_date_note}."
             )
         discovered += len(urls)
         if not urls:

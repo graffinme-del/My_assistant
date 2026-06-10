@@ -604,39 +604,31 @@ def looks_like_court_download_status_question(text: str) -> bool:
 
 def looks_like_cancel_court_sync_jobs(text: str) -> bool:
     """Снять очередь и остановить активные загрузки из КАД (не путать с «отчёт по задаче»)."""
-    lowered = (text or "").lower()
+    lowered = re.sub(r"\s+", " ", (text or "").lower()).strip(" \t\r\n.,!;:")
     if re.search(r"(?:отчет|отчёт)\s+(?:по\s+)?(?:задач[еаи])", lowered):
         return False
-    if re.search(r"\bостанови\b.*\b(все\s+)?процесс", lowered):
-        return True
-    if re.search(r"\bостанови\b.*\bвсе\s+задач", lowered):
-        return True
-    return any(
-        p in lowered
-        for p in (
-            "сними задачи",
-            "снять задачи",
-            "снять старые задачи",
-            "отмени все задачи",
-            "останови все задачи",
-            "останови задачи",
-            "отмени задачи кад",
-            "отмени задачи скачивания",
-            "останови скачивание",
-            "останови загрузку",
-            "останови фонов",
-            "останови всё",
-            "останови все",
-            "останови фоновые",
-            "останови фоновые задачи",
-            "остановить все задачи",
-            "остановить фоновые",
-            "сбрось очередь",
-            "очисти очередь кад",
-            "удали старые задачи",
-            "убери дубли задач",
-        )
+    if not lowered or "?" in lowered:
+        return False
+    if re.match(r"^(?:не|не надо|не нужно|не стоит)\b", lowered):
+        return False
+    if re.match(r"^(?:как|что|зачем|почему|если|можно ли|нужно ли|надо ли)\b", lowered):
+        return False
+
+    polite = r"(?:пожалуйста[, ]+)?"
+    suffix = r"(?:\s+(?:пожалуйста|кад|из\s+кад|скачивания))?"
+    patterns = (
+        rf"{polite}(?:сними|снять)\s+(?:старые\s+)?задачи{suffix}",
+        rf"{polite}отмени\s+(?:все\s+)?задачи(?:\s+(?:кад|скачивания))?",
+        rf"{polite}останови\s+(?:все\s+)?задачи{suffix}",
+        rf"{polite}останови\s+(?:все\s+)?процесс(?:ы)?{suffix}",
+        rf"{polite}останови\s+(?:скачивание|загрузку|фоновые(?:\s+задачи)?|фоновую\s+загрузку){suffix}",
+        rf"{polite}останови\s+(?:всё|все){suffix}",
+        rf"{polite}остановить\s+(?:все\s+задачи|фоновые(?:\s+задачи)?){suffix}",
+        rf"{polite}(?:сбрось|очисти)\s+очередь(?:\s+кад)?",
+        rf"{polite}удали\s+старые\s+задачи{suffix}",
+        rf"{polite}убери\s+дубли\s+задач{suffix}",
     )
+    return any(re.fullmatch(pattern, lowered) for pattern in patterns)
 
 
 def looks_like_court_search_command(text: str) -> bool:

@@ -258,14 +258,14 @@ def filter_pdf_urls_by_date_range(
 ) -> tuple[list[str], int]:
     """
     Оставляет URL, у которых дата попадает в [date_from; date_to].
-    Если задан фильтр, а у URL нет даты — URL отбрасывается.
+    Если Parser-API отдал только URL без дат, возвращаем их как fallback вместо ложного нуля.
     Возвращает (urls, skipped_no_date_count).
     """
     if date_from is None and date_to is None:
         return [u for u, _ in entries], 0
 
-    skipped = 0
     out: list[str] = []
+    undated: list[str] = []
     seen: set[str] = set()
     lo = date_from or date.min
     hi = date_to or date.max
@@ -273,14 +273,16 @@ def filter_pdf_urls_by_date_range(
     for u, d in entries:
         if u in seen:
             continue
+        seen.add(u)
         if d is None:
-            skipped += 1
+            undated.append(u)
             continue
         if d < lo or d > hi:
             continue
-        seen.add(u)
         out.append(u)
-    return out, skipped
+    if out or not undated:
+        return out, len(undated)
+    return undated, 0
 
 
 def case_dict_from_parser_case(case: dict[str, Any], card_url_hint: str | None = None) -> dict[str, Any]:
