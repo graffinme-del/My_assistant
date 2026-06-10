@@ -92,6 +92,25 @@ def _save_debug_artifacts(page, *, job_id: int | None, query_type: str, query_va
     return "debug_artifacts=" + ", ".join(saved)
 
 
+def _merge_document_sources(*sources: list[dict], max_total: int | None = None) -> list[dict]:
+    merged: list[dict] = []
+    seen_urls: set[str] = set()
+    for source in sources:
+        for row in source or []:
+            if max_total is not None and len(merged) >= max_total:
+                return merged
+            if not isinstance(row, dict):
+                continue
+            file_url = (row.get("file_url") or "").strip()
+            if file_url:
+                key = file_url.split("#", 1)[0]
+                if key in seen_urls:
+                    continue
+                seen_urls.add(key)
+            merged.append(dict(row))
+    return merged
+
+
 def _attach_browser_diagnostics(page) -> None:
     page.on("console", lambda msg: _remember_browser_event(f"console.{msg.type}", msg.text))
     page.on("pageerror", lambda exc: _remember_browser_event("pageerror", str(exc)))
@@ -851,8 +870,8 @@ def open_case_and_download_documents(
     prebuilt_documents: list[dict] | None = None,
 ):
     """
-    Если prebuilt_documents задан (например, из Parser-API), обход вкладок КАД не делаем —
-    браузер всё равно открываем ради cookies/referer при скачивании с kad.arbitr.ru.
+    Parser-API может дать часть ссылок без обхода сайта. Используем их как стартовый список,
+    но всё равно дополняем браузерным обходом КАД/«Мой Арбитр», чтобы не терять документы.
     """
     nav_ms = max(60_000, MOY_ARBITR_TIMEOUT_SEC * 1000)
     card_url = case_data.get("card_url") or MOY_ARBITR_BASE_URL
@@ -870,19 +889,15 @@ def open_case_and_download_documents(
         page.wait_for_timeout(2500)
         ensure_authorized(page)
 
+        docs = _merge_document_sources(prebuilt_documents or [])
         if prebuilt_documents:
-            cap = max(1, MOY_ARBITR_MAX_DOCS_PER_CASE)
-            trimmed = [dict(x) for x in prebuilt_documents[:cap]]
             if progress and job_id is not None:
                 progress(
                     job_id,
                     "opening_case",
-                    f"Мой Арбитр: {len(trimmed)} документов из Parser-API, обход КАД пропущен.",
+                    f"Мой Арбитр: {len(docs)} документов из Parser-API, дополняю браузерным обходом.",
                 )
-            return context, browser, pw, trimmed
 
-        docs: list[dict] = []
-        seen_fu: set[str] = set()
         import worker as worker_mod
 
         # В raw-строке нужно r"kad\.arbitr" — иначе r"kad\\." ищет обратный слэш, а не точку в домене.
@@ -891,43 +906,35 @@ def open_case_and_download_documents(
         )
         if is_kad_card:
             try:
-                docs = worker_mod.open_kad_card_and_collect_docs(
-                    page,
-                    card_url.strip(),
-                    nav_ms,
-                    progress=progress,
-                    job_id=job_id,
+                docs = _merge_document_sources(
+                    docs,
+                    worker_mod.open_kad_card_and_collect_docs(
+                        page,
+                        card_url.strip(),
+                        nav_ms,
+                        progress=progress,
+                        job_id=job_id,
+                    ),
                 )
             except Exception:
-                docs = []
-            seen_fu = {(d.get("file_url") or "").strip() for d in docs if d.get("file_url")}
+                pass
             cn = (case_data.get("case_number") or "").strip()
             if cn:
-                for row in _collect_documents_via_my_arbitr_hub(
-                    page, cn, nav_ms, progress=progress, job_id=job_id
-                ):
-                    u = (row.get("file_url") or "").strip()
-                    if u and u not in seen_fu:
-                        seen_fu.add(u)
-                        docs.append(row)
-                        if len(docs) >= MOY_ARBITR_MAX_DOCS_PER_CASE:
-                            break
+                docs = _merge_document_sources(
+                    docs,
+                    _collect_documents_via_my_arbitr_hub(
+                        page, cn, nav_ms, progress=progress, job_id=job_id
+                    ),
+                )
         else:
-            docs = collect_moy_arbitr_documents(page, card_url)
-            seen_fu = {(d.get("file_url") or "").strip() for d in docs if d.get("file_url")}
+            docs = _merge_document_sources(docs, collect_moy_arbitr_documents(page, card_url))
             try:
                 extra = worker_mod.collect_kad_documents_from_linked_cards(
                     page,
                     "\n".join([(card_url or "").strip(), (page.url or "").strip()]),
                     nav_ms,
                 )
-                for row in extra:
-                    u = (row.get("file_url") or "").strip()
-                    if u and u not in seen_fu:
-                        seen_fu.add(u)
-                        docs.append(row)
-                        if len(docs) >= MOY_ARBITR_MAX_DOCS_PER_CASE:
-                            break
+                docs = _merge_document_sources(docs, extra)
             except Exception:
                 pass
         if not docs:
