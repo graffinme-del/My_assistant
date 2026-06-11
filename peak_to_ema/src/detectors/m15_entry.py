@@ -174,7 +174,7 @@ def evaluate_m15_entry(
             entry_trigger=0.0,
             stop=0.0,
             atr_15m=atr_value,
-            price_above_ema20_15m=True,
+            price_above_ema20_15m=False,
             reason="price_closed_above_pullback_high",
         )
 
@@ -208,7 +208,7 @@ def evaluate_m15_entry(
     return M15EntryResult(
         ready=True,
         ema20_retest_fail=True,
-        local_low_break=True,
+        local_low_break=local_low_break,
         local_low=local_low,
         pullback_high=pullback_high,
         entry_trigger=entry_trigger,

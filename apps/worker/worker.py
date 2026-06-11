@@ -733,11 +733,15 @@ def moy_arbitr_docs_from_parser_fallback(case_data: dict, case_number: str) -> t
     if cid:
         try:
             pdata = parser_details_by_id(cid)
-            entries = extract_kad_pdf_url_entries_with_dates(pdata or {})
             notes.append(
                 f"details_by_id={cid[:8]}… Success={pdata.get('Success')} "
-                f"cases={len(pdata.get('Cases') or [])} urls={len(entries)}"
+                f"cases={len(pdata.get('Cases') or [])}"
             )
+            if pdata.get("Success") == 1:
+                entries = extract_kad_pdf_url_entries_with_dates(pdata or {})
+                notes[-1] += f" urls={len(entries)}"
+            else:
+                notes[-1] += " urls=0"
         except Exception as exc:
             entries = []
             notes.append(f"details_by_id: {_safe_parser_diag_error(exc)}")
@@ -748,10 +752,14 @@ def moy_arbitr_docs_from_parser_fallback(case_data: dict, case_number: str) -> t
             except Exception as exc:
                 notes.append(f"details_by_number {variant!r}: {_safe_parser_diag_error(exc)}")
                 continue
-            entries = extract_kad_pdf_url_entries_with_dates(pdata or {})
             notes.append(
-                f"details_by_number={variant!r} Success={pdata.get('Success')} urls={len(entries)}"
+                f"details_by_number={variant!r} Success={pdata.get('Success')}"
             )
+            if pdata.get("Success") != 1:
+                notes[-1] += " urls=0"
+                continue
+            entries = extract_kad_pdf_url_entries_with_dates(pdata or {})
+            notes[-1] += f" urls={len(entries)}"
             if entries:
                 break
     out: list[dict] = []
