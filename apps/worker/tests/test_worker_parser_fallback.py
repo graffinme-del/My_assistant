@@ -6,6 +6,11 @@ import unittest
 
 
 def _load_worker():
+    if "httpx" not in sys.modules:
+        httpx = types.ModuleType("httpx")
+        httpx.HTTPStatusError = RuntimeError
+        httpx.Client = object
+        sys.modules["httpx"] = httpx
     if "playwright.sync_api" not in sys.modules:
         playwright = types.ModuleType("playwright")
         sync_api = types.ModuleType("playwright.sync_api")
