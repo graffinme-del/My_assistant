@@ -258,8 +258,10 @@ def filter_pdf_urls_by_date_range(
 ) -> tuple[list[str], int]:
     """
     Оставляет URL, у которых дата попадает в [date_from; date_to].
-    Если задан фильтр, а у URL нет даты — URL отбрасывается.
-    Возвращает (urls, skipped_no_date_count).
+    Если задан фильтр, а у URL нет даты, оставляет URL: Parser-API часто
+    возвращает найденные в JSON PDF без даты события, и отбрасывание таких
+    ссылок приводит к потере материалов.
+    Возвращает (urls, included_no_date_count).
     """
     if date_from is None and date_to is None:
         return [u for u, _ in entries], 0
@@ -275,6 +277,8 @@ def filter_pdf_urls_by_date_range(
             continue
         if d is None:
             skipped += 1
+            seen.add(u)
+            out.append(u)
             continue
         if d < lo or d > hi:
             continue
