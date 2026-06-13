@@ -1,5 +1,20 @@
 from datetime import date
+import sys
+import types
 import unittest
+
+if "playwright.sync_api" not in sys.modules:
+    playwright_mod = types.ModuleType("playwright")
+    sync_api_mod = types.ModuleType("playwright.sync_api")
+    sync_api_mod.TimeoutError = TimeoutError
+    sync_api_mod.sync_playwright = lambda: None
+    sys.modules.setdefault("playwright", playwright_mod)
+    sys.modules.setdefault("playwright.sync_api", sync_api_mod)
+
+if "httpx" not in sys.modules:
+    httpx_mod = types.ModuleType("httpx")
+    httpx_mod.HTTPStatusError = RuntimeError
+    sys.modules["httpx"] = httpx_mod
 
 from moy_arbitr_client import _merge_prebuilt_documents
 from parser_api_client import filter_pdf_urls_by_date_range
