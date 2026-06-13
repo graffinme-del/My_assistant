@@ -1730,20 +1730,20 @@ def download_documents_via_parser(
 
         entries = extract_kad_pdf_url_entries_with_dates(details)
         d_lo, d_hi = _parser_pdf_date_bounds_for_job(job)
-        urls, skipped_no_date = filter_pdf_urls_by_date_range(entries, d_lo, d_hi)
+        urls, included_no_date = filter_pdf_urls_by_date_range(entries, d_lo, d_hi)
         if d_lo or d_hi:
             src = "задача (чат)" if job.get("parser_year_min") is not None else ".env"
             lines.append(
                 f"- Фильтр PDF по датам событий ({src}): с {d_lo or '—'} по {d_hi or '—'}; "
                 f"всего ссылок {len(entries)}, после фильтра {len(urls)}, "
-                f"без даты события (отброшено) {skipped_no_date}."
+                f"без даты события (включено) {included_no_date}."
             )
         discovered += len(urls)
         if not urls:
             if entries and (d_lo or d_hi):
                 lines.append(
                     f"- У дела {num or rid} ни один PDF не попал в выбранный период "
-                    f"(или у событий нет даты — см. отчёт выше)."
+                    f"(см. отчёт выше)."
                 )
             else:
                 lines.append(

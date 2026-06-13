@@ -843,6 +843,26 @@ def download_moy_arbitr_document(context, file_url: str) -> Path:
     return target
 
 
+def _merge_prebuilt_documents(
+    discovered: list[dict],
+    prebuilt_documents: list[dict] | None,
+    *,
+    cap: int | None = None,
+) -> list[dict]:
+    limit = max(1, cap or MOY_ARBITR_MAX_DOCS_PER_CASE)
+    merged = [dict(x) for x in discovered[:limit]]
+    seen_fu = {(d.get("file_url") or "").strip() for d in merged if d.get("file_url")}
+    for row in prebuilt_documents or []:
+        if len(merged) >= limit:
+            break
+        u = (row.get("file_url") or "").strip()
+        if not u or u in seen_fu:
+            continue
+        seen_fu.add(u)
+        merged.append(dict(row))
+    return merged
+
+
 def open_case_and_download_documents(
     case_data: dict,
     job_id: int | None = None,
@@ -851,8 +871,9 @@ def open_case_and_download_documents(
     prebuilt_documents: list[dict] | None = None,
 ):
     """
-    Если prebuilt_documents задан (например, из Parser-API), обход вкладок КАД не делаем —
-    браузер всё равно открываем ради cookies/referer при скачивании с kad.arbitr.ru.
+    Если prebuilt_documents задан (например, из Parser-API), используем его как
+    дополнительные ссылки, но всё равно обходим КАД/«Мой Арбитр»: Parser-API
+    может вернуть неполный список материалов.
     """
     nav_ms = max(60_000, MOY_ARBITR_TIMEOUT_SEC * 1000)
     card_url = case_data.get("card_url") or MOY_ARBITR_BASE_URL
@@ -870,16 +891,12 @@ def open_case_and_download_documents(
         page.wait_for_timeout(2500)
         ensure_authorized(page)
 
-        if prebuilt_documents:
-            cap = max(1, MOY_ARBITR_MAX_DOCS_PER_CASE)
-            trimmed = [dict(x) for x in prebuilt_documents[:cap]]
-            if progress and job_id is not None:
-                progress(
-                    job_id,
-                    "opening_case",
-                    f"Мой Арбитр: {len(trimmed)} документов из Parser-API, обход КАД пропущен.",
-                )
-            return context, browser, pw, trimmed
+        if prebuilt_documents and progress and job_id is not None:
+            progress(
+                job_id,
+                "opening_case",
+                f"Мой Арбитр: {len(prebuilt_documents)} документов из Parser-API; объединяю с обходом КАД.",
+            )
 
         docs: list[dict] = []
         seen_fu: set[str] = set()
@@ -930,6 +947,17 @@ def open_case_and_download_documents(
                             break
             except Exception:
                 pass
+
+        if prebuilt_documents:
+            before = len(docs)
+            docs = _merge_prebuilt_documents(docs, prebuilt_documents, cap=MOY_ARBITR_MAX_DOCS_PER_CASE)
+            added = len(docs) - before
+            if progress and job_id is not None:
+                progress(
+                    job_id,
+                    "opening_case",
+                    f"Мой Арбитр: добавлено из Parser-API после обхода КАД: {added}.",
+                )
         if not docs:
             try:
                 qv = (case_data.get("case_number") or case_data.get("card_url") or "").strip() or "case"
