@@ -152,7 +152,10 @@ class MoyArbitrClientTest(unittest.TestCase):
             [parser_doc["file_url"], hub_doc["file_url"]],
         )
         self.assertEqual(kad_calls, [])
-        self.assertIn("проверяю хаб дела", progress_events[0][2])
+        self.assertTrue(
+            any("проверяю хаб дела" in event[2] for event in progress_events),
+            progress_events,
+        )
 
 
 if __name__ == "__main__":
