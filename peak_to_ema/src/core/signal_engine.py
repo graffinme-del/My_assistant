@@ -90,7 +90,8 @@ def evaluate_symbol(
         price_above_ema20_15m=m15.price_above_ema20_15m,
     )
 
-    mandatory_ok = h1.rejection_candle and m15.ema20_retest_fail
+    valid_levels = m15.entry_trigger > 0 and m15.stop > 0
+    mandatory_ok = h1.ok and h1.rejection_candle and m15.ready and m15.ema20_retest_fail and valid_levels
     ready = mandatory_ok and h1.no_continuation and score >= 75
 
     reason_code = "ok" if ready else "mandatory_or_score_failed"
@@ -98,6 +99,8 @@ def evaluate_symbol(
         reason_code = f"h1_{h1.reason}"
     elif not m15.ready:
         reason_code = f"m15_{m15.reason}"
+    elif not valid_levels:
+        reason_code = "m15_invalid_entry_levels"
     elif score < 75:
         reason_code = "score_below_threshold"
 
@@ -108,8 +111,6 @@ def evaluate_symbol(
         if dedup.is_duplicate(dedup_key):
             ready = False
             reason_code = "duplicate_signal"
-        else:
-            dedup.mark(dedup_key)
 
     return SignalResult(
         symbol=symbol,
