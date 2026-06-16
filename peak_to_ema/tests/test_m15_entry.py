@@ -1,3 +1,4 @@
+from src.core.signal_engine import _score_signal
 from src.detectors.m15_entry import evaluate_m15_entry
 
 
@@ -38,7 +39,25 @@ def test_m15_entry_ready_on_close_below_ema20_without_local_low_break_in_soft_mo
     res = evaluate_m15_entry(candles)
     assert res.ready is True
     assert res.ema20_retest_fail is True
+    assert res.local_low_break is False
     assert res.entry_trigger > 0
+
+
+def test_m15_soft_mode_does_not_award_local_low_break_points() -> None:
+    score = _score_signal(
+        h1_impulse_up=True,
+        h1_rejection=True,
+        h1_no_continuation=True,
+        m15_retest_fail=True,
+        m15_local_low_break=False,
+        oi_down=False,
+        cvd_down=False,
+        volume_bounce_weak=False,
+        btc_pumping=True,
+        price_above_ema20_15m=False,
+    )
+
+    assert score == 65
 
 
 def test_m15_entry_rejected_if_price_closes_above_ema20() -> None:
