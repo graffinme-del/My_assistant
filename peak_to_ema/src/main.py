@@ -5,7 +5,7 @@ import urllib.request
 
 from src.core.dedup import SignalDedup
 from src.core.signal_engine import evaluate_symbol
-from src.data.market_gateway import MarketGateway
+from src.market_gateway import MarketGateway
 
 
 def _env_float(name: str, default: float) -> float:
@@ -80,6 +80,8 @@ def _run_tick(gw: MarketGateway, dedup: SignalDedup, symbol: str, tg_token: str,
             reason_code=result.reason_code,
         )
         tg_ok = _send_telegram(tg_token, tg_chat_id, msg)
+        if result.dedup_key and (tg_ok or not (tg_token and tg_chat_id)):
+            dedup.mark(result.dedup_key)
         print(
             f"[SIGNAL] {result.signal} {symbol} score={result.score} "
             f"entry={result.entry_trigger:.6g} stop={result.stop:.6g} key={result.dedup_key} "
