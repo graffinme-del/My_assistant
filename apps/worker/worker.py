@@ -828,10 +828,25 @@ def process_moy_arbitr_job(job: dict) -> None:
     target_cases = results[:10]
     preferred_case_id = None
     if query_type == "moy_arbitr_case_number":
-        preferred_case_id = ensure_case_id(query_value)
         qn = normalize_case_for_match(query_value)
         exact = [item for item in results if normalize_case_for_match(item.get("case_number", "")) == qn]
-        target_cases = exact or results[:1]
+        if not exact:
+            complete_job(
+                job_id,
+                "needs_manual_step",
+                "\n".join(
+                    preview_lines
+                    + [
+                        "",
+                        "Автоскачивание остановлено: «Мой Арбитр» вернул дела, но ни один номер "
+                        "не совпал с запрошенным. Это защищает от загрузки документов в неверное дело.",
+                    ]
+                ),
+                {"backend": "moy_arbitr", "cases_found": len(results), "exact_matches": 0},
+            )
+            return
+        preferred_case_id = ensure_case_id(query_value)
+        target_cases = exact
 
     downloaded = 0
     discovered = 0
@@ -1903,7 +1918,6 @@ def process_job(job: dict) -> None:
 
     target_cases = results
     if query_type == "case_number":
-        preferred_case_id = ensure_case_id(query_value)
         qn = normalize_case_for_match(query_value)
         exact = [
             item
@@ -1911,9 +1925,23 @@ def process_job(job: dict) -> None:
             if normalize_case_for_match(item.get("case_number", "")) == qn
         ]
         if exact:
+            preferred_case_id = ensure_case_id(query_value)
             target_cases = exact
         else:
-            target_cases = results[:1]
+            complete_job(
+                job_id,
+                "needs_manual_step",
+                "\n".join(
+                    preview_lines
+                    + [
+                        "",
+                        "Автоскачивание остановлено: КАД вернул дела, но ни один номер не совпал "
+                        "с запрошенным. Это защищает от загрузки документов в неверное дело.",
+                    ]
+                ),
+                {"cases_found": len(results), "exact_matches": 0},
+            )
+            return
     else:
         preferred_case_id = None
         target_cases = results[:10]
