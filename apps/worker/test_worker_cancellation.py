@@ -51,7 +51,7 @@ class WorkerCancellationTests(unittest.TestCase):
             patch.object(worker, "search_cases_for_job", return_value=cases),
             patch.object(worker, "ensure_case_id", return_value=7),
             patch.object(worker, "register_case_source", return_value=10),
-            patch.object(worker, "report_progress"),
+            patch.object(worker, "report_progress") as report_progress,
             patch.object(worker, "sync_playwright", return_value=_FakeSyncPlaywright(browser)),
             patch.object(worker, "extract_case_number_from_page", return_value=None),
             patch.object(worker, "open_kad_card_and_collect_docs", return_value=docs) as collect_docs,
@@ -64,7 +64,7 @@ class WorkerCancellationTests(unittest.TestCase):
             browser.page,
             cases[0]["card_url"],
             max(60_000, worker.COURT_SYNC_TIMEOUT_SEC * 1000),
-            progress=worker.report_progress,
+            progress=report_progress,
             job_id=42,
         )
         download_doc.assert_not_called()
