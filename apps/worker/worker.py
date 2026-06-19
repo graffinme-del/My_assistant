@@ -878,6 +878,8 @@ def process_moy_arbitr_job(job: dict) -> None:
                     )
                 continue
             for doc in docs[:COURT_SYNC_MAX_DOCS_PER_RUN]:
+                if court_sync_job_stopped_remotely(job_id):
+                    return
                 try:
                     report_progress(job_id, "downloading", f'Мой Арбитр: скачиваю {doc.get("title") or doc.get("file_url")}')
                     fu = (doc.get("file_url") or "").strip()
@@ -1501,6 +1503,8 @@ def open_kad_card_and_collect_docs(
         )
         deadline_all = time.time() + max_tabs_s
         for label in KAD_TAB_LABELS:
+            if job_id is not None and court_sync_job_stopped_remotely(job_id):
+                break
             if time.time() >= deadline_all:
                 break
             if progress and job_id is not None:
@@ -1530,6 +1534,8 @@ def open_kad_card_and_collect_docs(
                 continue
         if not merged:
             try:
+                if job_id is not None and court_sync_job_stopped_remotely(job_id):
+                    return merged
                 page.goto(card_url, wait_until="domcontentloaded", timeout=goto_timeout_ms)
                 page.wait_for_timeout(3500)
                 chunk = collect_document_links_from_playwright_page(page, card_url)
@@ -1960,6 +1966,8 @@ def process_job(job: dict) -> None:
 
     nav_ms = max(60_000, COURT_SYNC_TIMEOUT_SEC * 1000)
     for case_data in target_cases:
+        if court_sync_job_stopped_remotely(job_id):
+            return
         case_source_id = register_case_source(job_id, case_data)
         card_url = case_data["card_url"]
         report_progress(job_id, "opening_case", f"Открываю карточку (одна сессия для страницы и скачивания): {card_url}")
@@ -1984,7 +1992,12 @@ def process_job(job: dict) -> None:
                     cid = ensure_case_id(case_hint)
                     if cid:
                         effective_preferred_id = cid
-                docs = open_kad_card_and_collect_docs(page, card_url, nav_ms)
+                docs = open_kad_card_and_collect_docs(
+                    page, card_url, nav_ms, progress=report_progress, job_id=job_id
+                )
+                if court_sync_job_stopped_remotely(job_id):
+                    browser.close()
+                    return
             except Exception as exc:
                 failures += 1
                 lines.append(f'- Не удалось открыть карточку {case_data.get("case_number") or ""}: {exc}')
@@ -1999,6 +2012,9 @@ def process_job(job: dict) -> None:
                 browser.close()
                 continue
             for doc in docs[:COURT_SYNC_MAX_DOCS_PER_RUN]:
+                if court_sync_job_stopped_remotely(job_id):
+                    browser.close()
+                    return
                 try:
                     report_progress(job_id, "downloading", f'Скачиваю: {doc.get("title") or doc.get("file_url")}')
                     path = download_document_via_context(context, doc["file_url"])
