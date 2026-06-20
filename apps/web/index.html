@@ -1727,10 +1727,10 @@
 
       async function pollNewChatMessages() {
         try {
-          if (!lastChatMessageSyncId) return;
-          const rows = await api(
-            `/assistant/conversation-messages?limit=80&after_id=${lastChatMessageSyncId}`
-          );
+          const path = lastChatMessageSyncId
+            ? `/assistant/conversation-messages?limit=80&after_id=${lastChatMessageSyncId}`
+            : "/assistant/conversation-messages?limit=80";
+          const rows = await api(path);
           if (!rows || !rows.length) return;
           const log = el("chatLog");
           const wasNearBottom =

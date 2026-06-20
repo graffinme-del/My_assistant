@@ -722,7 +722,13 @@ def _safe_parser_diag_error(exc: Exception) -> str:
     return s[:180]
 
 
-def moy_arbitr_docs_from_parser_fallback(case_data: dict, case_number: str) -> tuple[list[dict], str]:
+def moy_arbitr_docs_from_parser_fallback(
+    case_data: dict,
+    case_number: str,
+    *,
+    date_from: date | None = None,
+    date_to: date | None = None,
+) -> tuple[list[dict], str]:
     """Ссылки на материалы через Parser-API (желательно до обхода КАД в браузере). Возвращает (docs, диагностика)."""
     if not MOY_ARBITR_PARSER_FALLBACK or not os.getenv("PARSER_API_KEY", "").strip():
         return [], "parser: выключено (нет MOY_ARBITR_PARSER_FALLBACK или PARSER_API_KEY)"
@@ -754,6 +760,15 @@ def moy_arbitr_docs_from_parser_fallback(case_data: dict, case_number: str) -> t
             )
             if entries:
                 break
+    if date_from or date_to:
+        urls, skipped_no_date = filter_pdf_urls_by_date_range(entries, date_from, date_to)
+        allowed_urls = set(urls)
+        notes.append(
+            f"date_filter={date_from or '—'}..{date_to or '—'} "
+            f"entries={len(entries)} kept={len(urls)} skipped_no_date={skipped_no_date}"
+        )
+        entries = [(u, d) for u, d in entries if u in allowed_urls]
+
     out: list[dict] = []
     seen_u: set[str] = set()
     for u, _d in entries:
@@ -847,10 +862,21 @@ def process_moy_arbitr_job(job: dict) -> None:
         case_num = (case_data.get("case_number") or "").strip()
         if case_num and not effective_preferred_id:
             effective_preferred_id = ensure_case_id(case_num)
-        parser_docs, parser_diag = moy_arbitr_docs_from_parser_fallback(case_data, case_num)
+        d_lo, d_hi = _parser_pdf_date_bounds_for_job(job)
+        parser_docs, parser_diag = moy_arbitr_docs_from_parser_fallback(
+            case_data,
+            case_num,
+            date_from=d_lo,
+            date_to=d_hi,
+        )
         if parser_docs:
             lines.append(
                 f"- Parser-API: {len(parser_docs)} ссылок до обхода КАД (разметка сайта не нужна для списка)."
+            )
+        if d_lo or d_hi:
+            src = "задача (чат)" if job.get("parser_year_min") is not None else ".env"
+            lines.append(
+                f"- Фильтр PDF по датам событий ({src}): с {d_lo or '—'} по {d_hi or '—'}; {parser_diag}"
             )
         try:
             context, browser, playwright_driver, docs = open_case_and_download_documents(
