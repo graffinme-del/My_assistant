@@ -227,6 +227,13 @@ def normalize_case_for_match(value: str) -> str:
     return s.lower()
 
 
+def exact_case_number_matches(results: list[dict], query_value: str) -> list[dict]:
+    qn = normalize_case_for_match(query_value)
+    if not qn:
+        return []
+    return [item for item in results if normalize_case_for_match(item.get("case_number", "")) == qn]
+
+
 def normalize_case_number_for_parser(value: str) -> str:
     """Как normalize_arbitr_case_number в API: латинская A, без пробелов — для Parser-API details_by_number."""
     s = (value or "").replace(" ", "").replace("\n", "").replace("\\", "")
@@ -828,10 +835,24 @@ def process_moy_arbitr_job(job: dict) -> None:
     target_cases = results[:10]
     preferred_case_id = None
     if query_type == "moy_arbitr_case_number":
+        exact = exact_case_number_matches(results, query_value)
+        if not exact:
+            complete_job(
+                job_id,
+                "needs_manual_step",
+                "\n".join(
+                    preview_lines
+                    + [
+                        "",
+                        "Автоскачивание остановлено: «Мой Арбитр» вернул дела, но ни один номер "
+                        "не совпал с запрошенным. Это защищает от загрузки документов в неверное дело.",
+                    ]
+                ),
+                {"backend": "moy_arbitr", "cases_found": len(results), "exact_matches": 0},
+            )
+            return
         preferred_case_id = ensure_case_id(query_value)
-        qn = normalize_case_for_match(query_value)
-        exact = [item for item in results if normalize_case_for_match(item.get("case_number", "")) == qn]
-        target_cases = exact or results[:1]
+        target_cases = exact
 
     downloaded = 0
     discovered = 0
@@ -1903,17 +1924,25 @@ def process_job(job: dict) -> None:
 
     target_cases = results
     if query_type == "case_number":
-        preferred_case_id = ensure_case_id(query_value)
-        qn = normalize_case_for_match(query_value)
-        exact = [
-            item
-            for item in results
-            if normalize_case_for_match(item.get("case_number", "")) == qn
-        ]
+        exact = exact_case_number_matches(results, query_value)
         if exact:
+            preferred_case_id = ensure_case_id(query_value)
             target_cases = exact
         else:
-            target_cases = results[:1]
+            complete_job(
+                job_id,
+                "needs_manual_step",
+                "\n".join(
+                    preview_lines
+                    + [
+                        "",
+                        "Автоскачивание остановлено: КАД вернул дела, но ни один номер не совпал "
+                        "с запрошенным. Это защищает от загрузки документов в неверное дело.",
+                    ]
+                ),
+                {"cases_found": len(results), "exact_matches": 0},
+            )
+            return
     else:
         preferred_case_id = None
         target_cases = results[:10]
