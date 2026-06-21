@@ -1,4 +1,21 @@
 import unittest
+import importlib.util
+import sys
+from types import ModuleType
+
+
+if importlib.util.find_spec("playwright.sync_api") is None:
+    playwright_mod = ModuleType("playwright")
+    sync_api_mod = ModuleType("playwright.sync_api")
+    sync_api_mod.TimeoutError = TimeoutError
+    sync_api_mod.sync_playwright = lambda: None
+    sys.modules["playwright"] = playwright_mod
+    sys.modules["playwright.sync_api"] = sync_api_mod
+if importlib.util.find_spec("httpx") is None:
+    httpx_mod = ModuleType("httpx")
+    httpx_mod.Client = object
+    httpx_mod.HTTPStatusError = RuntimeError
+    sys.modules["httpx"] = httpx_mod
 
 from moy_arbitr_client import merge_prebuilt_documents
 from worker import exact_case_number_matches
