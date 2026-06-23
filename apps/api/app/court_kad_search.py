@@ -607,6 +607,14 @@ def looks_like_cancel_court_sync_jobs(text: str) -> bool:
     lowered = (text or "").lower()
     if re.search(r"(?:отчет|отчёт)\s+(?:по\s+)?(?:задач[еаи])", lowered):
         return False
+    if re.search(
+        r"(?:^|[.!?;,\n]\s*)не\s+(?:надо\s+|нужно\s+|стоит\s+)?"
+        r"(?:останови|останавливай|остановить|отмени|отменяй|отменить|"
+        r"сними|снимай|снять|сбрось|сбрасывай|очисти|очищай|"
+        r"удали|удаляй|убери|убирай)\b",
+        lowered,
+    ):
+        return False
     if re.search(r"\bостанови\b.*\b(все\s+)?процесс", lowered):
         return True
     if re.search(r"\bостанови\b.*\bвсе\s+задач", lowered):
