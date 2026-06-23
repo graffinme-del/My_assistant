@@ -91,7 +91,7 @@ def evaluate_symbol(
     )
 
     mandatory_ok = h1.rejection_candle and m15.ema20_retest_fail
-    ready = mandatory_ok and h1.no_continuation and score >= 75
+    ready = mandatory_ok and h1.no_continuation and m15.ready and score >= 75
 
     reason_code = "ok" if ready else "mandatory_or_score_failed"
     if not h1.ok:
