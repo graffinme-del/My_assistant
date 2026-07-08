@@ -1698,6 +1698,7 @@
       }
 
       let lastChatMessageSyncId = 0;
+      let chatHistoryLoaded = false;
 
       function patchLastUserMessageId(messageId) {
         if (messageId == null) return;
@@ -1720,6 +1721,7 @@
             if (row.id != null && row.id > maxId) maxId = row.id;
           }
           lastChatMessageSyncId = maxId;
+          chatHistoryLoaded = true;
         } catch (_e) {
           /* совместимость со старым API */
         }
@@ -1727,10 +1729,12 @@
 
       async function pollNewChatMessages() {
         try {
-          if (!lastChatMessageSyncId) return;
-          const rows = await api(
-            `/assistant/conversation-messages?limit=80&after_id=${lastChatMessageSyncId}`
-          );
+          if (!chatHistoryLoaded) return;
+          const url =
+            lastChatMessageSyncId > 0
+              ? `/assistant/conversation-messages?limit=80&after_id=${lastChatMessageSyncId}`
+              : "/assistant/conversation-messages?limit=80";
+          const rows = await api(url);
           if (!rows || !rows.length) return;
           const log = el("chatLog");
           const wasNearBottom =
