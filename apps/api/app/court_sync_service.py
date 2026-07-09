@@ -282,7 +282,8 @@ def upsert_case_source(
         source = CourtCaseSource(remote_case_id=remote_case_id, source_system=(source_system or "kad")[:30])
     source.source_system = (source_system or "kad")[:30]
     source.watch_profile_id = watch_profile_id
-    source.case_id = linked_case_id
+    if linked_case_id is not None:
+        source.case_id = linked_case_id
     source.case_number = case_number[:255]
     source.card_url = card_url[:1000]
     source.title = title[:255]
@@ -310,8 +311,10 @@ def upsert_document_source(
     if not source:
         source = CourtDocumentSource(remote_document_id=remote_document_id)
     previous_local_id = source.local_document_id
-    source.case_source_id = case_source_id
-    source.local_document_id = local_document_id
+    if case_source_id is not None:
+        source.case_source_id = case_source_id
+    if local_document_id is not None:
+        source.local_document_id = local_document_id
     source.title = title[:500]
     source.filename = filename[:255]
     source.file_url = file_url[:1000]
