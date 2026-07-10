@@ -503,29 +503,6 @@ def _extract_case_results(page) -> list[dict]:
             if len(out) >= MOY_ARBITR_MAX_CASES:
                 return out
 
-    if not out:
-        try:
-            html = page.content()
-        except Exception:
-            html = ""
-        for m in re.finditer(r"([АA]\d{1,4}-\d{1,7}/\d{2,4})", html, flags=re.IGNORECASE):
-            num = m.group(1).replace(" ", "")
-            if num in seen:
-                continue
-            seen.add(num)
-            out.append(
-                {
-                    "remote_case_id": f"moy-arbitr:{num}",
-                    "source_system": "moy_arbitr",
-                    "card_url": page.url,
-                    "case_number": num,
-                    "title": f"Дело {num}",
-                    "court_name": "",
-                    "participants": [],
-                }
-            )
-            if len(out) >= MOY_ARBITR_MAX_CASES:
-                break
     return out
 
 
