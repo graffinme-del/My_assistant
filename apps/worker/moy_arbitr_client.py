@@ -503,29 +503,6 @@ def _extract_case_results(page) -> list[dict]:
             if len(out) >= MOY_ARBITR_MAX_CASES:
                 return out
 
-    if not out:
-        try:
-            html = page.content()
-        except Exception:
-            html = ""
-        for m in re.finditer(r"([АA]\d{1,4}-\d{1,7}/\d{2,4})", html, flags=re.IGNORECASE):
-            num = m.group(1).replace(" ", "")
-            if num in seen:
-                continue
-            seen.add(num)
-            out.append(
-                {
-                    "remote_case_id": f"moy-arbitr:{num}",
-                    "source_system": "moy_arbitr",
-                    "card_url": page.url,
-                    "case_number": num,
-                    "title": f"Дело {num}",
-                    "court_name": "",
-                    "participants": [],
-                }
-            )
-            if len(out) >= MOY_ARBITR_MAX_CASES:
-                break
     return out
 
 
@@ -851,8 +828,9 @@ def open_case_and_download_documents(
     prebuilt_documents: list[dict] | None = None,
 ):
     """
-    Если prebuilt_documents задан (например, из Parser-API), обход вкладок КАД не делаем —
-    браузер всё равно открываем ради cookies/referer при скачивании с kad.arbitr.ru.
+    Если prebuilt_documents задан (например, из Parser-API), обход вкладок КАД не делаем.
+    Хаб «Мой Арбитр» всё равно добавляем: часть вложений есть только там.
+    Браузер открываем ради cookies/referer при скачивании с kad.arbitr.ru.
     """
     nav_ms = max(60_000, MOY_ARBITR_TIMEOUT_SEC * 1000)
     card_url = case_data.get("card_url") or MOY_ARBITR_BASE_URL
@@ -873,6 +851,18 @@ def open_case_and_download_documents(
         if prebuilt_documents:
             cap = max(1, MOY_ARBITR_MAX_DOCS_PER_CASE)
             trimmed = [dict(x) for x in prebuilt_documents[:cap]]
+            seen_fu = {(d.get("file_url") or "").strip() for d in trimmed if d.get("file_url")}
+            cn = (case_data.get("case_number") or "").strip()
+            if cn and len(trimmed) < cap:
+                for row in _collect_documents_via_my_arbitr_hub(
+                    page, cn, nav_ms, progress=progress, job_id=job_id
+                ):
+                    u = (row.get("file_url") or "").strip()
+                    if u and u not in seen_fu:
+                        seen_fu.add(u)
+                        trimmed.append(row)
+                        if len(trimmed) >= cap:
+                            break
             if progress and job_id is not None:
                 progress(
                     job_id,
