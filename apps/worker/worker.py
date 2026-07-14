@@ -19,6 +19,7 @@ from parser_api_client import (
     parser_details_by_number,
     parser_pdf_download,
     parser_search,
+    safe_parser_diag_error,
 )
 from moy_arbitr_client import (
     MoyArbitrAuthRequired,
@@ -716,12 +717,6 @@ def _parser_case_number_variants(cn: str) -> list[str]:
     return out
 
 
-def _safe_parser_diag_error(exc: Exception) -> str:
-    s = f"{type(exc).__name__}: {str(exc)}"
-    s = re.sub(r"([?&]key=)[^&\\s]+", r"\1***", s, flags=re.IGNORECASE)
-    return s[:180]
-
-
 def moy_arbitr_docs_from_parser_fallback(case_data: dict, case_number: str) -> tuple[list[dict], str]:
     """Ссылки на материалы через Parser-API (желательно до обхода КАД в браузере). Возвращает (docs, диагностика)."""
     if not MOY_ARBITR_PARSER_FALLBACK or not os.getenv("PARSER_API_KEY", "").strip():
@@ -740,13 +735,13 @@ def moy_arbitr_docs_from_parser_fallback(case_data: dict, case_number: str) -> t
             )
         except Exception as exc:
             entries = []
-            notes.append(f"details_by_id: {_safe_parser_diag_error(exc)}")
+            notes.append(f"details_by_id: {safe_parser_diag_error(exc)}")
     if not entries:
         for variant in _parser_case_number_variants(case_number):
             try:
                 pdata = parser_details_by_number(re.sub(r"\s+", "", variant.replace("\\", "")))
             except Exception as exc:
-                notes.append(f"details_by_number {variant!r}: {_safe_parser_diag_error(exc)}")
+                notes.append(f"details_by_number {variant!r}: {safe_parser_diag_error(exc)}")
                 continue
             entries = extract_kad_pdf_url_entries_with_dates(pdata or {})
             notes.append(

@@ -36,6 +36,13 @@ def _timeout_sec() -> float:
         return 120.0
 
 
+def safe_parser_diag_error(exc: Exception) -> str:
+    """Format a parser error without exposing its query-string API key."""
+    message = f"{type(exc).__name__}: {exc}"
+    message = re.sub(r"([?&]key=)[^&\s]+", r"\1***", message, flags=re.IGNORECASE)
+    return message[:180]
+
+
 def _request(endpoint: str, params: dict[str, Any]) -> dict[str, Any]:
     url = f"{_base_url()}/{endpoint}"
     q = {"key": _api_key(), **{k: v for k, v in params.items() if v is not None}}
