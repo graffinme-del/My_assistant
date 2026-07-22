@@ -62,9 +62,24 @@ def _format_telegram_signal(symbol: str, score: int, entry: float, stop: float, 
     )
 
 
+def _closed_candles(candles: list[dict], now_ms: int) -> list[dict]:
+    closed: list[dict] = []
+    for candle in candles:
+        try:
+            close_time = int(candle.get("close_time"))
+        except (TypeError, ValueError):
+            continue
+        if close_time < now_ms:
+            closed.append(candle)
+    return closed
+
+
 def _run_tick(gw: MarketGateway, dedup: SignalDedup, symbol: str, tg_token: str, tg_chat_id: str) -> None:
     candles_1h = gw.get_klines(symbol, "1h", limit=80)
     candles_15m = gw.get_klines(symbol, "15m", limit=120)
+    now_ms = int(time.time() * 1000)
+    candles_1h = _closed_candles(candles_1h, now_ms)
+    candles_15m = _closed_candles(candles_15m, now_ms)
     result = evaluate_symbol(
         symbol=symbol,
         candles_1h=candles_1h,
