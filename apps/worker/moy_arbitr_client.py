@@ -21,6 +21,7 @@ MOY_ARBITR_MAX_CASES = max(1, int(os.getenv("MOY_ARBITR_MAX_CASES", "25")))
 MOY_ARBITR_MAX_DOCS_PER_CASE = max(1, int(os.getenv("MOY_ARBITR_MAX_DOCS_PER_CASE", "80")))
 MOY_ARBITR_MANUAL_LOGIN_URL = os.getenv("MOY_ARBITR_MANUAL_LOGIN_URL", f"{MOY_ARBITR_BASE_URL}/")
 MOY_ARBITR_DEBUG_DIR = os.getenv("MOY_ARBITR_DEBUG_DIR", "/app/moy_arbitr/debug")
+MOY_ARBITR_DEBUG_MAX_BYTES = max(0, int(os.getenv("MOY_ARBITR_DEBUG_MAX_BYTES", str(100 * 1024 * 1024))))
 
 MOY_ARBITR_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -65,9 +66,45 @@ def _safe_debug_part(value: str) -> str:
     return s[:80] or "query"
 
 
+def _prune_debug_artifacts(debug_dir: Path, max_bytes: int) -> None:
+    """Best-effort byte quota, deleting complete oldest captures first."""
+    try:
+        entries = list(debug_dir.iterdir())
+    except OSError:
+        return
+
+    groups: dict[str, list[tuple[Path, int, int]]] = {}
+    total_bytes = 0
+    for path in entries:
+        if not path.name.startswith("job-") or path.suffix not in {".html", ".png", ".log"}:
+            continue
+        try:
+            file_stat = path.stat()
+        except OSError:
+            continue
+        groups.setdefault(path.stem, []).append((path, file_stat.st_size, file_stat.st_mtime_ns))
+        total_bytes += file_stat.st_size
+
+    quota = max(0, max_bytes)
+    oldest_first = sorted(
+        groups.items(),
+        key=lambda item: (max(file_info[2] for file_info in item[1]), item[0]),
+    )
+    for _, files in oldest_first:
+        if total_bytes <= quota:
+            break
+        for path, size, _ in files:
+            try:
+                path.unlink()
+            except OSError:
+                continue
+            total_bytes -= size
+
+
 def _save_debug_artifacts(page, *, job_id: int | None, query_type: str, query_value: str) -> str:
     debug_dir = Path(MOY_ARBITR_DEBUG_DIR)
     debug_dir.mkdir(parents=True, exist_ok=True)
+    _prune_debug_artifacts(debug_dir, MOY_ARBITR_DEBUG_MAX_BYTES)
     stamp = time.strftime("%Y%m%d-%H%M%S")
     prefix = f"job-{job_id or 'manual'}-{_safe_debug_part(query_type)}-{_safe_debug_part(query_value)}-{stamp}"
     html_path = debug_dir / f"{prefix}.html"
@@ -89,6 +126,7 @@ def _save_debug_artifacts(page, *, job_id: int | None, query_type: str, query_va
         saved.append(str(log_path))
     except Exception as exc:
         saved.append(f"log_error={str(exc)[:160]}")
+    _prune_debug_artifacts(debug_dir, MOY_ARBITR_DEBUG_MAX_BYTES)
     return "debug_artifacts=" + ", ".join(saved)
 
 
