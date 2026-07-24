@@ -8,6 +8,7 @@ import httpx
 
 from .case_number import normalize_arbitr_case_number
 from .config import settings
+from .court_kad_search import parse_parser_year_range_from_text
 from .models import Case
 
 
@@ -28,6 +29,8 @@ class MoyArbitrSearchRequest:
     query_type: str
     query_value: str
     run_mode: str = "preview"
+    parser_year_min: int | None = None
+    parser_year_max: int | None = None
 
 
 def _base_url() -> str:
@@ -151,6 +154,21 @@ def _normalize_active_case_number(value: str | None) -> str:
     return ""
 
 
+def _with_parser_years(req: MoyArbitrSearchRequest, text: str) -> MoyArbitrSearchRequest:
+    """Attach chat year range (e.g. «за 2026 год») the same way KAD court-sync jobs do."""
+    ymin, ymax = parse_parser_year_range_from_text(text)
+    if ymin is None:
+        return req
+    y2 = ymax if ymax is not None else ymin
+    return MoyArbitrSearchRequest(
+        query_type=req.query_type,
+        query_value=req.query_value,
+        run_mode=req.run_mode,
+        parser_year_min=ymin,
+        parser_year_max=y2,
+    )
+
+
 def parse_moy_arbitr_search_request(
     text: str,
     *,
@@ -165,38 +183,50 @@ def parse_moy_arbitr_search_request(
 
     case_number = extract_moy_arbitr_case_number(raw)
     if case_number:
-        return MoyArbitrSearchRequest(
-            query_type="moy_arbitr_case_number",
-            query_value=case_number,
-            run_mode=_moy_arbitr_run_mode(lowered),
+        return _with_parser_years(
+            MoyArbitrSearchRequest(
+                query_type="moy_arbitr_case_number",
+                query_value=case_number,
+                run_mode=_moy_arbitr_run_mode(lowered),
+            ),
+            raw,
         )
 
     active_cn = _normalize_active_case_number(active_case_number)
     if active_cn and any(w in lowered for w in ("проверь", "скачай", "загрузи", "материалы", "документы", "новые")):
-        return MoyArbitrSearchRequest(
-            query_type="moy_arbitr_case_number",
-            query_value=active_cn,
-            run_mode=_moy_arbitr_run_mode(lowered),
+        return _with_parser_years(
+            MoyArbitrSearchRequest(
+                query_type="moy_arbitr_case_number",
+                query_value=active_cn,
+                run_mode=_moy_arbitr_run_mode(lowered),
+            ),
+            raw,
         )
 
     m_inn = re.search(r"\bинн\b[:\s]*([\d\s]{10,15})", raw, flags=re.IGNORECASE)
     if m_inn:
         inn = _normalize_digits(m_inn.group(1))
         if inn:
-            return MoyArbitrSearchRequest(
-                query_type="moy_arbitr_inn",
-                query_value=inn,
-                run_mode=_moy_arbitr_run_mode(lowered),
+            return _with_parser_years(
+                MoyArbitrSearchRequest(
+                    query_type="moy_arbitr_inn",
+                    query_value=inn,
+                    run_mode=_moy_arbitr_run_mode(lowered),
+                ),
+                raw,
             )
 
     m_ogrn = re.search(r"\bогрн\b[:\s]*([\d\s]{12,18})", raw, flags=re.IGNORECASE)
     if m_ogrn:
         ogrn = _normalize_digits(m_ogrn.group(1))
         if ogrn:
-            return MoyArbitrSearchRequest(
-                query_type="moy_arbitr_ogrn",
-                query_value=ogrn,
-                run_mode=_moy_arbitr_run_mode(lowered),
+            return _with_parser_years(
+                MoyArbitrSearchRequest(
+                    query_type="moy_arbitr_ogrn",
+                    query_value=ogrn,
+                    run_mode=_moy_arbitr_run_mode(lowered),
+                ),
+                raw,
             )
 
     for pat in (
@@ -209,10 +239,13 @@ def parse_moy_arbitr_search_request(
             val = next((g for g in m.groups() if g and str(g).strip()), "")
             val = re.sub(r"\s+", " ", val).strip(" :.-\"'«»")
             if len(val) >= 3:
-                return MoyArbitrSearchRequest(
-                    query_type="moy_arbitr_participant_name",
-                    query_value=val,
-                    run_mode=_moy_arbitr_run_mode(lowered),
+                return _with_parser_years(
+                    MoyArbitrSearchRequest(
+                        query_type="moy_arbitr_participant_name",
+                        query_value=val,
+                        run_mode=_moy_arbitr_run_mode(lowered),
+                    ),
+                    raw,
                 )
 
     for marker in ("по организации", "организацию", "организации", "компанию", "по компании"):
@@ -221,10 +254,13 @@ def parse_moy_arbitr_search_request(
             candidate = raw[idx + len(marker):].strip(" :.-\"'«»")
             candidate = re.sub(r"\s+", " ", candidate)
             if len(candidate) >= 3:
-                return MoyArbitrSearchRequest(
-                    query_type="moy_arbitr_organization_name",
-                    query_value=candidate[:160],
-                    run_mode=_moy_arbitr_run_mode(lowered),
+                return _with_parser_years(
+                    MoyArbitrSearchRequest(
+                        query_type="moy_arbitr_organization_name",
+                        query_value=candidate[:160],
+                        run_mode=_moy_arbitr_run_mode(lowered),
+                    ),
+                    raw,
                 )
     return None
 
@@ -239,15 +275,24 @@ def strip_moy_arbitr_query_prefix(query_type: str) -> str:
     return query_type
 
 
+def format_parser_year_period(ymin: int | None, ymax: int | None) -> str:
+    if ymin is None:
+        return ""
+    if ymax is not None and ymax != ymin:
+        return f" (только документы за {ymin}–{ymax} г.)"
+    return f" (только документы за {ymin} г.)"
+
+
 def format_moy_arbitr_search_queued_reply(req: MoyArbitrSearchRequest, *, job_id: int, created: bool) -> str:
     mode = "загрузку материалов" if req.run_mode == "download" else "поиск"
+    period = format_parser_year_period(req.parser_year_min, req.parser_year_max)
     if not created:
         return (
             f"Такой поиск в «Мой Арбитр» уже выполняется или стоит в очереди (задача №{job_id}) "
-            f"по запросу «{req.query_value}». Дубликат не создавался."
+            f"по запросу «{req.query_value}»{period}. Дубликат не создавался."
         )
     return (
-        f"Запустил фоновый {mode} в «Мой Арбитр» (задача №{job_id}) по запросу «{req.query_value}». "
+        f"Запустил фоновый {mode} в «Мой Арбитр» (задача №{job_id}) по запросу «{req.query_value}»{period}. "
         "Воркер будет использовать сохранённую браузерную сессию. Если вход через Госуслуги истёк или ещё не сохранён, "
         "задача попросит ручной вход и не будет хранить пароль."
     )

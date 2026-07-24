@@ -54,6 +54,7 @@ from .court_kad_search import (
     looks_like_kad_downloaded_documents_list,
     looks_like_stored_arbitr_case_number,
     parse_court_search_request,
+    parse_parser_year_range_from_text,
     try_resolve_kad_folder_title_to_case_number,
 )
 from .court_sync_service import (
@@ -104,6 +105,7 @@ from .materials_workflow import (
 )
 from .moy_arbitr import (
     format_moy_arbitr_chat_reply,
+    format_parser_year_period,
     moy_arbitr_connection_status,
     looks_like_moy_arbitr_command,
     looks_like_moy_arbitr_all_cases_request,
@@ -5119,6 +5121,9 @@ async def assistant_ingest_text(
         seen_case_numbers: set[str] = set()
         jobs: list[tuple[int, str, bool]] = []
         skipped = 0
+        year_min, year_max = parse_parser_year_range_from_text(text)
+        if year_min is not None and year_max is None:
+            year_max = year_min
         for case in db.query(Case).order_by(Case.id.asc()).all():
             cn = normalize_arbitr_case_number(case.case_number or "")
             if re.match(r"^\d{1,2}-\d{1,7}/\d{2,4}", cn, flags=re.IGNORECASE):
@@ -5136,6 +5141,8 @@ async def assistant_ingest_text(
                 query_value=cn,
                 run_mode="download",
                 requested_by=_,
+                parser_year_min=year_min,
+                parser_year_max=year_max,
             )
             jobs.append((job.id, cn, job_new))
         if not jobs:
@@ -5148,8 +5155,9 @@ async def assistant_ingest_text(
             reused = len(jobs) - created
             shown = ", ".join(f"№{jid}: {cn}" for jid, cn, _ in jobs[:12])
             more = f" и ещё {len(jobs) - 12}" if len(jobs) > 12 else ""
+            period = format_parser_year_period(year_min, year_max)
             reply_text = (
-                f"Запустил проверку «Мой Арбитр» по всем папкам с арбитражными номерами: задач всего {len(jobs)}, "
+                f"Запустил проверку «Мой Арбитр» по всем папкам с арбитражными номерами{period}: задач всего {len(jobs)}, "
                 f"новых {created}, уже были в очереди/работе {reused}. Пропущено папок без подходящего номера или дублей: {skipped}.\n"
                 f"{shown}{more}.\n"
                 "Статус: «статус загрузки». Подробно по одной: «отчет по задаче #N»."
@@ -5169,8 +5177,11 @@ async def assistant_ingest_text(
                 query_value=request.query_value,
                 run_mode=request.run_mode,
                 requested_by=_,
+                parser_year_min=request.parser_year_min,
+                parser_year_max=request.parser_year_max,
             )
             action = "фоновую загрузку" if request.run_mode == "download" else "фоновый поиск"
+            period = format_parser_year_period(request.parser_year_min, request.parser_year_max)
             suffix = (
                 " Воркер использует сохранённую браузерную сессию «Мой Арбитр»; если вход не выполнен или истёк, "
                 "задача попросит ручной вход и повтор."
@@ -5179,12 +5190,12 @@ async def assistant_ingest_text(
             if not job_new:
                 reply_text = (
                     f"Такая задача «Мой Арбитр» уже в очереди или выполняется (№{job.id}) "
-                    f"по запросу «{request.query_value}». Дубликат не создавался."
+                    f"по запросу «{request.query_value}»{period}. Дубликат не создавался."
                 )
             else:
                 reply_text = (
                     f"Запустил {action} в «Мой Арбитр» (задача №{job.id}) "
-                    f"по запросу «{request.query_value}».{suffix}"
+                    f"по запросу «{request.query_value}»{period}.{suffix}"
                 )
             return await finalize_reply(case=active_case, reply_text=reply_text, mode="moy-arbitr-sync-command")
         reply_text = format_moy_arbitr_chat_reply(text, active_case=conversation.active_case)
