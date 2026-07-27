@@ -43,6 +43,7 @@ from .ai_service import (
     parse_hearing_note,
 )
 from .case_number import arbitr_case_number_lookup_keys, normalize_arbitr_case_number
+from .local_storage import resolve_local_s3_key
 from .court_kad_search import (
     apply_active_case_number_to_kad_request,
     apply_folder_documents_case_numbers_to_kad_request,
@@ -340,11 +341,8 @@ def resolve_move_source_case_from_text(db: Session, text: str) -> Case | None:
 
 
 def local_storage_path(doc: Document) -> Path | None:
-    if not doc.s3_key.startswith("local://"):
-        return None
-    rel = doc.s3_key.replace("local://", "", 1)
-    path = STORAGE_ROOT / rel
-    return path if path.exists() else None
+    path = resolve_local_s3_key(doc.s3_key, STORAGE_ROOT)
+    return path if path is not None and path.exists() else None
 
 
 def conversation_user_key(user_role: str) -> str:
@@ -1561,6 +1559,8 @@ def add_document(
     case = db.query(Case).filter(Case.id == case_id).first()
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
+    if payload.s3_key.startswith("local://") and resolve_local_s3_key(payload.s3_key, STORAGE_ROOT) is None:
+        raise HTTPException(status_code=400, detail="Invalid local document path")
     doc = Document(case_id=case_id, **payload.model_dump())
     db.add(doc)
     db.commit()
