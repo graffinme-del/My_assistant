@@ -52,3 +52,26 @@ def test_m15_entry_rejected_if_price_closes_above_ema20() -> None:
     res = evaluate_m15_entry(candles)
     assert res.ready is False
     assert res.reason in ("price_closed_above_ema20", "price_closed_above_pullback_high")
+
+
+def test_m15_entry_includes_retest_exactly_at_local_low_max_bars() -> None:
+    # Retest at index 20 with exactly local_low_max_bars (8) completed bars after it.
+    # Post-retest highs stay below EMA so no nearer candidate can mask the boundary miss.
+    candles = [_c(100.0, 100.05, 99.95, 100.0, 500)] * 19 + [
+        _c(100.0, 101.0, 99.95, 100.8, 500),  # idx 19: lift EMA
+        _c(100.5, 100.9, 99.8, 99.9, 500),    # idx 20: EMA retest fail
+    ]
+    for _ in range(8):
+        candles.append(_c(98.5, 98.8, 97.5, 98.0, 500))  # idx 21-28
+    candles.append(_c(97.8, 98.2, 97.0, 97.5, 500))  # idx 29 trigger
+
+    res = evaluate_m15_entry(candles)
+    assert res.ready is True
+    assert res.reason == "ok"
+    assert res.pullback_high == 100.9
+
+    # One candle later the same retest ages past max and must stay rejected.
+    aged = candles + [_c(97.5, 97.8, 96.5, 97.0, 500)]
+    aged_res = evaluate_m15_entry(aged)
+    assert aged_res.ready is False
+    assert aged_res.reason == "ema20_retest_fail_missing"

@@ -91,7 +91,9 @@ def evaluate_m15_entry(
     trigger = candles_15m[trigger_idx]
     trigger_close = _to_float(trigger.get("close"))
 
-    search_from = max(ema_period - 1, trigger_idx - local_low_max_bars)
+    # Retest at idx has bars_after = trigger_idx - idx - 1, so a candidate with
+    # bars_after == local_low_max_bars sits at trigger_idx - local_low_max_bars - 1.
+    search_from = max(ema_period - 1, trigger_idx - local_low_max_bars - 1)
     search_to = max(search_from, trigger_idx - local_low_min_bars + 1)
 
     retest_candidates: list[tuple[int, float]] = []
