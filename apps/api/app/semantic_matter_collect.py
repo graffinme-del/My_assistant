@@ -329,8 +329,12 @@ def _heuristic_semantic_move(
 ) -> tuple[bool, str]:
     if _doc_matches_case_numbers(doc, target):
         return True, "совпадение номера дела с целевой папкой"
+    # Source-folder scan: a document that carries the *source* case number belongs
+    # there. Matching source must never force a move into the target (that used to
+    # mass-move nearly every correctly filed source document when the LLM said no
+    # or returned an empty decision set).
     if source_only and _doc_matches_case_numbers(doc, source_only):
-        return True, "в материале тот же номер, что у исходной папки"
+        return False, ""
     ok_t, why_t = _doc_matches_case_tags(doc, target_tags)
     if ok_t:
         return True, why_t
