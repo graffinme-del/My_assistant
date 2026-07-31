@@ -1673,32 +1673,15 @@ def find_first_case_by_arbitr_numbers_in_text(db: Session, text: str) -> Case | 
     return None
 
 
-def _unlink_local_document_file(doc: Document) -> None:
-    path = local_storage_path(doc)
-    if path and path.is_file():
-        try:
-            path.unlink()
-        except OSError:
-            pass
-
-
 def delete_documents_hard(db: Session, docs: list[Document]) -> list[str]:
-    """Удаляет строки Document, чанки (CASCADE), файл на диске; пишет CaseEvent."""
-    removed: list[str] = []
-    for doc in docs:
-        doc_id, case_id, fn = doc.id, doc.case_id, doc.filename
-        _unlink_local_document_file(doc)
-        db.add(
-            CaseEvent(
-                case_id=case_id,
-                event_type="document_deleted",
-                body=f"Удалён документ [{doc_id}]: {fn}",
-            )
-        )
-        db.delete(doc)
-        removed.append(f"[{doc_id}] {fn}")
-    db.commit()
-    return removed
+    """Удаляет строки Document, чанки (CASCADE), файл на диске; пишет CaseEvent.
+
+    Commit happens before filesystem unlink so a failed DB transaction cannot
+    leave Document rows pointing at already-deleted files.
+    """
+    from .document_delete import delete_documents_hard as _delete_documents_hard
+
+    return _delete_documents_hard(db, docs, resolve_local_path=local_storage_path)
 
 
 # Токены, которые не должны участвовать в AND-поиске по PDF (часто попадают из формулировки запроса).
