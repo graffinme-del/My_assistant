@@ -442,11 +442,12 @@ def format_duplicate_documents_across_cases_report(db: Session, *, limit_groups:
         )
     lines.append(
         "Чтобы сравнить два конкретных файла по тексту: «Сравни документы [id1] и [id2]». "
-        "Чтобы объединить папки с такими дублями одной командой: "
+        "Авто-объединение папок срабатывает только при **нескольких** совпадениях имя+текст PDF "
+        "(одно общее «Определение.pdf» разные дела не склеит): "
         "«Объедини папки, где повторяются одинаковые файлы». "
-        "Чтобы **автоматически удалить лишние копии** (по **смыслу** фрагментов PDF и папке; при отключённом LLM — по имени файла): "
+        "Чтобы **удалить лишние копии** с тем же именем **и** текстом: "
         "«Удали дубликаты между папками» или «Покажи план удаления дубликатов». "
-        "Быстро без ИИ: добавьте «только по имени файла»."
+        "Опасный режим только по имени: добавьте «только по имени файла»."
     )
     return "\n".join(lines)
 
@@ -3972,53 +3973,37 @@ def looks_like_merge_duplicate_folders_request(text: str) -> bool:
 
 
 def handle_merge_cases_linked_by_duplicate_filenames(db: Session) -> tuple[str, Case | None]:
-    """Связные компоненты: дела A и B связаны, если есть одинаковое имя файла в обоих. UNSORTED не участвует."""
-    from collections import defaultdict
+    """Связанные папки по *настоящим* дубликатам файлов (имя + текст), не по одному общему имени.
 
-    groups: dict[str, list[tuple[int, int]]] = defaultdict(list)  # norm_name -> [(doc_id, case_id)]
+    Раньше одно общее «Определение.pdf» в двух несвязанных делах склеивало папки (и транзитивно
+    целые компоненты). Теперь ребро есть только при ≥2 совпадениях имя+текст между парой.
+    """
+    from .document_duplicate_match import (
+        MIN_SHARED_TRUE_DUPLICATES_FOR_MERGE,
+        connected_case_components,
+    )
+
+    case_docs: list[tuple[int, str, str]] = []
     for d in db.query(Document).all():
         c = db.query(Case).filter(Case.id == d.case_id).first()
         if not c or (c.case_number or "").upper() == "UNSORTED":
             continue
-        key = normalize_document_signature(d.filename, "")[0]
-        if len(key) < 4:
-            continue
-        groups[key].append((d.id, c.id))
+        case_docs.append((c.id, d.filename or "", d.extracted_text or ""))
 
-    adj: dict[int, set[int]] = defaultdict(set)
-    for _fname, rows in groups.items():
-        cids = {cid for _, cid in rows}
-        if len(cids) < 2:
-            continue
-        cl = list(cids)
-        for i in range(len(cl)):
-            for j in range(i + 1, len(cl)):
-                adj[cl[i]].add(cl[j])
-                adj[cl[j]].add(cl[i])
-
-    if not adj:
+    components = connected_case_components(
+        case_docs,
+        require_content_match=True,
+        min_shared_keys=MIN_SHARED_TRUE_DUPLICATES_FOR_MERGE,
+    )
+    if not components:
         return (
-            "Нет пар папок с одинаковыми именами файлов — объединять нечего. "
-            "Сначала попросите отчёт: «найди одинаковые документы в разных папках».",
+            "Нет пар папок с подтверждёнными дубликатами (одинаковое имя **и** совпадающий текст PDF, "
+            f"не меньше {MIN_SHARED_TRUE_DUPLICATES_FOR_MERGE} таких файлов между папками) — объединять нечего. "
+            "Совпадение только по имени (например, разные «Определение.pdf») намеренно игнорируется. "
+            "Сначала отчёт: «найди одинаковые документы в разных папках»; "
+            "явное объединение двух папок: «объедини папки A и B».",
             None,
         )
-
-    visited: set[int] = set()
-    components: list[list[int]] = []
-    for start in adj:
-        if start in visited:
-            continue
-        stack = [start]
-        visited.add(start)
-        comp: list[int] = []
-        while stack:
-            x = stack.pop()
-            comp.append(x)
-            for y in adj[x]:
-                if y not in visited:
-                    visited.add(y)
-                    stack.append(y)
-        components.append(comp)
 
     merged_lines: list[str] = []
     last_target: Case | None = None

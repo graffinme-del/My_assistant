@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from .ai_service import extract_case_number, llm_system_user
 from .case_number import arbitr_case_number_lookup_keys, normalize_arbitr_case_number
 from .config import settings
+from .document_duplicate_match import normalized_filename_key, true_duplicate_group_key
 from .models import Case, CaseEvent, Document
 
 GROUPS_PER_LLM_BATCH = 10
@@ -20,7 +21,7 @@ MAX_GROUPS_IN_REPLY = 35
 
 
 def _normalized_filename_key(filename: str) -> str:
-    return re.sub(r"\s+", " ", (filename or "").strip().lower())
+    return normalized_filename_key(filename)
 
 
 def _strip_json_fence(raw: str) -> str:
@@ -37,14 +38,29 @@ def _doc_snippet(doc: Document) -> str:
     return t if t else "(текст PDF не извлечён — ориентируйся на имя файла и папку)"
 
 
-def gather_cross_folder_duplicate_groups(db: Session) -> dict[str, list[tuple[Document, Case]]]:
+def gather_cross_folder_duplicate_groups(
+    db: Session,
+    *,
+    require_content_match: bool = True,
+) -> dict[str, list[tuple[Document, Case]]]:
+    """
+    Group documents that look like the same file across folders.
+
+    By default requires matching extracted-text fingerprints so generic names
+    (e.g. «Определение.pdf») in unrelated cases are not treated as duplicates.
+    Pass require_content_match=False only for an explicit filename-only opt-in.
+    """
     groups: dict[str, list[tuple[Document, Case]]] = defaultdict(list)
     for d in db.query(Document).all():
         c = db.query(Case).filter(Case.id == d.case_id).first()
         if not c:
             continue
-        key = _normalized_filename_key(d.filename)
-        if len(key) < 4:
+        key = true_duplicate_group_key(
+            d.filename,
+            d.extracted_text or "",
+            require_content_match=require_content_match,
+        )
+        if key is None:
             continue
         groups[key].append((d, c))
     return {k: v for k, v in groups.items() if len({cc.id for _, cc in v}) >= 2}
@@ -294,9 +310,23 @@ async def handle_cross_folder_duplicate_cleanup_chat(db: Session, text: str) -> 
     prefer = folder_preference_hint_from_text(text)
     heuristic_only = _heuristic_only_from_text(text)
     use_llm = bool(settings.openai_api_key.strip()) and not heuristic_only
+    # Filename-only deletion is opt-in («только по имени» / «быстро»); default
+    # requires matching extracted text so unrelated «Определение.pdf» files survive.
+    require_content_match = not heuristic_only
 
-    groups = gather_cross_folder_duplicate_groups(db)
+    groups = gather_cross_folder_duplicate_groups(
+        db, require_content_match=require_content_match
+    )
     if not groups:
+        if require_content_match:
+            return (
+                "Подтверждённых дубликатов (одинаковое имя **и** совпадающий текст PDF) "
+                "в разных папках не найдено — чистить нечего. "
+                "Совпадение только по имени (без текста) намеренно игнорируется, "
+                "чтобы не удалять разные «Определение.pdf» / «Решение.pdf» из разных дел. "
+                "Явный режим по имени: добавьте «только по имени файла».",
+                unsorted_case,
+            )
         return (
             "Одинаковых имён файла в **разных** папках не найдено — чистить нечего. "
             "(Совпадение только по нормализации пробелов и регистра в имени.)",
@@ -323,7 +353,12 @@ async def handle_cross_folder_duplicate_cleanup_chat(db: Session, text: str) -> 
             llm_decisions.update(part)
 
     lines: list[str] = [
-        "**План очистки дубликатов** (одно имя файла — несколько папок).",
+        "**План очистки дубликатов** "
+        + (
+            "(одинаковое имя **и** совпадающий текст PDF — несколько папок)."
+            if require_content_match
+            else "(одно имя файла — несколько папок; режим только по имени)."
+        ),
         "",
     ]
     if use_llm:
@@ -332,10 +367,15 @@ async def handle_cross_folder_duplicate_cleanup_chat(db: Session, text: str) -> 
             "лишние копии помечаются на удаление. Если для группы нет валидного ответа модели — используется запасное правило "
             "(номер дела в имени файла ↔ папка, без «UNDEF»/«Неразобранное»)."
         )
+    elif heuristic_only:
+        lines.append(
+            "Режим **только по имени файла** (опасный): разные документы с общим именем могут быть удалены. "
+            "Чтобы требовать совпадение текста, уберите «только по имени» / «быстро»."
+        )
     else:
         lines.append(
-            "Режим **без анализа текста** (эвристика по имени файла и папке). "
-            "Чтобы включить разбор по смыслу, уберите из сообщения фразы вроде «только по имени» / «быстро» и задайте API-ключ LLM."
+            "Режим **без LLM** (эвристика по папке), но группы собраны по имени **и** тексту PDF. "
+            "Чтобы включить разбор моделью, задайте API-ключ LLM."
         )
     lines.append("")
     if prefer:
