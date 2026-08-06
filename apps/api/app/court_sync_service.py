@@ -102,13 +102,26 @@ def create_sync_job(
 
 
 def claim_next_sync_job(db: Session) -> CourtSyncJob | None:
+    """
+    Atomically claim the oldest pending job.
+
+    Uses SELECT ... FOR UPDATE SKIP LOCKED so concurrent workers (or an
+    overlapping old+new worker during restart) cannot both claim the same row.
+    Without the row lock, two claim requests can both read status=pending and
+    both proceed to download/ingest, duplicating court documents.
+    """
     job = (
         db.query(CourtSyncJob)
         .filter(CourtSyncJob.status == "pending")
         .order_by(CourtSyncJob.created_at.asc())
+        .with_for_update(skip_locked=True)
         .first()
     )
     if not job:
+        return None
+    # Row is locked in this transaction; status should still be pending, but
+    # refuse if another path already moved it before we acquired the lock.
+    if job.status != "pending":
         return None
     job.status = "running"
     job.step = "claimed"
