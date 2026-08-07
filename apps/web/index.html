@@ -763,6 +763,44 @@
         delete frame.dataset.blobUrl;
       }
 
+      /** Force a non-executable MIME so a mislabeled Content-Type cannot escalate preview. */
+      function previewBlobWithSafeType(blob, ext) {
+        const mimeByExt = {
+          pdf: "application/pdf",
+          png: "image/png",
+          jpg: "image/jpeg",
+          jpeg: "image/jpeg",
+          webp: "image/webp",
+          gif: "image/gif",
+          txt: "text/plain",
+          csv: "text/csv",
+          md: "text/plain"
+        };
+        const type = mimeByExt[ext];
+        if (!type || !blob) return null;
+        return new Blob([blob], { type });
+      }
+
+      /** Strip active content from mammoth HTML before assigning to the page DOM. */
+      function sanitizeMammothHtml(html) {
+        const tpl = document.createElement("template");
+        // Parsing into <template> does not execute scripts.
+        tpl.innerHTML = html == null ? "" : String(html);
+        tpl.content
+          .querySelectorAll("script, iframe, object, embed, link, meta, base")
+          .forEach((n) => n.remove());
+        tpl.content.querySelectorAll("*").forEach((node) => {
+          for (const attr of Array.from(node.attributes)) {
+            const name = attr.name || "";
+            const value = attr.value || "";
+            if (/^on/i.test(name) || /^(javascript:|data:text\/html)/i.test(value.trim())) {
+              node.removeAttribute(name);
+            }
+          }
+        });
+        return tpl.innerHTML;
+      }
+
       function closeDocViewer() {
         const modal = el("docViewerModal");
         const frame = el("docViewerFrame");
@@ -779,6 +817,8 @@
       async function openDocumentViewer(doc) {
         const fnameRaw = (doc.filename || "").toLowerCase();
         const ext = fnameRaw.includes(".") ? fnameRaw.split(".").pop() : "";
+        // Never iframe html/htm/svg: blob: URLs inherit this page origin, so script
+        // in those types can read localStorage.apiToken and call /api/*.
         const iframeOk = [
           "pdf",
           "png",
@@ -786,10 +826,7 @@
           "jpeg",
           "webp",
           "gif",
-          "svg",
           "txt",
-          "htm",
-          "html",
           "csv",
           "md"
         ].includes(ext);
@@ -858,7 +895,7 @@
             fb.innerHTML = "";
             const wrap = document.createElement("div");
             wrap.className = "docx-preview-html";
-            wrap.innerHTML = result.value;
+            wrap.innerHTML = sanitizeMammothHtml(result.value);
             fb.appendChild(wrap);
             if (result.messages && result.messages.length) {
               const warn = document.createElement("p");
@@ -886,7 +923,11 @@
           frame.src = "about:blank";
           try {
             const blob = await fetchDocumentAsBlob(doc.id, { inline: true });
-            const objUrl = URL.createObjectURL(blob);
+            const safeBlob = previewBlobWithSafeType(blob, ext);
+            if (!safeBlob) {
+              throw new Error("unsupported preview type");
+            }
+            const objUrl = URL.createObjectURL(safeBlob);
             frame.dataset.blobUrl = objUrl;
             frame.src = objUrl;
           } catch (e) {
@@ -1090,7 +1131,12 @@
 
       async function loadEvents() {
         const events = await api(`/cases/${selectedCaseId}/events`);
-        el("eventsList").innerHTML = events.map(e => `<div><strong>${e.event_type}</strong><div>${e.body}</div><div class="muted">${e.created_at}</div></div><hr/>`).join("");
+        el("eventsList").innerHTML = events
+          .map(
+            (e) =>
+              `<div><strong>${escapeHtml(e.event_type)}</strong><div>${escapeHtml(e.body)}</div><div class="muted">${escapeHtml(e.created_at)}</div></div><hr/>`
+          )
+          .join("");
       }
 
       async function addEvent() {
@@ -1107,7 +1153,12 @@
 
       async function loadTasks() {
         const tasks = await api(`/cases/${selectedCaseId}/tasks`);
-        el("tasksList").innerHTML = tasks.map(t => `<div><strong>${t.title}</strong><div class="muted">${t.priority} | ${t.status} | срок: ${t.due_date || "-"}</div></div><hr/>`).join("");
+        el("tasksList").innerHTML = tasks
+          .map(
+            (t) =>
+              `<div><strong>${escapeHtml(t.title)}</strong><div class="muted">${escapeHtml(t.priority)} | ${escapeHtml(t.status)} | срок: ${escapeHtml(t.due_date || "-")}</div></div><hr/>`
+          )
+          .join("");
       }
 
       async function addTask() {
@@ -1126,7 +1177,10 @@
       async function loadDocs() {
         const docs = await api(`/cases/${selectedCaseId}/documents`);
         el("docsList").innerHTML = docs
-          .map(d => `<div><strong>${d.filename}</strong><div class="muted">${d.category} | ${d.s3_key}</div></div><hr/>`)
+          .map(
+            (d) =>
+              `<div><strong>${escapeHtml(d.filename)}</strong><div class="muted">${escapeHtml(d.category)} | ${escapeHtml(d.s3_key)}</div></div><hr/>`
+          )
           .join("");
       }
 
