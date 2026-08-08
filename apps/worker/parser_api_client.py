@@ -168,8 +168,22 @@ def _walk_parse_json_collect_kad_urls(
             stack.extend(obj)
 
 
-def extract_kad_pdf_url_entries_with_dates(data: dict[str, Any]) -> list[tuple[str, date | None]]:
-    """Пары (url, дата документа по событию; для File инстанции — по макс. дате событий)."""
+def _normalize_parser_case_number(value: str | None) -> str:
+    s = re.sub(r"\s+", "", (value or "").replace("\\", ""))
+    return s.upper().replace("А", "A")
+
+
+def extract_kad_pdf_url_entries_with_dates(
+    data: dict[str, Any],
+    *,
+    case_number: str | None = None,
+) -> list[tuple[str, date | None]]:
+    """Пары (url, дата документа по событию; для File инстанции — по макс. дате событий).
+
+    When ``case_number`` is set and ``Cases`` contains a matching entry, only that
+    case is harvested. Deep URL walk is scoped to the selected case object(s) so
+    RelatedCases / sibling payloads cannot inject foreign PDFs into one archive.
+    """
     out: list[tuple[str, date | None]] = []
     seen: set[str] = set()
 
@@ -183,7 +197,16 @@ def extract_kad_pdf_url_entries_with_dates(data: dict[str, Any]) -> list[tuple[s
         seen.add(u)
         out.append((u, d))
 
-    for case in data.get("Cases") or []:
+    cases = [c for c in (data.get("Cases") or []) if isinstance(c, dict)]
+    if case_number and cases:
+        want = _normalize_parser_case_number(case_number)
+        matched = [
+            c for c in cases if _normalize_parser_case_number(str(c.get("CaseNumber") or "")) == want
+        ]
+        if matched:
+            cases = matched
+
+    for case in cases:
         for inst in case.get("CaseInstances") or []:
             event_dates: list[date] = []
             for ev in inst.get("InstanceEvents") or []:
@@ -238,8 +261,11 @@ def extract_kad_pdf_url_entries_with_dates(data: dict[str, Any]) -> list[tuple[s
                 du = doc.get("Url") or doc.get("URL") or doc.get("Link")
                 add(du if isinstance(du, str) else None, dd or ref_inst)
 
+    # Deep-walk only selected Cases — never the full payload (RelatedCases, etc.).
     extra: dict[str, None] = {}
-    _walk_parse_json_collect_kad_urls(data, sink=extra)
+    walk_roots: list[Any] = list(cases) if cases else [data]
+    for root in walk_roots:
+        _walk_parse_json_collect_kad_urls(root, sink=extra)
     for u in extra:
         if u not in seen:
             seen.add(u)
@@ -247,8 +273,12 @@ def extract_kad_pdf_url_entries_with_dates(data: dict[str, Any]) -> list[tuple[s
     return out
 
 
-def extract_kad_pdf_urls_from_details(data: dict[str, Any]) -> list[str]:
-    return [u for u, _ in extract_kad_pdf_url_entries_with_dates(data)]
+def extract_kad_pdf_urls_from_details(
+    data: dict[str, Any],
+    *,
+    case_number: str | None = None,
+) -> list[str]:
+    return [u for u, _ in extract_kad_pdf_url_entries_with_dates(data, case_number=case_number)]
 
 
 def filter_pdf_urls_by_date_range(
