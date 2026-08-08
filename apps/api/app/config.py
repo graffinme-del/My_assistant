@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     # Опционально для OpenRouter (рекомендуется указать свой сайт)
     llm_http_referer: str = ""
     llm_app_title: str = "My Assistant"
+    # Well-known defaults are for local/dev only. Production must rotate them
+    # (see refuse_insecure_default_tokens). ensure_env.sh generates random values
+    # when creating .env from the example template.
     owner_token: str = "owner-dev-token"
     member_token: str = "member-dev-token"
     storage_root: str = "/app/storage"
@@ -85,6 +88,25 @@ class Settings(BaseSettings):
         if v is None or v == "":
             return v
         return str(v).strip()
+
+    @model_validator(mode="after")
+    def refuse_insecure_default_tokens(self) -> "Settings":
+        """Block well-known default API tokens outside development."""
+        env = (self.app_env or "").strip().lower()
+        if env in ("", "development", "dev", "local", "test"):
+            return self
+        insecure = {"owner-dev-token", "member-dev-token", ""}
+        owner = (self.owner_token or "").strip()
+        member = (self.member_token or "").strip()
+        if owner in insecure or member in insecure:
+            raise ValueError(
+                "OWNER_TOKEN/MEMBER_TOKEN must be set to non-default secrets when "
+                f"APP_ENV={self.app_env!r}. Defaults owner-dev-token/member-dev-token "
+                "are public and allow full API access."
+            )
+        if owner == member:
+            raise ValueError("OWNER_TOKEN and MEMBER_TOKEN must be different values.")
+        return self
 
     @model_validator(mode="after")
     def openai_key_from_process_env(self) -> "Settings":

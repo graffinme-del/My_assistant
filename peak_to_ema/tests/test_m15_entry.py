@@ -52,3 +52,21 @@ def test_m15_entry_rejected_if_price_closes_above_ema20() -> None:
     res = evaluate_m15_entry(candles)
     assert res.ready is False
     assert res.reason in ("price_closed_above_ema20", "price_closed_above_pullback_high")
+
+
+def test_m15_entry_stop_clears_post_retest_swing_when_local_low_above_retest_high() -> None:
+    # Weak EMA retest, then bounce whose lows sit ABOVE the retest high, then breakdown.
+    # Previously stop used only the retest high, so entry (local_low - buffer) was >= stop.
+    candles = [_c(100.0, 100.05, 99.95, 100.0, 500)] * 20 + [
+        _c(99.98, 100.01, 99.90, 99.96, 520),   # retest fail (pullback_high=100.01)
+        _c(100.80, 100.85, 100.75, 100.82, 510),
+        _c(100.82, 100.90, 100.78, 100.85, 505),
+        _c(100.85, 100.92, 100.80, 100.88, 500),  # local_low=100.75 > retest high
+        _c(100.70, 100.75, 99.50, 99.70, 700),    # break local low, close below EMA
+    ]
+    res = evaluate_m15_entry(candles)
+    assert res.ready is True
+    assert res.local_low > 100.01
+    assert res.entry_trigger > 0
+    assert res.stop > res.entry_trigger
+    assert res.stop >= 100.92  # must clear the post-retest swing high (+ buffer)

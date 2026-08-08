@@ -11,6 +11,7 @@ import httpx
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
+from case_filing import pick_case_number_for_filing
 from parser_api_client import (
     case_dict_from_parser_case,
     extract_kad_pdf_url_entries_with_dates,
@@ -28,7 +29,13 @@ from moy_arbitr_client import (
 )
 
 API_BASE = os.getenv("WORKER_API_BASE", "http://api:8000").rstrip("/")
-OWNER_TOKEN = os.getenv("OWNER_TOKEN", "owner-dev-token")
+# Do not fall back to the public owner-dev-token default (full API access if leaked/deployed).
+OWNER_TOKEN = (os.getenv("OWNER_TOKEN") or "").strip()
+if not OWNER_TOKEN:
+    raise SystemExit(
+        "OWNER_TOKEN is required for the worker (set it in .env / .env.local). "
+        "Refusing the public default owner-dev-token."
+    )
 COURT_SYNC_ENABLED = os.getenv("COURT_SYNC_ENABLED", "true").lower() == "true"
 COURT_SYNC_NIGHT_HOUR = int(os.getenv("COURT_SYNC_NIGHT_HOUR", "2"))
 COURT_SYNC_MAX_DOCS_PER_RUN = int(os.getenv("COURT_SYNC_MAX_DOCS_PER_RUN", "200"))
@@ -733,7 +740,9 @@ def moy_arbitr_docs_from_parser_fallback(case_data: dict, case_number: str) -> t
     if cid:
         try:
             pdata = parser_details_by_id(cid)
-            entries = extract_kad_pdf_url_entries_with_dates(pdata or {})
+            entries = extract_kad_pdf_url_entries_with_dates(
+                pdata or {}, case_number=case_number or None
+            )
             notes.append(
                 f"details_by_id={cid[:8]}… Success={pdata.get('Success')} "
                 f"cases={len(pdata.get('Cases') or [])} urls={len(entries)}"
@@ -748,7 +757,9 @@ def moy_arbitr_docs_from_parser_fallback(case_data: dict, case_number: str) -> t
             except Exception as exc:
                 notes.append(f"details_by_number {variant!r}: {_safe_parser_diag_error(exc)}")
                 continue
-            entries = extract_kad_pdf_url_entries_with_dates(pdata or {})
+            entries = extract_kad_pdf_url_entries_with_dates(
+                pdata or {}, case_number=variant or case_number or None
+            )
             notes.append(
                 f"details_by_number={variant!r} Success={pdata.get('Success')} urls={len(entries)}"
             )
@@ -1728,7 +1739,7 @@ def download_documents_via_parser(
             lines.append(f"- Parser-API: Success != 1 для {num or rid}")
             continue
 
-        entries = extract_kad_pdf_url_entries_with_dates(details)
+        entries = extract_kad_pdf_url_entries_with_dates(details, case_number=num or None)
         d_lo, d_hi = _parser_pdf_date_bounds_for_job(job)
         urls, skipped_no_date = filter_pdf_urls_by_date_range(entries, d_lo, d_hi)
         if d_lo or d_hi:
@@ -1964,6 +1975,12 @@ def process_job(job: dict) -> None:
         card_url = case_data["card_url"]
         report_progress(job_id, "opening_case", f"Открываю карточку (одна сессия для страницы и скачивания): {card_url}")
         effective_preferred_id = preferred_case_id
+        case_num = (case_data.get("case_number") or "").strip()
+        # Prefer search-result number before any page scrape (mirrors Moy Arbitr path).
+        if case_num and not effective_preferred_id:
+            cid = ensure_case_id(case_num)
+            if cid:
+                effective_preferred_id = cid
         with sync_playwright() as pw:
             browser = pw.chromium.launch(
                 headless=True,
@@ -1979,11 +1996,13 @@ def process_job(job: dict) -> None:
             try:
                 page.goto(card_url, wait_until="domcontentloaded", timeout=nav_ms)
                 page.wait_for_timeout(2000)
-                case_hint = extract_case_number_from_page(page)
-                if case_hint and not effective_preferred_id:
-                    cid = ensure_case_id(case_hint)
-                    if cid:
-                        effective_preferred_id = cid
+                if not effective_preferred_id:
+                    case_hint = extract_case_number_from_page(page)
+                    chosen = pick_case_number_for_filing(case_num, case_hint)
+                    if chosen:
+                        cid = ensure_case_id(chosen)
+                        if cid:
+                            effective_preferred_id = cid
                 docs = open_kad_card_and_collect_docs(page, card_url, nav_ms)
             except Exception as exc:
                 failures += 1

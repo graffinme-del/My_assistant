@@ -574,7 +574,8 @@
 
       const storage = {
         get apiToken() {
-          return localStorage.getItem("apiToken") || "owner-dev-token";
+          // No hardcoded default: owner-dev-token is public and must not silently auth.
+          return localStorage.getItem("apiToken") || "";
         }
       };
       const CASE_SEL_STORAGE_KEY = "assistantSelectedCaseId";
@@ -722,7 +723,7 @@
       }
 
       function authApiHeaders() {
-        return { "X-API-Token": storage.apiToken || "owner-dev-token" };
+        return { "X-API-Token": storage.apiToken || "" };
       }
 
       async function fetchDocumentAsBlob(docId, { inline = false } = {}) {

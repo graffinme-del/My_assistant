@@ -93,6 +93,10 @@ from .duplicate_cleanup import (
     looks_like_cross_folder_duplicate_cleanup_request,
 )
 from .semantic_matter_collect import looks_like_semantic_matter_collect_request
+from .pending_move_intent import (
+    looks_like_pending_move_cancel,
+    looks_like_pending_move_confirmation,
+)
 from .materials_workflow import (
     handle_compare_documents_request,
     handle_extract_deadlines_request,
@@ -1188,16 +1192,6 @@ def looks_like_followup_current_archive_confirmation(text: str) -> bool:
             "именно из",
         ]
     )
-
-
-def looks_like_pending_move_confirmation(text: str) -> bool:
-    t = text.lower()
-    return any(k in t for k in ["да, перенеси", "перенеси все", "подтверждаю", "ок, перенеси", "да перенеси"])
-
-
-def looks_like_pending_move_rejection(text: str) -> bool:
-    t = text.lower()
-    return any(k in t for k in ["не относится", "кроме", "исключи", "не переноси", "убери"])
 
 
 def looks_like_semantic_workspace_clusters_request(text: str) -> bool:
@@ -3524,6 +3518,22 @@ def preview_move_all_documents_from_active_case_to_folder(
     return "\n".join(summary), case
 
 
+def cancel_pending_move_plan(db: Session) -> tuple[str, Case | None]:
+    """Discard the latest pending bulk-move list without moving documents."""
+    plan = db.query(PendingMovePlan).order_by(PendingMovePlan.created_at.desc()).first()
+    if not plan:
+        return "Нет активного списка на перенос — отменять нечего.", None
+    target_case = db.query(Case).filter(Case.id == plan.case_id).first()
+    db.delete(plan)
+    db.commit()
+    if target_case:
+        return (
+            f'Список переноса в «{target_case.title}» ({target_case.case_number}) сброшен. Документы не перемещал.',
+            target_case,
+        )
+    return "Список переноса сброшен. Документы не перемещал.", None
+
+
 def apply_pending_move_plan(db: Session, text: str) -> tuple[str, Case | None]:
     plan = db.query(PendingMovePlan).order_by(PendingMovePlan.created_at.desc()).first()
     if not plan:
@@ -5352,7 +5362,12 @@ async def assistant_ingest_text(
             refresh_summary=semantic_target is not None,
         )
 
-    if looks_like_pending_move_confirmation(text) or looks_like_pending_move_rejection(text):
+    if looks_like_pending_move_cancel(text):
+        reply_text, target_case = cancel_pending_move_plan(db)
+        case_for_reply = target_case if target_case is not None else get_or_create_unsorted_case(db)
+        return await finalize_reply(case=case_for_reply, reply_text=reply_text, mode="documents-bulk-move-cancelled")
+
+    if looks_like_pending_move_confirmation(text):
         reply_text, target_case = apply_pending_move_plan(db, text)
         case_for_reply = target_case if target_case is not None else get_or_create_unsorted_case(db)
         return await finalize_reply(case=case_for_reply, reply_text=reply_text, mode="documents-bulk-move-confirmed")

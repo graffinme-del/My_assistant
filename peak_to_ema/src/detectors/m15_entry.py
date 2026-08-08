@@ -203,7 +203,25 @@ def evaluate_m15_entry(
     # Soft mode (default): signal can fire on confirmed close below EMA20
     # without waiting for local low break.
     entry_trigger = (local_low - entry_buffer) if local_low_break else trigger_close
-    stop = pullback_high + stop_buffer
+    # Stop must clear the full post-retest swing, not only the retest candle high.
+    # Otherwise a bounce with local_low > retest high yields entry >= stop on break.
+    structure_high = max(
+        [pullback_high] + [_to_float(c.get("high")) for c in lows_slice]
+    )
+    stop = structure_high + stop_buffer
+    if entry_trigger <= 0 or stop <= entry_trigger:
+        return M15EntryResult(
+            ready=False,
+            ema20_retest_fail=True,
+            local_low_break=local_low_break,
+            local_low=local_low,
+            pullback_high=pullback_high,
+            entry_trigger=0.0,
+            stop=0.0,
+            atr_15m=atr_value,
+            price_above_ema20_15m=False,
+            reason="invalid_entry_stop",
+        )
 
     return M15EntryResult(
         ready=True,
