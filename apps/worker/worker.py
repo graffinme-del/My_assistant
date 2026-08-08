@@ -28,7 +28,13 @@ from moy_arbitr_client import (
 )
 
 API_BASE = os.getenv("WORKER_API_BASE", "http://api:8000").rstrip("/")
-OWNER_TOKEN = os.getenv("OWNER_TOKEN", "owner-dev-token")
+# Do not fall back to the public owner-dev-token default (full API access if leaked/deployed).
+OWNER_TOKEN = (os.getenv("OWNER_TOKEN") or "").strip()
+if not OWNER_TOKEN:
+    raise SystemExit(
+        "OWNER_TOKEN is required for the worker (set it in .env / .env.local). "
+        "Refusing the public default owner-dev-token."
+    )
 COURT_SYNC_ENABLED = os.getenv("COURT_SYNC_ENABLED", "true").lower() == "true"
 COURT_SYNC_NIGHT_HOUR = int(os.getenv("COURT_SYNC_NIGHT_HOUR", "2"))
 COURT_SYNC_MAX_DOCS_PER_RUN = int(os.getenv("COURT_SYNC_MAX_DOCS_PER_RUN", "200"))
