@@ -22,6 +22,7 @@ from .models import (
     CourtWatchProfile,
     Document,
 )
+from .watch_last_checked import should_update_watch_last_checked
 
 
 def create_watch_profile(
@@ -190,7 +191,7 @@ def complete_sync_job(db: Session, job_id: int, *, status: str, result: dict, re
             finished_at=datetime.utcnow(),
         )
     )
-    if job.watch_profile_id:
+    if job.watch_profile_id and should_update_watch_last_checked(status):
         profile = db.query(CourtWatchProfile).filter(CourtWatchProfile.id == job.watch_profile_id).first()
         if profile:
             profile.last_checked_at = datetime.utcnow()
