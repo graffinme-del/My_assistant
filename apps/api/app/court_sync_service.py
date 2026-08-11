@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from .assistant_context import add_conversation_message, get_or_create_conversation
 from .case_number import normalize_arbitr_case_number
 from .config import settings
+from .court_job_modes import DOCUMENT_INGEST_RUN_MODES
 from .models import (
     Case,
     CaseEvent,
@@ -490,7 +491,7 @@ def format_kad_download_count_answer(
         )
     else:
         n_saved = db.query(CourtDocumentSource).filter(CourtDocumentSource.local_document_id.isnot(None)).count()
-    q_latest = db.query(CourtSyncJob).filter(CourtSyncJob.run_mode == "download")
+    q_latest = db.query(CourtSyncJob).filter(CourtSyncJob.run_mode.in_(DOCUMENT_INGEST_RUN_MODES))
     if date_range:
         start, end = date_range
         q_latest = q_latest.filter(
@@ -603,7 +604,8 @@ def format_recent_download_jobs_status(
     stale_closed = mark_stale_running_court_sync_jobs(db)
     stale_hrs = max(1, int(settings.court_sync_stale_running_hours))
     q = db.query(CourtSyncJob).filter(
-        (CourtSyncJob.run_mode == "download") | (CourtSyncJob.query_type.like("moy_arbitr_%"))
+        (CourtSyncJob.run_mode.in_(DOCUMENT_INGEST_RUN_MODES))
+        | (CourtSyncJob.query_type.like("moy_arbitr_%"))
     )
     if date_range:
         start, end = date_range
