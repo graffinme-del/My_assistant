@@ -26,6 +26,7 @@ from moy_arbitr_client import (
     open_case_and_download_documents,
     search_moy_arbitr_cases,
 )
+from parser_download_gate import should_download_via_parser
 
 API_BASE = os.getenv("WORKER_API_BASE", "http://api:8000").rstrip("/")
 OWNER_TOKEN = os.getenv("OWNER_TOKEN", "owner-dev-token")
@@ -1924,7 +1925,7 @@ def process_job(job: dict) -> None:
     duplicates_skipped = 0
     lines = preview_lines[:]
 
-    if COURT_SYNC_USE_PARSER_API and run_mode == "download":
+    if should_download_via_parser(use_parser_api=COURT_SYNC_USE_PARSER_API, run_mode=run_mode):
         downloaded, discovered, failures, duplicates_skipped, lines = download_documents_via_parser(
             job, target_cases, preview_lines, results, preferred_case_id
         )
