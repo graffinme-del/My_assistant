@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from .ai_service import llm_system_user
 from .case_number import arbitr_case_number_lookup_keys, normalize_arbitr_case_number
 from .config import settings
+from .document_case_reassign import reassign_document_to_case
 from .models import Case, CaseEvent, CaseTag, Conversation, Document, PendingMovePlan
 
 
@@ -344,7 +345,7 @@ def _execute_semantic_moves(db: Session, target: Case, docs: list[Document]) -> 
         old_id = doc.case_id
         if old_id == target.id:
             continue
-        doc.case_id = target.id
+        reassign_document_to_case(db, doc, target.id)
         db.add(
             CaseEvent(
                 case_id=target.id,
