@@ -124,6 +124,7 @@ from .models import (
     Reminder,
     Task,
 )
+from .document_case_reassign import reassign_document_to_case
 from .retrieval import sync_document_chunks
 from .schemas import (
     CaseCreate,
@@ -3074,7 +3075,7 @@ def move_documents_by_chat_command(db: Session, text: str) -> str:
     moved: list[str] = []
     for doc in docs:
         old_case_id = doc.case_id
-        doc.case_id = target_case.id
+        reassign_document_to_case(db, doc, target_case.id)
         db.add(
             CaseEvent(
                 case_id=target_case.id,
@@ -3447,7 +3448,7 @@ def execute_move_all_documents_to_case_folder(db: Session, src: Case, target_tit
         return "Источник и папка назначения совпадают — перенос не нужен.", None
     for doc in docs:
         old_case_id = doc.case_id
-        doc.case_id = target_case.id
+        reassign_document_to_case(db, doc, target_case.id)
         db.add(
             CaseEvent(
                 case_id=target_case.id,
@@ -3561,7 +3562,7 @@ def apply_pending_move_plan(db: Session, text: str) -> tuple[str, Case | None]:
         if idx in alternate_moves:
             alt_case = alternate_moves[idx]
             old_case_id = doc.case_id
-            doc.case_id = alt_case.id
+            reassign_document_to_case(db, doc, alt_case.id)
             db.add(CaseEvent(case_id=alt_case.id, event_type="document_reclassified", body=f'Документ "{doc.filename}" перенесён по вашему уточнению.'))
             db.add(CaseEvent(case_id=old_case_id, event_type="document_reclassified", body=f'Документ "{doc.filename}" перенесён в дело "{alt_case.title}" по уточнению в чате.'))
             moved_total += 1
@@ -3572,7 +3573,7 @@ def apply_pending_move_plan(db: Session, text: str) -> tuple[str, Case | None]:
             excluded_docs.append((idx, doc))
             continue
         old_case_id = doc.case_id
-        doc.case_id = target_case.id
+        reassign_document_to_case(db, doc, target_case.id)
         db.add(CaseEvent(case_id=target_case.id, event_type="document_reclassified", body=f'Документ "{doc.filename}" перенесён по подтверждённому списку.'))
         db.add(CaseEvent(case_id=old_case_id, event_type="document_reclassified", body=f'Документ "{doc.filename}" перенесён в дело "{target_case.title}" по подтверждённому списку.'))
         moved_total += 1
@@ -3813,9 +3814,8 @@ def _move_all_case_content_to_target(db: Session, source: Case, target: Case) ->
     """Перенос документов (с чанками), задач, событий и тегов source → target. Возвращает число документов."""
     n = 0
     for doc in db.query(Document).filter(Document.case_id == source.id).all():
-        doc.case_id = target.id
+        reassign_document_to_case(db, doc, target.id)
         db.add(doc)
-        sync_document_chunks(db, doc)
         n += 1
     db.query(Task).filter(Task.case_id == source.id).update({Task.case_id: target.id}, synchronize_session=False)
     db.query(CaseEvent).filter(CaseEvent.case_id == source.id).update(

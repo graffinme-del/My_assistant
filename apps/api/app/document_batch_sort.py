@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from .ai_service import extract_case_number, match_case
 from .case_number import arbitr_case_number_lookup_keys, normalize_arbitr_case_number
 from .models import Case, CaseEvent, Document
-from .retrieval import sync_document_chunks
+from .document_case_reassign import reassign_document_to_case
 
 
 def find_case_by_arbitr_number(db: Session, extracted: str | None) -> Case | None:
@@ -117,7 +117,7 @@ def run_auto_sort_unsorted(
             continue
 
         old_case_id = doc.case_id
-        doc.case_id = matched_case.id
+        reassign_document_to_case(db, doc, matched_case.id)
         db.add(
             CaseEvent(
                 case_id=matched_case.id,
@@ -135,7 +135,6 @@ def run_auto_sort_unsorted(
                 body=f'Документ "{doc.filename}" перенесён в дело "{matched_case.title}" ({matched_case.case_number}).',
             )
         )
-        sync_document_chunks(db, doc)
         out.moved += 1
         if reason.startswith("case_number"):
             out.moved_by_case_number += 1
