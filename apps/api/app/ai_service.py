@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from .case_number import normalize_arbitr_case_number
 from .config import settings
+from .hearing_note import apply_hearing_date_to_case, looks_like_hearing_note
 from .models import Case, CaseEvent, CaseTag, Document, Task
 
 
@@ -110,22 +111,6 @@ async def llm_system_user(
     return str(msg).strip()
 
 
-def _extract_date(text: str) -> date | None:
-    match = re.search(r"(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?", text)
-    if not match:
-        return None
-    day = int(match.group(1))
-    month = int(match.group(2))
-    year_raw = match.group(3)
-    year = int(year_raw) if year_raw else date.today().year
-    if year < 100:
-        year += 2000
-    try:
-        return date(year, month, day)
-    except ValueError:
-        return None
-
-
 def build_case_summary(case: Case, events: list[CaseEvent], tasks: list[Task]) -> str:
     open_tasks = [t for t in tasks if t.status != "done"]
     latest_events = sorted(events, key=lambda e: e.created_at, reverse=True)[:3]
@@ -198,9 +183,7 @@ async def llm_digest_incoming_case_note(text: str, case_title: str) -> str:
 
 
 def parse_hearing_note(db: Session, case: Case, text: str) -> tuple[CaseEvent, list[Task], date | None]:
-    extracted_date = _extract_date(text)
-    if extracted_date:
-        case.next_hearing_date = extracted_date
+    extracted_date = apply_hearing_date_to_case(case, text)
 
     event = CaseEvent(case_id=case.id, event_type="hearing_note", body=text)
     db.add(event)
@@ -677,24 +660,7 @@ def extract_case_number(text: str) -> str | None:
     return None
 
 
-def looks_like_hearing_note(text: str) -> bool:
-    t = text.lower()
-    keywords = [
-        "отлож",
-        "заседан",
-        "судья",
-        "попросил",
-        "письменно",
-        "приобщ",
-        "доказательств",
-        "экземпляр",
-        "сопостав",
-        "залуч",
-    ]
-    if any(k in t for k in keywords):
-        return True
-    # Date-only hint.
-    return bool(re.search(r"\d{1,2}\.\d{1,2}", text))
+# looks_like_hearing_note импортируется из .hearing_note (реэкспорт для main.py).
 
 
 async def llm_document_routing(
