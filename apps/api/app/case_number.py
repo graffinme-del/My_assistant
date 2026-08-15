@@ -39,3 +39,18 @@ def arbitr_case_number_lookup_keys(value: str) -> list[str]:
     elif len(yr) == 2 and yr.isdigit():
         add(f"{base}/20{yr}")
     return out
+
+
+def find_matching_stored_case_number(requested: str, existing_numbers: list[str]) -> str | None:
+    """
+    Какой уже сохранённый номер — то же дело, что requested.
+    КАД часто отдаёт A40-123/25, а папка в приложении уже A40-123/2025 (и наоборот).
+    """
+    wanted = {normalize_arbitr_case_number(k) for k in arbitr_case_number_lookup_keys(requested)}
+    if not wanted:
+        return None
+    for num in existing_numbers:
+        stored = normalize_arbitr_case_number(num)
+        if stored in wanted:
+            return num
+    return None

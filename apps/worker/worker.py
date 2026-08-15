@@ -11,6 +11,7 @@ import httpx
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
+from case_filing import ingest_case_number_from_search_result
 from parser_api_client import (
     case_dict_from_parser_case,
     extract_kad_pdf_url_entries_with_dates,
@@ -1964,6 +1965,11 @@ def process_job(job: dict) -> None:
         card_url = case_data["card_url"]
         report_progress(job_id, "opening_case", f"Открываю карточку (одна сессия для страницы и скачивания): {card_url}")
         effective_preferred_id = preferred_case_id
+        search_case_num = ingest_case_number_from_search_result(case_data)
+        if search_case_num and not effective_preferred_id:
+            cid = ensure_case_id(search_case_num)
+            if cid:
+                effective_preferred_id = cid
         with sync_playwright() as pw:
             browser = pw.chromium.launch(
                 headless=True,
@@ -1979,11 +1985,13 @@ def process_job(job: dict) -> None:
             try:
                 page.goto(card_url, wait_until="domcontentloaded", timeout=nav_ms)
                 page.wait_for_timeout(2000)
-                case_hint = extract_case_number_from_page(page)
-                if case_hint and not effective_preferred_id:
-                    cid = ensure_case_id(case_hint)
-                    if cid:
-                        effective_preferred_id = cid
+                if not effective_preferred_id:
+                    page_hint = extract_case_number_from_page(page)
+                    case_hint = ingest_case_number_from_search_result(case_data, page_hint)
+                    if case_hint:
+                        cid = ensure_case_id(case_hint)
+                        if cid:
+                            effective_preferred_id = cid
                 docs = open_kad_card_and_collect_docs(page, card_url, nav_ms)
             except Exception as exc:
                 failures += 1
