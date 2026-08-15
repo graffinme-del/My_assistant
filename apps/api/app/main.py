@@ -280,15 +280,13 @@ def resolve_case_for_chat(
 ) -> Case:
     cases = db.query(Case).all()
     if preferred_case_number:
-        normalized_case_number = normalize_arbitr_case_number(preferred_case_number)
-        case = db.query(Case).filter(Case.case_number == normalized_case_number).first()
+        case = find_case_by_arbitr_number(db, preferred_case_number)
         if case:
             return case
 
     extracted_case_number = extract_case_number(text)
     if extracted_case_number:
-        normalized_case_number = normalize_arbitr_case_number(extracted_case_number)
-        case = db.query(Case).filter(Case.case_number == normalized_case_number).first()
+        case = find_case_by_arbitr_number(db, extracted_case_number)
         if case:
             return case
 
@@ -2707,7 +2705,10 @@ def internal_ensure_case_for_number(
     if user_role != "owner":
         raise HTTPException(status_code=403, detail="Owner token required")
     normalized = normalize_arbitr_case_number(case_number)
-    case = db.query(Case).filter(Case.case_number == normalized).first()
+    if not normalized:
+        raise HTTPException(status_code=400, detail="case_number is required")
+    # КАД часто отдаёт /25 при уже существующей папке /2025 — не создавать дубль.
+    case = find_case_by_arbitr_number(db, case_number)
     if not case:
         case = Case(
             title=f"Дело {normalized}",
@@ -5441,8 +5442,10 @@ async def assistant_ingest_text(
     extracted_case_number = payload.preferred_case_number or extract_case_number(text)
     created_case = False
     if extracted_case_number:
-        normalized_case_number = extracted_case_number.replace(" ", "").replace("\n", "")
-        case = db.query(Case).filter(Case.case_number == normalized_case_number).first()
+        normalized_case_number = normalize_arbitr_case_number(
+            extracted_case_number.replace(" ", "").replace("\n", "")
+        )
+        case = find_case_by_arbitr_number(db, extracted_case_number)
         if not case:
             if not payload.allow_case_create:
                 raise HTTPException(status_code=404, detail="Дело с таким номером не найдено.")
