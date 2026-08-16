@@ -1221,6 +1221,13 @@ def looks_like_semantic_workspace_clusters_request(text: str) -> bool:
     )
     if not any(x in t for x in triggers):
         return False
+    from .semantic_plan_intent import (
+        looks_like_semantic_plan_cancel as _sem_cancel,
+        looks_like_semantic_plan_confirm as _sem_confirm,
+    )
+
+    if _sem_confirm(text) or _sem_cancel(text):
+        return False
     hints = parse_merge_case_hints(text)
     if len(hints) >= 2 and looks_like_merge_cases_request(text):
         return False
@@ -1228,17 +1235,15 @@ def looks_like_semantic_workspace_clusters_request(text: str) -> bool:
 
 
 def looks_like_semantic_plan_confirm(text: str) -> bool:
-    t = (text or "").lower()
-    if not any(x in t for x in ("смысл", "по сути")):
-        return False
-    if any(k in t for k in ("объедин", "подтверж", "выполни", "соглас", "примени", "соглашаюсь")):
-        return True
-    return ("да" in t or "ок" in t) and "объедин" in t
+    from .semantic_plan_intent import looks_like_semantic_plan_confirm as _confirm
+
+    return _confirm(text)
 
 
 def looks_like_semantic_plan_cancel(text: str) -> bool:
-    t = (text or "").lower()
-    return ("отмен" in t and "смысл" in t) or "отмени смыслов" in t or "сбрось смыслов" in t
+    from .semantic_plan_intent import looks_like_semantic_plan_cancel as _cancel
+
+    return _cancel(text)
 
 
 def looks_like_chronology_request(text: str) -> bool:
@@ -4976,6 +4981,30 @@ async def assistant_ingest_text(
                 document_actions=actions_early,
             )
 
+    # Before the LLM router: a pending semantic plan must not be applied (or
+    # re-previewed) just because the model saw «смысл» / «подтверждаю».
+    if looks_like_semantic_plan_cancel(text):
+        from .matter_intelligence import cancel_pending_semantic_plan
+
+        reply_text, _ok = cancel_pending_semantic_plan(db, conversation_user_key(_))
+        return await finalize_reply(
+            case=get_or_create_unsorted_case(db),
+            reply_text=reply_text,
+            mode="semantic-plan-cancel",
+        )
+
+    if looks_like_semantic_plan_confirm(text):
+        from .matter_intelligence import apply_pending_semantic_plan
+
+        reply_text, semantic_target = apply_pending_semantic_plan(db, conversation_user_key(_))
+        case_for_reply = semantic_target if semantic_target is not None else get_or_create_unsorted_case(db)
+        return await finalize_reply(
+            case=case_for_reply,
+            reply_text=reply_text,
+            mode="semantic-plan-applied",
+            refresh_summary=semantic_target is not None,
+        )
+
     if settings.chat_tools_router_enabled and settings.openai_api_key.strip():
         try:
             from .chat_tools import run_chat_tools_router
@@ -5329,28 +5358,6 @@ async def assistant_ingest_text(
             )
         case_for_reply = target_case if target_case is not None else get_or_create_unsorted_case(db)
         return await finalize_reply(case=case_for_reply, reply_text=reply_text, mode="documents-bulk-move-by-keywords")
-
-    if looks_like_semantic_plan_cancel(text):
-        from .matter_intelligence import cancel_pending_semantic_plan
-
-        reply_text, _ok = cancel_pending_semantic_plan(db, conversation_user_key(_))
-        return await finalize_reply(
-            case=get_or_create_unsorted_case(db),
-            reply_text=reply_text,
-            mode="semantic-plan-cancel",
-        )
-
-    if looks_like_semantic_plan_confirm(text):
-        from .matter_intelligence import apply_pending_semantic_plan
-
-        reply_text, semantic_target = apply_pending_semantic_plan(db, conversation_user_key(_))
-        case_for_reply = semantic_target if semantic_target is not None else get_or_create_unsorted_case(db)
-        return await finalize_reply(
-            case=case_for_reply,
-            reply_text=reply_text,
-            mode="semantic-plan-applied",
-            refresh_summary=semantic_target is not None,
-        )
 
     if looks_like_pending_move_confirmation(text) or looks_like_pending_move_rejection(text):
         reply_text, target_case = apply_pending_move_plan(db, text)
