@@ -12,6 +12,11 @@ from sqlalchemy.orm import Session
 from .ai_service import extract_case_number, llm_system_user
 from .case_number import arbitr_case_number_lookup_keys, normalize_arbitr_case_number
 from .config import settings
+from .duplicate_cleanup_intent import (
+    has_duplicate_cleanup_execute_intent,
+    has_duplicate_cleanup_listed_preview_phrase,
+    is_duplicate_cleanup_dry_run,
+)
 from .models import Case, CaseEvent, Document
 
 GROUPS_PER_LLM_BATCH = 10
@@ -152,34 +157,12 @@ def looks_like_cross_folder_duplicate_cleanup_request(text: str) -> bool:
             "повторяющ",
         )
     )
-    action = any(
-        k in t
-        for k in (
-            "удали",
-            "убери",
-            "почисти",
-            "оставь од",
-            "один экземпляр",
-            "одну копию",
-            "одна копия",
-            "сотри",
-        )
-    )
+    # Imperative delete/clean, ignoring preview phrasing such as «что удалишь».
+    action = has_duplicate_cleanup_execute_intent(text)
     # «Удали папку А40-…» — удаление дела, не сценарий дубликатов (раньше ловилось из-за «удали» + «папк»).
     if looks_like_delete_case_folder_request(text) and not dup:
         return False
-    preview = any(
-        k in t
-        for k in (
-            "только список",
-            "без удаления",
-            "не удаляй",
-            "превью",
-            "покажи план",
-            "что удалишь",
-            "что удалится",
-        )
-    )
+    preview = has_duplicate_cleanup_listed_preview_phrase(text)
     if preview and not action:
         return True
     if (("покажи" in t) or ("выведи" in t)) and dup and not action:
@@ -273,23 +256,8 @@ async def _llm_decide_duplicate_chunk(
 async def handle_cross_folder_duplicate_cleanup_chat(db: Session, text: str) -> tuple[str, Case | None]:
     from .main import delete_documents_hard, get_or_create_unsorted_case
 
-    t = (text or "").lower()
     unsorted_case = get_or_create_unsorted_case(db)
-    dry_run = (
-        any(
-            k in t
-            for k in (
-                "только список",
-                "без удаления",
-                "не удаляй",
-                "превью",
-                "покажи план",
-                "что удалишь",
-                "что удалится",
-            )
-        )
-        and not any(k in t for k in ("удали", "убери", "почисти", "выполни удаление", "да, удали"))
-    ) or ("покажи" in t and not any(k in t for k in ("удали", "убери", "почисти")))
+    dry_run = is_duplicate_cleanup_dry_run(text)
 
     prefer = folder_preference_hint_from_text(text)
     heuristic_only = _heuristic_only_from_text(text)
