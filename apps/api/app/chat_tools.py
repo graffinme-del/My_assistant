@@ -73,6 +73,10 @@ CHAT_TOOLS: list[dict[str, Any]] = [
                 "Используй, когда пользователь говорит «удали этот документ и папку», «убери файл и само дело» "
                 "или ссылается на последний найденный документ. "
                 "document_ids возьми из последних сообщений ассистента в контексте (строки с [id]). "
+                "Если пользователь сказал в единственном числе («этот документ», «этот файл») и в контексте "
+                "несколько [id], передай только один id — тот, на который явно указывает пользователь; "
+                "если непонятно какой, не вызывай инструмент. "
+                "Несколько id — только при явной множественности («эти документы», «удали 214 и 287»). "
                 "Не вызывай, если нужно удалить только папку без привязки к конкретным id — тогда delete_case_folder."
             ),
             "parameters": {
@@ -320,7 +324,8 @@ def _router_system_prompt(db: Session, conversation: Conversation) -> str:
         "Вызови ровно один инструмент, только если запрос явно требует этого действия в приложении. "
         "Если пользователь просто общается, просит объяснить или обобщить без поиска по файлам, удаления папки, "
         "переноса в новую папку или работы с КАД — не вызывай инструменты.\n"
-        "Ссылкам «этот документ», «найденный файл» соответствуют номера в квадратных скобках [213] в последних сообщениях assistant.\n\n"
+        "Ссылкам «этот документ», «найденный файл» соответствуют номера в квадратных скобках [213] в последних сообщениях assistant. "
+        "Единственное число («этот документ») — это один файл; не подставляй все [id] из списка поиска.\n\n"
         f"Активная папка в чате: {active}\n"
         f"Известные папки (кратко):\n{catalog}\n\n"
         f"Последние реплики (новее внизу):\n{transcript}\n"
@@ -404,7 +409,12 @@ async def run_chat_tools_router(
         return reply_text, out_case or get_or_create_unsorted_case(db), "chat-tools-delete-empty-folders"
 
     if name == "delete_documents_and_folder":
-        from .main import execute_delete_documents_and_optional_folder, get_or_create_unsorted_case
+        from .delete_anaphora import resolve_anaphora_document_ids
+        from .main import (
+            execute_delete_documents_and_optional_folder,
+            get_or_create_unsorted_case,
+            parse_document_ids_for_delete_command,
+        )
 
         raw_ids = args.get("document_ids") or []
         try:
@@ -414,6 +424,15 @@ async def run_chat_tools_router(
         also = bool(args.get("also_delete_containing_folder"))
         if not doc_ids:
             return None
+        # Named ids in the user message ("удали документ 214") are explicit; otherwise
+        # singular «этот документ» must not wipe every [id] the model copied from context.
+        if not parse_document_ids_for_delete_command(user_message):
+            guarded, anaphora_err = resolve_anaphora_document_ids(user_message, doc_ids)
+            if anaphora_err:
+                return anaphora_err, get_or_create_unsorted_case(db), "chat-tools-delete-docs-and-folder"
+            doc_ids = guarded
+            if not doc_ids:
+                return None
         reply_text, out_case = execute_delete_documents_and_optional_folder(
             db,
             document_ids=doc_ids,

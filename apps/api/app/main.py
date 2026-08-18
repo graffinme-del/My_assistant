@@ -73,6 +73,10 @@ from .court_sync_service import (
     upsert_document_source,
 )
 from .config import settings
+from .delete_anaphora import (
+    looks_like_document_delete_anaphora,
+    resolve_anaphora_document_ids,
+)
 from .document_batch_sort import format_auto_sort_reply, run_auto_sort_unsorted
 from .participant_learning import (
     build_participant_context_for_llm,
@@ -1912,25 +1916,7 @@ def extract_document_ids_from_latest_assistant_message(db: Session, conversation
 
 
 def _looks_like_this_document_anaphora(text: str) -> bool:
-    t = (text or "").lower()
-    return any(
-        k in t
-        for k in (
-            "этот документ",
-            "эту документ",
-            "этот файл",
-            "эту загрузку",
-            "эти документы",
-            "эти файлы",
-            "тот документ",
-            "тот файл",
-            "найденн",
-            "из результата",
-            "из списка",
-            "показанн",
-            "выше ",
-        )
-    )
+    return looks_like_document_delete_anaphora(text)
 
 
 def _wants_delete_containing_folder(text: str) -> bool:
@@ -2022,7 +2008,10 @@ def handle_delete_documents_chat(
 
     doc_ids = parse_document_ids_for_delete_command(text)
     if not doc_ids and _looks_like_this_document_anaphora(text):
-        doc_ids = extract_document_ids_from_latest_assistant_message(db, conversation)
+        extracted = extract_document_ids_from_latest_assistant_message(db, conversation)
+        doc_ids, anaphora_err = resolve_anaphora_document_ids(text, extracted)
+        if anaphora_err:
+            return anaphora_err, fallback_case
     if doc_ids:
         if _wants_delete_containing_folder(text):
             return execute_delete_documents_and_optional_folder(
