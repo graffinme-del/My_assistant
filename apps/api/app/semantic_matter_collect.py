@@ -14,6 +14,7 @@ from .ai_service import llm_system_user
 from .case_number import arbitr_case_number_lookup_keys, normalize_arbitr_case_number
 from .config import settings
 from .models import Case, CaseEvent, CaseTag, Conversation, Document, PendingMovePlan
+from .semantic_collect_intent import wants_semantic_collect_preview_only
 
 
 def _strip_json_fence(raw: str) -> str:
@@ -181,29 +182,6 @@ def resolve_optional_source_case_only(
     return None
 
 
-def wants_semantic_collect_preview_only(text: str) -> bool:
-    """Явный запрос только показать кандидатов без переноса."""
-    t = (text or "").lower()
-    if "не только список" in t or "не только покажи" in t:
-        return False
-    return any(
-        m in t
-        for m in (
-            "только список",
-            "только покажи",
-            "без переноса",
-            "не переноси пока",
-            "не переносить пока",
-            "сначала покажи",
-            "сначала список",
-            "покажи кандидат",
-            "только кандидат",
-            "предпросмотр",
-            "без автоматического переноса",
-        )
-    )
-
-
 _TAG_KIND_ORDER = {"participant": 0, "judge": 1, "alias": 2, "keyword": 3}
 
 _STOP_TOKENS = frozenset(
@@ -363,44 +341,6 @@ def _execute_semantic_moves(db: Session, target: Case, docs: list[Document]) -> 
     if n:
         db.commit()
     return n
-
-
-def looks_like_semantic_matter_collect_request(text: str) -> bool:
-    """Перенос по смыслу/контексту во целевую папку со всех остальных."""
-    t = (text or "").lower()
-    triggers = (
-        "отсортируй",
-        "отсортир",
-        "по смыслу",
-        "по контекст",
-        "самостоятельно",
-        "относящиеся к делу",
-        "относящиеся к папк",
-        "все что относится",
-        "всё что относится",
-        "всех что относится",
-        "оставь только документ",
-        "оставь в папке только",
-        "собери все документ",
-        "соберите все документ",
-        "консолидир",
-        "сверни в одну папку",
-        "в одну папку по делу",
-        "по номеру дел",
-        "по номерам дел",
-        "перенеси подходящ",
-        "перенесите подходящ",
-        "просмотри всю папку",
-        "просмотри папку",
-        "просмотрите папку",
-    )
-    if not any(x in t for x in triggers):
-        return False
-    if not any(x in t for x in ("документ", "файл", "материал", "архив", "пдф", "pdf")):
-        return False
-    if "содержащ" in t and "создай папк" in t:
-        return False
-    return True
 
 
 def resolve_target_case_for_collect(
