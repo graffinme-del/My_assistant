@@ -92,7 +92,7 @@ from .duplicate_cleanup import (
     handle_cross_folder_duplicate_cleanup_chat,
     looks_like_cross_folder_duplicate_cleanup_request,
 )
-from .semantic_matter_collect import looks_like_semantic_matter_collect_request
+from .semantic_collect_intent import looks_like_semantic_matter_collect_request
 from .materials_workflow import (
     handle_compare_documents_request,
     handle_extract_deadlines_request,
