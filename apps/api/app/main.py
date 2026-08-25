@@ -74,6 +74,7 @@ from .court_sync_service import (
 )
 from .config import settings
 from .document_batch_sort import format_auto_sort_reply, run_auto_sort_unsorted
+from .reclassify_unsorted_intent import looks_like_reclassify_unsorted_request
 from .participant_learning import (
     build_participant_context_for_llm,
     describe_cases_for_disambiguation_prompt,
@@ -943,15 +944,6 @@ def looks_like_unsorted_tag_suggestion_request(text: str) -> bool:
     t = text.lower()
     return any(k in t for k in ["предлож", "подскажи", "придумай", "выдели"]) and any(
         k in t for k in ["теги", "алиасы", "ключевые слова", "неразобран", "unsorted"]
-    )
-
-
-def looks_like_reclassify_unsorted_request(text: str) -> bool:
-    t = text.lower()
-    if "автосорт" in t and ("неразобран" in t or "unsorted" in t):
-        return True
-    return any(k in t for k in ["разбери", "переразбери", "перенеси", "привяжи", "разложи"]) and any(
-        k in t for k in ["неразобран", "unsorted", "по тегам", "по делам", "по номеру", "по номерам"]
     )
 
 
