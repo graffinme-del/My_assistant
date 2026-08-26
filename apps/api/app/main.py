@@ -93,6 +93,7 @@ from .duplicate_cleanup import (
     looks_like_cross_folder_duplicate_cleanup_request,
 )
 from .semantic_matter_collect import looks_like_semantic_matter_collect_request
+from .semantic_collect_match import is_review_folder_without_collect_destination
 from .materials_workflow import (
     handle_compare_documents_request,
     handle_extract_deadlines_request,
@@ -244,6 +245,7 @@ def extract_case_hint_from_folder_phrase(text: str) -> str:
         r"(?:в|во)\s+отдельн(?:ую|ой)\s+папк[уеиоа]\s+" + _q,
         r"(?:в|во)\s+нов(?:ую|ой)\s+папк[уеиоа]\s+" + _q,
         r"создай(?:те)?\s+папк[уеиоа]\s+" + _q,
+        r"просмотр(?:и|ите)\s+(?:всю\s+)?папк[уеиоа]\s+" + _q,
         r"(?:в|во)\s+папк[еиу]\s+" + _q,
         r"в\s+дело\s+" + _q,
         r"к\s+делу\s+" + _q,
@@ -259,6 +261,7 @@ def extract_case_hint_from_folder_phrase(text: str) -> str:
         r"(?:в|во)\s+отдельн(?:ую|ой)\s+папк[уеиоа]\s+(.+?)" + _u_end,
         r"(?:в|во)\s+нов(?:ую|ой)\s+папк[уеиоа]\s+(.+?)" + _u_end,
         r"создай(?:те)?\s+папк[уеиоа]\s+(.+?)" + _u_end,
+        r"просмотр(?:и|ите)\s+(?:всю\s+)?папк[уеиоа]\s+(.+?)" + _u_end,
         r"(?:в|во)\s+папк[еиу]\s+(.+?)" + _u_end,
         r"\bв\s+дело\s+(.+?)" + _u_end,
         r"\bк\s+делу\s+(.+?)" + _u_end,
@@ -1097,6 +1100,7 @@ def looks_like_show_documents_in_folder_only(text: str) -> bool:
         for k in [
             "покажи",
             "покажите",
+            "просмотр",
             "список",
             "какие документ",
             "какие файлы",
@@ -4976,7 +4980,11 @@ async def assistant_ingest_text(
                 document_actions=actions_early,
             )
 
-    if settings.chat_tools_router_enabled and settings.openai_api_key.strip():
+    if (
+        settings.chat_tools_router_enabled
+        and settings.openai_api_key.strip()
+        and not is_review_folder_without_collect_destination(text)
+    ):
         try:
             from .chat_tools import run_chat_tools_router
 
