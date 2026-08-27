@@ -74,6 +74,12 @@ from .court_sync_service import (
 )
 from .config import settings
 from .document_batch_sort import format_auto_sort_reply, run_auto_sort_unsorted
+from .document_move_intent import (
+    looks_like_bulk_folder_move_request,
+    looks_like_manual_move_request,
+    parse_explicit_move_document_ids,
+    parse_manual_move_destination_hint,
+)
 from .participant_learning import (
     build_participant_context_for_llm,
     describe_cases_for_disambiguation_prompt,
@@ -955,13 +961,6 @@ def looks_like_reclassify_unsorted_request(text: str) -> bool:
     )
 
 
-def looks_like_manual_move_request(text: str) -> bool:
-    t = text.lower()
-    return any(k in t for k in ["перенеси", "перемести", "привяжи"]) and "дело" in t and any(
-        k in t for k in ["документ", "файл", "["]
-    )
-
-
 def looks_like_bulk_folder_by_keywords_request(text: str) -> bool:
     t = text.lower()
     if (
@@ -1118,29 +1117,7 @@ def looks_like_move_all_from_active_case_to_folder(text: str) -> bool:
         return False
     if looks_like_show_documents_in_folder_only(text):
         return False
-    t = text.lower()
-    if "содерж" in t:
-        return False
-    if "создай папк" in t or "создай дело" in t:
-        return False
-    if ("папк" not in t and "дело" not in t) or not any(k in t for k in ["документ", "файл", "материал"]):
-        return False
-    return any(
-        k in t
-        for k in [
-            "собери",
-            "соберите",
-            "в отдельную папку",
-            "все эти",
-            "эти документы",
-            "в папку",
-            "все документы",
-            "перенеси все",
-            "перенеси",
-            "назови",
-            "назовите",
-        ]
-    )
+    return looks_like_bulk_folder_move_request(text)
 
 
 def looks_like_current_archive_reference(text: str) -> bool:
@@ -3053,16 +3030,13 @@ def reclassify_unsorted_documents(db: Session) -> str:
 
 
 def move_documents_by_chat_command(db: Session, text: str) -> str:
-    doc_ids = [int(x) for x in re.findall(r"\[(\d+)\]", text)]
-    if not doc_ids:
-        doc_ids = [int(x) for x in re.findall(r"(?:документ|файл)\s+(\d+)", text, flags=re.IGNORECASE)]
+    doc_ids = parse_explicit_move_document_ids(text)
     if not doc_ids:
         return "Не вижу ID документов. Напишите, например: перенеси документ 4 в дело Банкротство АГМ"
 
-    m = re.search(r"в\s+дел[оау]\s+(.+)$", text, flags=re.IGNORECASE)
-    if not m:
+    case_hint = parse_manual_move_destination_hint(text)
+    if not case_hint:
         return "Не вижу, в какое дело переносить. Напишите: перенеси документ 4 в дело <название>"
-    case_hint = m.group(1).strip(" .:-")
     target_case = find_case_by_hint(db.query(Case).all(), case_hint, db=db)
     if not target_case:
         return f'Не нашёл дело по фразе "{case_hint}". Сначала добавьте теги/алиасы или уточните название дела.'
