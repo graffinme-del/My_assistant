@@ -74,6 +74,10 @@ from .court_sync_service import (
 )
 from .config import settings
 from .document_batch_sort import format_auto_sort_reply, run_auto_sort_unsorted
+from .document_id_parse import (
+    parse_document_ids_for_delete_command,
+    parse_document_ids_for_move_command,
+)
 from .participant_learning import (
     build_participant_context_for_llm,
     describe_cases_for_disambiguation_prompt,
@@ -1876,25 +1880,6 @@ def _extract_delete_target_phrases(text: str) -> list[str]:
     return out
 
 
-def parse_document_ids_for_delete_command(text: str) -> list[int]:
-    raw = text or ""
-    ids = [int(x) for x in re.findall(r"\[(\d+)\]", raw)]
-    ids.extend(int(x) for x in re.findall(r"(?i)\bdoc[.:]?\s*(\d+)\b", raw))
-    if ids:
-        return sorted(set(ids))
-    m = re.search(
-        r"(?:документы?|файлы?)(?:\s+(?:с\s+)?id|\s+№|\s+#)?\s*[:.]?\s*([\d\s,;и]+)",
-        text or "",
-        flags=re.IGNORECASE,
-    )
-    if m:
-        return sorted({int(x) for x in re.findall(r"\d+", m.group(1))})
-    m2 = re.search(r"(?:документ|файл)\s*(?:№|#)?\s*(\d+)\b", text or "", flags=re.IGNORECASE)
-    if m2:
-        return [int(m2.group(1))]
-    return []
-
-
 def extract_document_ids_from_latest_assistant_message(db: Session, conversation: Conversation) -> list[int]:
     """Id вида [213] из последнего ответа ассистента (поиск, список файлов) — для «удали этот документ»."""
     m = (
@@ -3053,9 +3038,7 @@ def reclassify_unsorted_documents(db: Session) -> str:
 
 
 def move_documents_by_chat_command(db: Session, text: str) -> str:
-    doc_ids = [int(x) for x in re.findall(r"\[(\d+)\]", text)]
-    if not doc_ids:
-        doc_ids = [int(x) for x in re.findall(r"(?:документ|файл)\s+(\d+)", text, flags=re.IGNORECASE)]
+    doc_ids = parse_document_ids_for_move_command(text)
     if not doc_ids:
         return "Не вижу ID документов. Напишите, например: перенеси документ 4 в дело Банкротство АГМ"
 
