@@ -86,7 +86,11 @@ from .participant_learning import (
     resolve_case_if_unique_participant_hint,
     template_participant_clarification_message,
 )
-from .ru_date_range import describe_calendar_period_ru, parse_calendar_period_ru
+from .ru_date_range import (
+    calendar_period_blocks_bulk_document_mutation,
+    describe_calendar_period_ru,
+    parse_calendar_period_ru,
+)
 from .db import Base, engine, get_db
 from .duplicate_cleanup import (
     handle_cross_folder_duplicate_cleanup_chat,
@@ -2045,6 +2049,15 @@ def handle_delete_documents_chat(
             lines.append(f"Не найдены id: {', '.join(str(i) for i in missing)}.")
         case_reply = db.query(Case).filter(Case.id == docs[0].case_id).first() or fallback_case
         return "\n".join(lines), case_reply
+
+    if calendar_period_blocks_bulk_document_mutation(text, explicit_document_ids=doc_ids):
+        return (
+            "Не удаляю файлы по дате вроде «вчера» / «сегодня» / «за последние 10 дней» — "
+            "это не номер документа и не команда очистить всю папку. "
+            "Укажите id: «удали документ 214» или «удали документы [12] [18]». "
+            "Чтобы очистить открытую папку целиком, напишите «удали все документы в этой папке» без указания даты.",
+            fallback_case,
+        )
 
     wants_all = any(
         w in low
@@ -5293,6 +5306,17 @@ async def assistant_ingest_text(
         return await finalize_reply(case=case_for_reply, reply_text=reply_text, mode="documents-bulk-move-recent-archive")
 
     if looks_like_move_all_from_active_case_to_folder(text):
+        if calendar_period_blocks_bulk_document_mutation(text):
+            unsorted_case = get_or_create_unsorted_case(db)
+            return await finalize_reply(
+                case=unsorted_case,
+                reply_text=(
+                    "Не переношу все файлы папки по дате вроде «вчера» / «сегодня» / «за последние 10 дней». "
+                    "Укажите id: «перенеси документ 214 в дело …». "
+                    "Чтобы перенести всю открытую папку, напишите без даты: «перенеси все документы в папку …»."
+                ),
+                mode="documents-bulk-move-date-refused",
+            )
         title = parse_collect_folder_title(text)
         if not title:
             title = parse_case_title_from_folder_request(text)

@@ -260,3 +260,21 @@ def describe_calendar_period_ru(text: str) -> str | None:
     """Короткая подпись для ответа пользователю; None если период не распознан."""
     r = _parse_calendar_period_ru_impl(text)
     return r[1] if r else None
+
+
+def looks_like_calendar_period_scoped_document_request(text: str) -> bool:
+    """True when the user scoped the request to сегодня/вчера/«за последние N дней»/ДД.ММ.ГГГГ."""
+    return parse_calendar_period_ru(text) is not None
+
+
+def calendar_period_blocks_bulk_document_mutation(
+    text: str, *, explicit_document_ids: list[int] | None = None
+) -> bool:
+    """Refuse folder-wide delete/move when a calendar period is present and no explicit [id] was given.
+
+    Chat used to treat «удали все документы за вчера в этой папке» as wipe-the-folder because
+    «все документы» matched wants_all and the date was ignored.
+    """
+    if explicit_document_ids:
+        return False
+    return looks_like_calendar_period_scoped_document_request(text)
