@@ -72,6 +72,13 @@ from .court_sync_service import (
     upsert_case_source,
     upsert_document_source,
 )
+from .calendar_week import (
+    DELETE_REFUSED_WEEK,
+    MOVE_REFUSED_WEEK,
+    parse_document_ids_for_delete_command,
+    parse_document_ids_for_move_command,
+    week_blocks_bulk_document_mutation,
+)
 from .config import settings
 from .document_batch_sort import format_auto_sort_reply, run_auto_sort_unsorted
 from .participant_learning import (
@@ -1876,25 +1883,6 @@ def _extract_delete_target_phrases(text: str) -> list[str]:
     return out
 
 
-def parse_document_ids_for_delete_command(text: str) -> list[int]:
-    raw = text or ""
-    ids = [int(x) for x in re.findall(r"\[(\d+)\]", raw)]
-    ids.extend(int(x) for x in re.findall(r"(?i)\bdoc[.:]?\s*(\d+)\b", raw))
-    if ids:
-        return sorted(set(ids))
-    m = re.search(
-        r"(?:документы?|файлы?)(?:\s+(?:с\s+)?id|\s+№|\s+#)?\s*[:.]?\s*([\d\s,;и]+)",
-        text or "",
-        flags=re.IGNORECASE,
-    )
-    if m:
-        return sorted({int(x) for x in re.findall(r"\d+", m.group(1))})
-    m2 = re.search(r"(?:документ|файл)\s*(?:№|#)?\s*(\d+)\b", text or "", flags=re.IGNORECASE)
-    if m2:
-        return [int(m2.group(1))]
-    return []
-
-
 def extract_document_ids_from_latest_assistant_message(db: Session, conversation: Conversation) -> list[int]:
     """Id вида [213] из последнего ответа ассистента (поиск, список файлов) — для «удали этот документ»."""
     m = (
@@ -2045,6 +2033,12 @@ def handle_delete_documents_chat(
             lines.append(f"Не найдены id: {', '.join(str(i) for i in missing)}.")
         case_reply = db.query(Case).filter(Case.id == docs[0].case_id).first() or fallback_case
         return "\n".join(lines), case_reply
+
+    if week_blocks_bulk_document_mutation(text, explicit_document_ids=doc_ids):
+        return (
+            DELETE_REFUSED_WEEK,
+            fallback_case,
+        )
 
     wants_all = any(
         w in low
@@ -3053,9 +3047,7 @@ def reclassify_unsorted_documents(db: Session) -> str:
 
 
 def move_documents_by_chat_command(db: Session, text: str) -> str:
-    doc_ids = [int(x) for x in re.findall(r"\[(\d+)\]", text)]
-    if not doc_ids:
-        doc_ids = [int(x) for x in re.findall(r"(?:документ|файл)\s+(\d+)", text, flags=re.IGNORECASE)]
+    doc_ids = parse_document_ids_for_move_command(text)
     if not doc_ids:
         return "Не вижу ID документов. Напишите, например: перенеси документ 4 в дело Банкротство АГМ"
 
@@ -5293,6 +5285,13 @@ async def assistant_ingest_text(
         return await finalize_reply(case=case_for_reply, reply_text=reply_text, mode="documents-bulk-move-recent-archive")
 
     if looks_like_move_all_from_active_case_to_folder(text):
+        if week_blocks_bulk_document_mutation(text):
+            unsorted_case = get_or_create_unsorted_case(db)
+            return await finalize_reply(
+                case=unsorted_case,
+                reply_text=MOVE_REFUSED_WEEK,
+                mode="documents-bulk-move-week-refused",
+            )
         title = parse_collect_folder_title(text)
         if not title:
             title = parse_case_title_from_folder_request(text)
