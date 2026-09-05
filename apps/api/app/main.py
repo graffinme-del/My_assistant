@@ -86,6 +86,11 @@ from .participant_learning import (
     resolve_case_if_unique_participant_hint,
     template_participant_clarification_message,
 )
+from .calendar_season import (
+    DELETE_REFUSED_SEASON,
+    MOVE_REFUSED_SEASON,
+    season_blocks_bulk_document_mutation,
+)
 from .ru_date_range import describe_calendar_period_ru, parse_calendar_period_ru
 from .db import Base, engine, get_db
 from .duplicate_cleanup import (
@@ -2045,6 +2050,12 @@ def handle_delete_documents_chat(
             lines.append(f"Не найдены id: {', '.join(str(i) for i in missing)}.")
         case_reply = db.query(Case).filter(Case.id == docs[0].case_id).first() or fallback_case
         return "\n".join(lines), case_reply
+
+    if season_blocks_bulk_document_mutation(text, explicit_document_ids=doc_ids):
+        return (
+            DELETE_REFUSED_SEASON,
+            fallback_case,
+        )
 
     wants_all = any(
         w in low
@@ -5293,6 +5304,13 @@ async def assistant_ingest_text(
         return await finalize_reply(case=case_for_reply, reply_text=reply_text, mode="documents-bulk-move-recent-archive")
 
     if looks_like_move_all_from_active_case_to_folder(text):
+        if season_blocks_bulk_document_mutation(text):
+            unsorted_case = get_or_create_unsorted_case(db)
+            return await finalize_reply(
+                case=unsorted_case,
+                reply_text=MOVE_REFUSED_SEASON,
+                mode="documents-bulk-move-season-refused",
+            )
         title = parse_collect_folder_title(text)
         if not title:
             title = parse_case_title_from_folder_request(text)
