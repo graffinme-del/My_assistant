@@ -21,8 +21,9 @@ _SEASON_ADJ = (
 _DEMONSTRATIVE = r"(?:это|эту|этот|этой|этом|прошл\w{0,4}|текущ\w{0,4}|данн\w{0,4})\s+"
 
 # «за лето», «за эту зиму», «на осень», «за сезон», «в этом сезоне».
+# Wrap the demonstrative: `{_DEMONSTRATIVE}?` would make only the trailing `\s+` optional.
 _PREP_SEASON = re.compile(
-    rf"(?:за|на|в|во)\s+{_DEMONSTRATIVE}?{_SEASON_NOUN}(?![а-яё])",
+    rf"(?:за|на|в|во)\s+(?:{_DEMONSTRATIVE})?{_SEASON_NOUN}(?![а-яё])",
     re.IGNORECASE,
 )
 
