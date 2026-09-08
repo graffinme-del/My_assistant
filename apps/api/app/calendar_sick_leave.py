@@ -56,7 +56,7 @@ _DEMONSTRATIVE_MATERNITY = re.compile(
 
 # «больничные документы» / «документы больничные» — collocation, not a folder title.
 _SICK_ADJ_DOCS = re.compile(
-    rf"(?:{_SICK_NOUN}\s+(?:документ|файл)|(?:документ|файл)\w*\s+{_SICK_NOUN})(?![а-яё])",
+    rf"(?:{_SICK_NOUN}\s+(?:документ|файл)\w*|(?:документ|файл)\w*\s+{_SICK_NOUN})(?![а-яё])",
     re.IGNORECASE,
 )
 
