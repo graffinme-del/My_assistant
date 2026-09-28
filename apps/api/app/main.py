@@ -86,6 +86,12 @@ from .participant_learning import (
     resolve_case_if_unique_participant_hint,
     template_participant_clarification_message,
 )
+from .calendar_evidence import (
+    DELETE_REFUSED_EVIDENCE,
+    MOVE_REFUSED_EVIDENCE,
+    evidence_blocks_bulk_document_mutation,
+    mask_evidence_ordinals,
+)
 from .ru_date_range import describe_calendar_period_ru, parse_calendar_period_ru
 from .db import Base, engine, get_db
 from .duplicate_cleanup import (
@@ -1882,14 +1888,15 @@ def parse_document_ids_for_delete_command(text: str) -> list[int]:
     ids.extend(int(x) for x in re.findall(r"(?i)\bdoc[.:]?\s*(\d+)\b", raw))
     if ids:
         return sorted(set(ids))
+    safe = mask_evidence_ordinals(raw)
     m = re.search(
         r"(?:документы?|файлы?)(?:\s+(?:с\s+)?id|\s+№|\s+#)?\s*[:.]?\s*([\d\s,;и]+)",
-        text or "",
+        safe,
         flags=re.IGNORECASE,
     )
     if m:
         return sorted({int(x) for x in re.findall(r"\d+", m.group(1))})
-    m2 = re.search(r"(?:документ|файл)\s*(?:№|#)?\s*(\d+)\b", text or "", flags=re.IGNORECASE)
+    m2 = re.search(r"(?:документ|файл)\s*(?:№|#)?\s*(\d+)\b", safe, flags=re.IGNORECASE)
     if m2:
         return [int(m2.group(1))]
     return []
@@ -2045,6 +2052,12 @@ def handle_delete_documents_chat(
             lines.append(f"Не найдены id: {', '.join(str(i) for i in missing)}.")
         case_reply = db.query(Case).filter(Case.id == docs[0].case_id).first() or fallback_case
         return "\n".join(lines), case_reply
+
+    if evidence_blocks_bulk_document_mutation(text, explicit_document_ids=doc_ids):
+        return (
+            DELETE_REFUSED_EVIDENCE,
+            fallback_case,
+        )
 
     wants_all = any(
         w in low
@@ -3055,7 +3068,8 @@ def reclassify_unsorted_documents(db: Session) -> str:
 def move_documents_by_chat_command(db: Session, text: str) -> str:
     doc_ids = [int(x) for x in re.findall(r"\[(\d+)\]", text)]
     if not doc_ids:
-        doc_ids = [int(x) for x in re.findall(r"(?:документ|файл)\s+(\d+)", text, flags=re.IGNORECASE)]
+        safe = mask_evidence_ordinals(text)
+        doc_ids = [int(x) for x in re.findall(r"(?:документ|файл)\s+(\d+)", safe, flags=re.IGNORECASE)]
     if not doc_ids:
         return "Не вижу ID документов. Напишите, например: перенеси документ 4 в дело Банкротство АГМ"
 
@@ -5293,6 +5307,13 @@ async def assistant_ingest_text(
         return await finalize_reply(case=case_for_reply, reply_text=reply_text, mode="documents-bulk-move-recent-archive")
 
     if looks_like_move_all_from_active_case_to_folder(text):
+        if evidence_blocks_bulk_document_mutation(text):
+            unsorted_case = get_or_create_unsorted_case(db)
+            return await finalize_reply(
+                case=unsorted_case,
+                reply_text=MOVE_REFUSED_EVIDENCE,
+                mode="documents-bulk-move-evidence-refused",
+            )
         title = parse_collect_folder_title(text)
         if not title:
             title = parse_case_title_from_folder_request(text)
