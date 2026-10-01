@@ -1,9 +1,10 @@
 """Explanation / license / certificate chat scope.
 
-Do not treat «за пояснение» / «с пояснениями» / «за пояснительную записку» /
-«за лицензию» / «по лицензии» / «за свидетельство» / «со свидетельством» as a
-folder wipe, and do not treat «1-го пояснения», «1-й лицензии», or
-«1-го свидетельства» as document id 1.
+Do not treat «за пояснение» / «за объяснение» / «с пояснениями» /
+«за пояснительную записку» / «за лицензию» / «по лицензии» /
+«за свидетельство» / «со свидетельством» as a folder wipe, and do not treat
+«1-го пояснения», «1-го объяснения», «1-й лицензии», or «1-го свидетельства»
+as document id 1.
 
 A folder titled «Пояснение», «Лицензия», or «Свидетельство» does not match.
 «без пояснений» and a bare «дай пояснение» do not match. «Требование» remains
@@ -14,9 +15,10 @@ from __future__ import annotations
 
 import re
 
-# «пояснение» and case forms. Same neuter -ение declension as «требование».
+# «пояснение» / «объяснение» and case forms. Same neuter -ение declension as «требование».
+# «разъяснение» is a different noun and is not matched.
 _NOUN_END = r"(?:ями|ях|ям|ем|й|ю|я|и|е)"
-_EXPL = rf"пояснени{_NOUN_END}"
+_EXPL = rf"(?:пояснени{_NOUN_END}|объяснени{_NOUN_END})"
 
 # «лицензия», «лицензии», «лицензию», «лицензией», «лицензиею», «лицензий»,
 # «лицензиям», «лицензиями», «лицензиях», and the compound «гослицензия».

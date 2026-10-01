@@ -69,6 +69,16 @@ class ExplanationScopeTests(unittest.TestCase):
         self.assertEqual(_pre_fix_parse_ids(text), [])
         self.assertEqual(_parse_ids_like_main(text), [])
         self.assertTrue(explanation_blocks_bulk_document_mutation(text))
+        synonym = "удали все документы за объяснение в этой папке"
+        self.assertIn("все документ", synonym.lower())
+        self.assertIn("в этой", synonym.lower())
+        self.assertEqual(_pre_fix_parse_ids(synonym), [])
+        self.assertTrue(explanation_blocks_bulk_document_mutation(synonym))
+        self.assertFalse(
+            looks_like_explanation_scoped_document_request(
+                "удали все документы за разъяснение в этой папке"
+            )
+        )
 
     def test_with_explanations_phrase_wipes_pre_fix(self) -> None:
         text = "удали все документы с пояснениями в этой папке"
@@ -134,6 +144,7 @@ class ExplanationScopeTests(unittest.TestCase):
         """Pre-fix: the leading ordinal digit was document id 1 and that file was hard-deleted."""
         samples = (
             "удали документы 1-го пояснения",
+            "удали документы 1-го объяснения",
             "удали документы 1-й лицензии",
             "удали документы 1-го свидетельства",
             "удали документы 1-й пояснительной записки",
