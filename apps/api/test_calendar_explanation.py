@@ -95,6 +95,7 @@ class ExplanationScopeTests(unittest.TestCase):
     def test_license_and_certificate_wipes_pre_fix(self) -> None:
         for text in (
             "удали все документы за лицензию в этой папке",
+            "удали все документы за гослицензию в этой папке",
             "удали все документы по лицензии в этой папке",
             "удали все документы с лицензией в этой папке",
             "удали все документы за свидетельство в этой папке",
@@ -183,7 +184,7 @@ class ExplanationScopeTests(unittest.TestCase):
         self.assertEqual(_parse_ids_like_main(text), [])
         self.assertEqual(_pre_fix_parse_ids("удали документ 214 за лицензию"), [214])
         self.assertEqual(_parse_ids_like_main("удали документ 214 за лицензию"), [214])
-        self.assertNotIn("214", mask_explanation_ordinals("удали документ 214 за свидетельство"))
+        self.assertIn("214", mask_explanation_ordinals("удали документ 214 за свидетельство"))
 
     def test_plain_folder_commands_are_not_scoped(self) -> None:
         for text in (
