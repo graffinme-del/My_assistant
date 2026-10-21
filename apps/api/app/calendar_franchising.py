@@ -1,13 +1,15 @@
-"""Franchising, franchisee, franchisor, royalty, grant, and dotation scope.
+"""Franchising, royalty, lump-sum fee, concession, grant, and dotation scope.
 
 Do not treat «за франчайзинг» / «за франчайзи» / «за франчайзера» / «за роялти» /
-«за грант» / «за дотацию» as a folder wipe, and do not treat «1-го роялти» /
-«100 гранта» / «12,5% дотации» / «214-го франчайзера» as a document id.
+«за паушальный взнос» / «за концессию» / «за грант» / «за дотацию» as a folder wipe,
+and do not treat «1-го роялти» / «100 гранта» / «12,5% дотации» /
+«214-го франчайзера» as a document id.
 
 A folder titled «Франчайзинг», «Роялти», «Грант», or «Дотация» does not match.
 «без роялти» does not match. Bare «банкротство» does not match.
 «франшиза» / «дивиденд» / «субсидия» do not match — those are a different guard.
 «субсидиарная» does not match. «иммигрант» / «рояль» / «грань» do not match.
+Bare «взнос» does not match.
 """
 
 from __future__ import annotations
@@ -35,6 +37,13 @@ _FRANCHISEE = r"франчайзи(?![а-яё])"
 _ROYALTY_ADJ = rf"роялтийн{_ADJ_END}"
 _ROYALTY = r"рояльти(?![а-яё])|роялти(?![а-яё])"
 
+# «паушальный» (взнос / платеж). Bare «взнос» is not this word.
+_LUMP_SUM = rf"паушальн{_ADJ_END}"
+
+# «концессия», «концессионный». «сессия» does not match.
+_CONCESSION_ADJ = rf"концессионн{_ADJ_END}"
+_CONCESSION_NOUN = r"концесси(?:ями|ях|ям|ею|ей|ю|и|е|я|й)?"
+
 # «грантовый», «грантополучатель», «микрогрант». «иммигрант» fails the letter boundary.
 _GRANT_RECIPIENT = r"грантополучател(?:ями|ях|ям|ею|ем|ей|ю|и|е|я|ь)"
 _GRANT_ADJ = rf"(?:микро)?грантов{_ADJ_END}"
@@ -46,7 +55,8 @@ _DOTATION_NOUN = r"дотаци(?:ями|ях|ям|ею|ей|ю|и|е|я|й)?"
 
 _TARGET = (
     rf"(?:{_FRANCHISING_ADJ}|{_FRANCHISING_NOUN}|{_FRANCHISOR}|{_FRANCHISOR_ZOR}|{_FRANCHISEE}"
-    rf"|{_ROYALTY_ADJ}|{_ROYALTY}|{_GRANT_RECIPIENT}|{_GRANT_ADJ}|{_GRANT_NOUN}"
+    rf"|{_ROYALTY_ADJ}|{_ROYALTY}|{_LUMP_SUM}|{_CONCESSION_ADJ}|{_CONCESSION_NOUN}"
+    rf"|{_GRANT_RECIPIENT}|{_GRANT_ADJ}|{_GRANT_NOUN}"
     rf"|{_DOTATION_ADJ}|{_DOTATION_NOUN})"
 )
 
@@ -189,8 +199,9 @@ _DOCS = re.compile(
 
 
 DELETE_REFUSED_REPLY = (
-    "Не удаляю файлы по виду «франчайзинг» / «франчайзи» / «франчайзер» / «роялти» / «грант» / «дотация» "
-    "вроде «за франчайзинг» / «за роялти» / «за грант» / «за дотацию» / «1-го роялти» — "
+    "Не удаляю файлы по виду «франчайзинг» / «франчайзи» / «франчайзер» / «роялти» / "
+    "«паушальный взнос» / «концессия» / «грант» / «дотация» "
+    "вроде «за роялти» / «за паушальный взнос» / «за концессию» / «за грант» / «1-го роялти» — "
     "это не номер документа и не команда очистить всю папку. "
     "Укажите id: «удали документ 214» или «удали документы [12] [18]». "
     "Чтобы очистить открытую папку целиком, напишите «удали все документы в этой папке» "
@@ -198,8 +209,9 @@ DELETE_REFUSED_REPLY = (
 )
 
 MOVE_REFUSED_REPLY = (
-    "Не переношу все файлы папки по виду «франчайзинг» / «франчайзи» / «франчайзер» / «роялти» / «грант» / «дотация» "
-    "вроде «за франчайзинг» / «за роялти» / «за грант» / «за дотацию». "
+    "Не переношу все файлы папки по виду «франчайзинг» / «роялти» / «паушальный взнос» / "
+    "«концессия» / «грант» / «дотация» "
+    "вроде «за роялти» / «за паушальный взнос» / «за концессию» / «за грант». "
     "Укажите id: «перенеси документ 214 в дело …». "
     "Чтобы перенести всю открытую папку, напишите без этих слов: "
     "«перенеси все документы в папку …»."
@@ -244,7 +256,8 @@ def franchising_blocks_bulk_document_mutation(
     because «все документы» matched wants_all and «в этой папке» (or a case
     number, or «текущ» / «открыт») selected the case. «удали документы 1-го
     роялти» took the first digit as a document id. The same path hits
-    «за франчайзинг», «за франчайзи», «за франчайзера», «за грант», and «за дотацию».
+    «за франчайзинг», «за франчайзи», «за франчайзера», «за паушальный взнос»,
+    «за концессию», «за грант», and «за дотацию».
     """
     if explicit_document_ids:
         return False
