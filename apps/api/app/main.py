@@ -87,11 +87,11 @@ from .participant_learning import (
     template_participant_clarification_message,
 )
 from .ru_date_range import describe_calendar_period_ru, parse_calendar_period_ru
-from .calendar_claim import (
+from .calendar_pretension import (
     DELETE_REFUSED_REPLY,
     MOVE_REFUSED_REPLY,
-    claim_blocks_bulk_document_mutation,
-    mask_claim_ordinals,
+    pretension_blocks_bulk_document_mutation,
+    mask_pretension_ordinals,
 )
 from .db import Base, engine, get_db
 from .duplicate_cleanup import (
@@ -1888,7 +1888,7 @@ def parse_document_ids_for_delete_command(text: str) -> list[int]:
     ids.extend(int(x) for x in re.findall(r"(?i)\bdoc[.:]?\s*(\d+)\b", raw))
     if ids:
         return sorted(set(ids))
-    safe = mask_claim_ordinals(raw)
+    safe = mask_pretension_ordinals(raw)
     m = re.search(
         r"(?:документы?|файлы?)(?:\s+(?:с\s+)?id|\s+№|\s+#)?\s*[:.]?\s*([\d\s,;и]+)",
         safe,
@@ -2053,7 +2053,7 @@ def handle_delete_documents_chat(
         case_reply = db.query(Case).filter(Case.id == docs[0].case_id).first() or fallback_case
         return "\n".join(lines), case_reply
 
-    if claim_blocks_bulk_document_mutation(text, explicit_document_ids=doc_ids):
+    if pretension_blocks_bulk_document_mutation(text, explicit_document_ids=doc_ids):
         return (
             DELETE_REFUSED_REPLY,
             fallback_case,
@@ -3068,7 +3068,7 @@ def reclassify_unsorted_documents(db: Session) -> str:
 def move_documents_by_chat_command(db: Session, text: str) -> str:
     doc_ids = [int(x) for x in re.findall(r"\[(\d+)\]", text)]
     if not doc_ids:
-        safe = mask_claim_ordinals(text)
+        safe = mask_pretension_ordinals(text)
         doc_ids = [int(x) for x in re.findall(r"(?:документ|файл)\s+(\d+)", safe, flags=re.IGNORECASE)]
     if not doc_ids:
         return "Не вижу ID документов. Напишите, например: перенеси документ 4 в дело Банкротство АГМ"
@@ -5307,12 +5307,12 @@ async def assistant_ingest_text(
         return await finalize_reply(case=case_for_reply, reply_text=reply_text, mode="documents-bulk-move-recent-archive")
 
     if looks_like_move_all_from_active_case_to_folder(text):
-        if claim_blocks_bulk_document_mutation(text):
+        if pretension_blocks_bulk_document_mutation(text):
             unsorted_case = get_or_create_unsorted_case(db)
             return await finalize_reply(
                 case=unsorted_case,
                 reply_text=MOVE_REFUSED_REPLY,
-                mode="documents-bulk-move-claim-refused",
+                mode="documents-bulk-move-pretension-refused",
             )
         title = parse_collect_folder_title(text)
         if not title:

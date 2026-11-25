@@ -16,12 +16,12 @@ import re
 import unittest
 from pathlib import Path
 
-from app.calendar_claim import (
+from app.calendar_pretension import (
     DELETE_REFUSED_REPLY,
     MOVE_REFUSED_REPLY,
-    claim_blocks_bulk_document_mutation,
-    looks_like_claim_scoped_document_request,
-    mask_claim_ordinals,
+    pretension_blocks_bulk_document_mutation,
+    looks_like_pretension_scoped_document_request,
+    mask_pretension_ordinals,
 )
 
 
@@ -31,7 +31,7 @@ def _parse_ids_like_main(text: str) -> list[int]:
     ids.extend(int(x) for x in re.findall(r"(?i)\bdoc[.:]?\s*(\d+)\b", raw))
     if ids:
         return sorted(set(ids))
-    safe = mask_claim_ordinals(raw)
+    safe = mask_pretension_ordinals(raw)
     m = re.search(
         r"(?:документы?|файлы?)(?:\s+(?:с\s+)?id|\s+№|\s+#)?\s*[:.]?\s*([\d\s,;и]+)",
         safe,
@@ -100,7 +100,7 @@ def _pre_fix_pdf_hint(text: str) -> str | None:
     return m2.group(1).strip()
 
 
-class ClaimFolderWipeTest(unittest.TestCase):
+class PretensionFolderWipeTest(unittest.TestCase):
     def test_pre_fix_folder_phrase_selects_active_case(self) -> None:
         samples = (
             "удали все документы за претензию в этой папке",
@@ -130,24 +130,24 @@ class ClaimFolderWipeTest(unittest.TestCase):
         for sample in samples:
             self.assertTrue(_pre_fix_selects_active_folder(sample), sample)
             self.assertTrue(_wants_all(sample), sample)
-            self.assertTrue(claim_blocks_bulk_document_mutation(sample), sample)
+            self.assertTrue(pretension_blocks_bulk_document_mutation(sample), sample)
 
         numbered = "удали все документы дела А40-12345/2025 за претензию"
         self.assertTrue(_wants_all(numbered), numbered)
         self.assertRegex(numbered, r"А40-12345/2025")
-        self.assertTrue(claim_blocks_bulk_document_mutation(numbered), numbered)
+        self.assertTrue(pretension_blocks_bulk_document_mutation(numbered), numbered)
         filing = "удали все документы дела А40-12345/2025 за предъявление претензии"
-        self.assertTrue(claim_blocks_bulk_document_mutation(filing), filing)
+        self.assertTrue(pretension_blocks_bulk_document_mutation(filing), filing)
 
         hint = "удали документы по предъявлению претензии"
         self.assertEqual(_pre_fix_pdf_hint(hint), "предъявлению претензии")
-        self.assertTrue(claim_blocks_bulk_document_mutation(hint), hint)
+        self.assertTrue(pretension_blocks_bulk_document_mutation(hint), hint)
         hinted_all = "удали все документы по сумме претензии"
         self.assertEqual(_pre_fix_pdf_hint(hinted_all), "сумме претензии")
-        self.assertTrue(claim_blocks_bulk_document_mutation(hinted_all), hinted_all)
+        self.assertTrue(pretension_blocks_bulk_document_mutation(hinted_all), hinted_all)
         single = "удали документы по претензии"
         self.assertIsNone(_pre_fix_pdf_hint(single))
-        self.assertTrue(claim_blocks_bulk_document_mutation(single), single)
+        self.assertTrue(pretension_blocks_bulk_document_mutation(single), single)
 
     def test_ordinal_is_not_a_document_id(self) -> None:
         samples = (
@@ -160,7 +160,7 @@ class ClaimFolderWipeTest(unittest.TestCase):
         for text, expected in samples:
             self.assertEqual(_pre_fix_parse_ids(text), expected, text)
             self.assertEqual(_parse_ids_like_main(text), [], text)
-            self.assertTrue(claim_blocks_bulk_document_mutation(text), text)
+            self.assertTrue(pretension_blocks_bulk_document_mutation(text), text)
         self.assertEqual(_pre_fix_parse_ids("удали документы 100 претензий"), [100])
         self.assertEqual(_parse_ids_like_main("удали документы 100 претензий"), [])
         self.assertEqual(_pre_fix_parse_ids("удали документы 100 убытков"), [100])
@@ -198,30 +198,30 @@ class ClaimFolderWipeTest(unittest.TestCase):
             "перемести документ 100 претензий в дело Архив",
         )
         for text in phrases:
-            self.assertTrue(claim_blocks_bulk_document_mutation(text), text)
+            self.assertTrue(pretension_blocks_bulk_document_mutation(text), text)
         kept = "перенеси документ 214 за претензию в дело Архив"
         kept_ids = [
             int(x)
             for x in re.findall(
                 r"(?:документ|файл)\s+(\d+)",
-                mask_claim_ordinals(kept),
+                mask_pretension_ordinals(kept),
                 flags=re.IGNORECASE,
             )
         ]
         self.assertEqual(kept_ids, [214])
         amount = "перенеси все документы дела А40-12345/2025 за 100 претензий в папку Архив"
-        masked = mask_claim_ordinals(amount)
+        masked = mask_pretension_ordinals(amount)
         self.assertIn("12345", masked)
         self.assertIn("2025", masked)
         self.assertNotIn("100", masked)
-        other = mask_claim_ordinals(
+        other = mask_pretension_ordinals(
             "перенеси все документы дела А40-12345/2025 за 100 убытков в папку Архив"
         )
         self.assertIn("100", other)
 
     def test_explicit_id_still_allowed(self) -> None:
         self.assertFalse(
-            claim_blocks_bulk_document_mutation(
+            pretension_blocks_bulk_document_mutation(
                 "удали документ 214 за претензию",
                 explicit_document_ids=[214],
             )
@@ -259,6 +259,11 @@ class ClaimFolderWipeTest(unittest.TestCase):
             "удали все документы за претензионный порядок в этой папке",
             "удали все документы за претензионную работу в этой папке",
             "удали все документы за претенциозный тон в этой папке",
+            "удали все документы за иск в этой папке",
+            "удали все документы за отзыв в этой папке",
+            "удали все документы за возражение в этой папке",
+            "удали все документы за протокол в этой папке",
+            "удали все документы за исполнительный лист в этой папке",
             "удали все документы за упущенную прибыль в этой папке",
             "удали все документы за наследство в этой папке",
             "удали все документы за упущенную выгоду в этой папке",
@@ -271,8 +276,8 @@ class ClaimFolderWipeTest(unittest.TestCase):
             "собери все документы в папку Претензия",
             "удали документ 214",
         ):
-            self.assertFalse(looks_like_claim_scoped_document_request(text), text)
-            self.assertFalse(claim_blocks_bulk_document_mutation(text), text)
+            self.assertFalse(looks_like_pretension_scoped_document_request(text), text)
+            self.assertFalse(pretension_blocks_bulk_document_mutation(text), text)
 
     def test_inflected_forms_are_scoped(self) -> None:
         phrases = (
@@ -318,7 +323,7 @@ class ClaimFolderWipeTest(unittest.TestCase):
         )
         for text in phrases:
             self.assertTrue(
-                looks_like_claim_scoped_document_request(
+                looks_like_pretension_scoped_document_request(
                     f"удали все документы {text} в этой папке"
                 ),
                 text,
@@ -330,17 +335,17 @@ class ClaimFolderWipeTest(unittest.TestCase):
             '"этой папк", "текущ", "открыт", "в этой", "из этой", "это дело"',
             source,
         )
-        self.assertIn("claim_blocks_bulk_document_mutation", source)
-        self.assertIn("mask_claim_ordinals", source)
+        self.assertIn("pretension_blocks_bulk_document_mutation", source)
+        self.assertIn("mask_pretension_ordinals", source)
         self.assertIn("DELETE_REFUSED_REPLY", source)
         self.assertIn("MOVE_REFUSED_REPLY", source)
         delete_fn = source.split("def handle_delete_documents_chat", 1)[1].split("\ndef ", 1)[0]
         self.assertLess(
-            delete_fn.index("claim_blocks_bulk_document_mutation"),
+            delete_fn.index("pretension_blocks_bulk_document_mutation"),
             delete_fn.index("wants_all = any"),
         )
         self.assertLess(
-            delete_fn.index("claim_blocks_bulk_document_mutation"),
+            delete_fn.index("pretension_blocks_bulk_document_mutation"),
             delete_fn.index("_extract_delete_target_phrases"),
         )
         wipe = delete_fn.split("wants_all = any", 1)[1]
@@ -349,14 +354,14 @@ class ClaimFolderWipeTest(unittest.TestCase):
             "\ndef ", 1
         )[0]
         self.assertLess(
-            parse_fn.index("mask_claim_ordinals"),
+            parse_fn.index("mask_pretension_ordinals"),
             parse_fn.index("re.search"),
         )
         move_fn = source.split("def move_documents_by_chat_command", 1)[1].split("\ndef ", 1)[0]
-        self.assertIn("mask_claim_ordinals", move_fn)
+        self.assertIn("mask_pretension_ordinals", move_fn)
         bulk = source.split("if looks_like_move_all_from_active_case_to_folder(text):", 1)[1]
         self.assertLess(
-            bulk.index("claim_blocks_bulk_document_mutation"),
+            bulk.index("pretension_blocks_bulk_document_mutation"),
             bulk.index("execute_move_all_documents_to_case_folder"),
         )
 

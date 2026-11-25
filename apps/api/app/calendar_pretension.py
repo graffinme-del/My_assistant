@@ -227,7 +227,7 @@ def _prepare(text: str) -> str:
     return (text or "").replace("ё", "е").replace("Ё", "Е")
 
 
-def mask_claim_ordinals(text: str) -> str:
+def mask_pretension_ordinals(text: str) -> str:
     """Replace «1-я претензия» so the digit is not a document id.
 
     Amounts run first so «12,5% претензии» is one token. The ordinal
@@ -238,7 +238,7 @@ def mask_claim_ordinals(text: str) -> str:
     return _ORDINAL_NUM.sub(" ", masked)
 
 
-def looks_like_claim_scoped_document_request(text: str) -> bool:
+def looks_like_pretension_scoped_document_request(text: str) -> bool:
     """True when the user scoped files to a claim («претензия»)."""
     raw = _prepare(text)
     return bool(
@@ -252,7 +252,7 @@ def looks_like_claim_scoped_document_request(text: str) -> bool:
     )
 
 
-def claim_blocks_bulk_document_mutation(
+def pretension_blocks_bulk_document_mutation(
     text: str, *, explicit_document_ids: list[int] | None = None
 ) -> bool:
     """Refuse folder-wide delete/move when a claim scope is present.
@@ -266,4 +266,4 @@ def claim_blocks_bulk_document_mutation(
     """
     if explicit_document_ids:
         return False
-    return looks_like_claim_scoped_document_request(text)
+    return looks_like_pretension_scoped_document_request(text)
